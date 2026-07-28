@@ -62,6 +62,12 @@ func registerTools(server *mcp.Server) {
 	registerListNotifications(server)
 	registerDisconnectPage(server)
 	registerUpdatePost(server)
+	// Posts search (scraping external pages) — UNDOCUMENTED
+	registerListSearchPosts(server)
+	registerListSourceResources(server)
+	registerGetParsingForm(server)
+	registerStartParsing(server)
+	registerStopParsing(server)
 }
 
 // --- helpers ---
@@ -914,6 +920,155 @@ func registerDeleteProxy(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			return jsonResult(resp)
+		},
+	)
+}
+
+// --- posts search (scraping external pages) — UNDOCUMENTED ---
+
+// --- list_search_posts ---
+
+type listSearchPostsInput struct {
+	Text             string `json:"text,omitempty" jsonschema:"Search by text content."`
+	DateFrom         string `json:"date_from,omitempty" jsonschema:"Filter by date from (dd.mm.yyyy)."`
+	DateTo           string `json:"date_to,omitempty" jsonschema:"Filter by date to (dd.mm.yyyy)."`
+	SourceType       int    `json:"source_type,omitempty" jsonschema:"Source type: 1=social, 2=RSS. 0=no filter."`
+	SourceID         int    `json:"source_id,omitempty" jsonschema:"Social network ID (1=VK, 7=Instagram, etc.). 0=no filter."`
+	SourceResourceID int    `json:"source_resource_id,omitempty" jsonschema:"Source resource ID (from list_source_resources). 0=no filter."`
+	OwnerID          int    `json:"owner_id,omitempty" jsonschema:"Page ID within source. 0=no filter."`
+	Page             int    `json:"page,omitempty" jsonschema:"Pagination page number."`
+}
+
+func registerListSearchPosts(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_list_search_posts",
+			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in listSearchPostsInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.ListSearchPosts(ctx, hooppy.SearchPostsFilter{
+				Text:             in.Text,
+				DateFrom:         in.DateFrom,
+				DateTo:           in.DateTo,
+				SourceType:       in.SourceType,
+				SourceID:         in.SourceID,
+				SourceResourceID: in.SourceResourceID,
+				OwnerID:          in.OwnerID,
+				Page:             in.Page,
+			})
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- list_source_resources ---
+
+func registerListSourceResources(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_list_source_resources",
+			Description: "List configured source resources — groups of external social media pages to scrape posts from. Each resource has an ID (needed for start_parsing), a name, and the URLs to scrape. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.ListSourceResources(ctx)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- get_parsing_form ---
+
+func registerGetParsingForm(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_parsing_status",
+			Description: "Check parsing status and get available source resources + social accounts that can act as parsers. Returns is_parsing_in_progress flag. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.GetParsingForm(ctx)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- start_parsing ---
+
+type startParsingInput struct {
+	SourceType       int `json:"source_type" jsonschema:"Source type: 1=social, 2=RSS."`
+	SearchType       int `json:"search_type" jsonschema:"Search method: 1=pages, 2=hashtag."`
+	SourceID         int `json:"source_id" jsonschema:"Social network ID (1=VK, 7=Instagram, etc.)."`
+	SourceResourceID int `json:"source_resource_id" jsonschema:"Source resource ID (from list_source_resources). REQUIRED."`
+	AccountID        int `json:"social_account_for_parsing_id,omitempty" jsonschema:"Social account ID to use as parser (from parsing_status). 0=no account."`
+	DateFrom         int `json:"date_from,omitempty" jsonschema:"Unix timestamp, 0=any date."`
+	DateTo           int `json:"date_to,omitempty" jsonschema:"Unix timestamp, 0=any date."`
+}
+
+func registerStartParsing(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_start_parsing",
+			Description: "Start scraping posts from an external source resource (a group of social media pages). Runs asynchronously — poll parsing_status to check completion, then list_search_posts to get results. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in startParsingInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.StartParsing(ctx, hooppy.ParsingStartPayload{
+				SourceType:                in.SourceType,
+				SearchType:                in.SearchType,
+				SourceID:                  in.SourceID,
+				SourceResourceID:          in.SourceResourceID,
+				SocialAccountForParsingID: in.AccountID,
+				DateFrom:                  in.DateFrom,
+				DateTo:                    in.DateTo,
+			})
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- stop_parsing ---
+
+func registerStopParsing(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_stop_parsing",
+			Description: "Stop any in-progress scraping job. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			if err := c.StopParsing(ctx); err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(map[string]bool{"success": true})
 		},
 	)
 }

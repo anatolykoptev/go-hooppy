@@ -178,6 +178,14 @@ hooppy proxies update 8335 --name "Renamed proxy" --ip 5.6.7.8
 hooppy proxies delete 8335
 hooppy notifications
 
+# Search and scrape posts from external social media pages (UNDOCUMENTED)
+hooppy search sources                          # list configured source resources
+hooppy search posts --source-resource-id 578   # list scraped posts from source 578
+hooppy search posts --source-resource-id 578 --text "Петербург" --date-from 27.07.2026
+hooppy search status                           # check if parsing is in progress
+hooppy search parse --source-resource-id 578 --account-id 94294  # start scraping
+hooppy search stop                             # stop in-progress scraping
+
 # Print MCP setup instructions
 hooppy mcp-config
 ```
@@ -243,6 +251,11 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 | `hooppy_delete_proxy` | Delete a proxy server |
 | `hooppy_list_notifications` | List publication notifications |
 | `hooppy_disconnect_page` | Disconnect a social media page |
+| `hooppy_list_search_posts` | List posts scraped from external pages (UNDOCUMENTED) |
+| `hooppy_list_source_resources` | List configured source resources to scrape from (UNDOCUMENTED) |
+| `hooppy_parsing_status` | Check scraping status + available parsers (UNDOCUMENTED) |
+| `hooppy_start_parsing` | Start scraping posts from an external source (UNDOCUMENTED) |
+| `hooppy_stop_parsing` | Stop in-progress scraping job (UNDOCUMENTED) |
 
 ## Social network source IDs
 
