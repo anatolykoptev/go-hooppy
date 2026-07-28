@@ -88,10 +88,26 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	// A value absent from `values` may still work; an empty `values` array
 	// does NOT mean the filter takes no argument. We therefore pass caller
 	// strings through verbatim and never hardcode a value enum.
+	// PhotosAmount and VideoDuration are bucket-key filters with a finite
+	// valid key space. The old `> 0` guard reproduced the exact defect this
+	// PR closed for the min_* fields: a negative value took neither branch —
+	// no error, no parameter, an unfiltered result that looks filtered. A
+	// negative bucket key is never valid, so reject it before any request.
+	// VideoDuration's valid keys were measured at 1-4 (each changes the
+	// result set; filters_plug values:[] is empty); reject anything outside
+	// that range with an error naming it. PhotosAmount's upper bound is not
+	// confirmed (5 was measured to filter), so only the negative hole is
+	// closed here — zero stays the unset sentinel.
+	if f.PhotosAmount < 0 {
+		return nil, fmt.Errorf("hooppy: ListSearchPosts: photos_amount must be a non-negative bucket key (got %d); pass 0 to leave unset or a positive key from the filters_plug descriptor", f.PhotosAmount)
+	}
 	if f.PhotosAmount > 0 {
 		params.Set("photos_amount", strconv.Itoa(f.PhotosAmount))
 	}
-	if f.VideoDuration > 0 {
+	if f.VideoDuration != 0 {
+		if f.VideoDuration < 1 || f.VideoDuration > 4 {
+			return nil, fmt.Errorf("hooppy: ListSearchPosts: video_duration must be in 1..4 (got %d); pass 0 to leave unset — keys 1-4 are the measured valid bucket keys (filters_plug values:[] is empty, see issue #63)", f.VideoDuration)
+		}
 		params.Set("video_duration", strconv.Itoa(f.VideoDuration))
 	}
 	if f.ContentTypes != "" {

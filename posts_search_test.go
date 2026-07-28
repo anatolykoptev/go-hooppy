@@ -165,6 +165,68 @@ func TestListSearchPosts_MetricFiltersRejected(t *testing.T) {
 	}
 }
 
+// TestListSearchPosts_VideoDurationOutOfRange covers issue #65 item 2:
+// VideoDuration is a bucket-key filter (measured valid keys 1-4) gated on
+// `> 0` — the same hole this PR closed for the min_* fields. A negative
+// value took neither branch: no error, no parameter, an unfiltered result
+// that looks filtered. The guard now rejects anything outside 1-4 (and
+// zero stays the unset sentinel) BEFORE any request is issued. A value
+// above 4 is rejected too — it is not a measured valid key and would be
+// silently ignored by the server, returning an unfiltered result.
+func TestListSearchPosts_VideoDurationOutOfRange(t *testing.T) {
+	cases := []struct {
+		name string
+		f    SearchPostsFilter
+	}{
+		{"negative", SearchPostsFilter{VideoDuration: -1}},
+		{"above range", SearchPostsFilter{VideoDuration: 5}},
+	}
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reached = false
+			_, err := c.ListSearchPosts(context.Background(), tc.f)
+			if err == nil {
+				t.Fatalf("ListSearchPosts with VideoDuration=%d: expected an error, got nil — a value outside 1-4 must be rejected before any request (issue #65 item 2)", tc.f.VideoDuration)
+			}
+			if reached {
+				t.Fatalf("ListSearchPosts with VideoDuration=%d: the guard issued a request before erroring — rejection MUST happen before any request is issued", tc.f.VideoDuration)
+			}
+		})
+	}
+}
+
+// TestListSearchPosts_PhotosAmountNegative covers issue #65 item 2: the
+// pre-existing PhotosAmount `> 0` guard had the same silent-negative hole
+// as VideoDuration — a negative value fell through to an unfiltered result
+// with no error. The guard now rejects negatives before any request; zero
+// stays the unset sentinel and positive values are passed through (the
+// upper bound is not confirmed — 5 was measured to filter).
+func TestListSearchPosts_PhotosAmountNegative(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{PhotosAmount: -1})
+	if err == nil {
+		t.Fatal("ListSearchPosts with PhotosAmount=-1: expected an error, got nil — a negative bucket key must be rejected before any request (issue #65 item 2)")
+	}
+	if reached {
+		t.Fatal("ListSearchPosts with PhotosAmount=-1: the guard issued a request before erroring — rejection MUST happen before any request is issued")
+	}
+}
+
 // TestListSearchPosts_FilterVocabularyPinned covers issue #63 (c): the
 // /posts-search endpoint publishes its real filter vocabulary in every
 // response's filters_plug array (one entry per valid filter, keyed by

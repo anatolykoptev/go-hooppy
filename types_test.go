@@ -186,6 +186,13 @@ func TestSearchPost_ParseMetrics(t *testing.T) {
 	}{
 		{"separated integer", "334,881", 334881},
 		{"bare integer", "864", 864},
+		// 4+ digit ungrouped integers MUST be accepted: the prior regex
+		// capped the ungrouped branch at [1-9]\d{0,2}, rejecting "1000"
+		// and "334881" — legitimate plain integers the function's own doc
+		// comment and error text promise to accept. Without these cases the
+		// false-rejection bug is invisible (issue #65 item 1).
+		{"four-digit ungrouped", "1000", 1000},
+		{"six-digit ungrouped", "334881", 334881},
 		{"zero", "0", 0},
 		{"empty string", "", 0},
 		{"malformed", "12abc", -1}, // -1 sentinel: expect an error, not 0
@@ -236,6 +243,12 @@ func TestSearchPost_ParseMetrics(t *testing.T) {
 	}{
 		{"decimal ratio", "0.520", 0.520},
 		{"separated decimal ratio", "1,234.56", 1234.56},
+		// A 4+-digit integer-part decimal MUST be accepted: the prior regex
+		// capped the ungrouped branch at [1-9]\d{0,2}, so "1234.56" was
+		// rejected — a legitimate value the function's doc comment promises
+		// to accept. Without this case the false-rejection bug is invisible
+		// (issue #65 item 1).
+		{"ungrouped 4-digit-int decimal", "1234.56", 1234.56},
 		{"bare integer ratio", "2", 2.0},
 		{"zero", "0", 0},
 		{"empty string", "", 0},
