@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 
 	"github.com/anatolykoptev/go-hooppy"
 	mcpserver "github.com/anatolykoptev/go-mcpserver"
@@ -164,11 +162,6 @@ func registerListPosts(server *mcp.Server) {
 }
 
 // --- create_post ---
-
-type postTextInput struct {
-	Text     string `json:"text" jsonschema:"Post text content."`
-	SourceID int    `json:"source_id,omitempty" jsonschema:"Social network this text is for. 0=shared across all selected networks."`
-}
 
 type createPostInput struct {
 	Text             string `json:"text" jsonschema:"Post text. Published to all selected pages with source_id=0 (shared)."`
@@ -393,7 +386,3 @@ func registerListSchedules(server *mcp.Server) {
 		},
 	)
 }
-
-// suppress unused import warnings for strings/strconv until more tools are added
-var _ = strings.Split
-var _ = strconv.Itoa

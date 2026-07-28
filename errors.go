@@ -15,7 +15,12 @@ type APIError struct {
 }
 
 func newAPIError(resp *http.Response) *APIError {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	const maxErrBody = 1 << 20 // 1 MB
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBody+1))
+	truncated := int64(len(body)) > maxErrBody
+	if truncated {
+		body = body[:maxErrBody]
+	}
 	ae := &APIError{
 		StatusCode: resp.StatusCode,
 		Body:       body,
@@ -31,6 +36,9 @@ func newAPIError(resp *http.Response) *APIError {
 	}
 	if ae.Message == "" && len(body) > 0 {
 		ae.Message = string(body)
+	}
+	if truncated {
+		ae.Message += "... (truncated)"
 	}
 	return ae
 }
