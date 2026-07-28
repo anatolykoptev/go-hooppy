@@ -78,8 +78,21 @@ func (c *Client) DeletePost(ctx context.Context, id int) (*DeletePostResponse, e
 	return &resp, nil
 }
 
+// MaxBatchDeleteIDs is the maximum number of post IDs allowed in a single
+// BatchDeletePosts call. Requests exceeding this limit are rejected to
+// prevent unbounded request body size.
+const MaxBatchDeleteIDs = 1000
+
 // BatchDeletePosts removes multiple posts by ID. IDs are joined with commas.
+// A maximum of MaxBatchDeleteIDs IDs (1000) may be passed in a single call;
+// larger batches must be split by the caller.
 func (c *Client) BatchDeletePosts(ctx context.Context, ids []int) (*DeletePostResponse, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("hooppy: BatchDeletePosts requires at least one ID")
+	}
+	if len(ids) > MaxBatchDeleteIDs {
+		return nil, fmt.Errorf("hooppy: BatchDeletePosts received %d IDs, max is %d — split into multiple calls", len(ids), MaxBatchDeleteIDs)
+	}
 	strs := make([]string, len(ids))
 	for i, id := range ids {
 		strs[i] = strconv.Itoa(id)

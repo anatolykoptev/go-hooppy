@@ -172,12 +172,25 @@ func TestBatchDeletePosts_EmptySlice(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
-	resp, err := c.BatchDeletePosts(context.Background(), []int{})
-	if err != nil {
-		t.Fatalf("BatchDeletePosts: %v", err)
+	_, err := c.BatchDeletePosts(context.Background(), []int{})
+	if err == nil {
+		t.Fatal("expected error for empty ID slice")
 	}
-	if resp == nil {
-		t.Fatal("expected non-nil response")
+}
+
+func TestBatchDeletePosts_ExceedsMax(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	ids := make([]int, MaxBatchDeleteIDs+1)
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	_, err := c.BatchDeletePosts(context.Background(), ids)
+	if err == nil {
+		t.Fatal("expected error for exceeding max batch size")
 	}
 }
 
