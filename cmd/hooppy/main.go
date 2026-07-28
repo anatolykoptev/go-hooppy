@@ -810,8 +810,8 @@ func registerSearch(root *cobra.Command) {
 	postsCmd.Flags().Float64Var(&sMinInvolvement, "min-involvement", 0, "DEPRECATED/no-op: the API has no min-involvement filter; use --sort-by involvement instead (setting this errors)")
 	postsCmd.Flags().IntVar(&sPhotosAmount, "photos-amount", 0, "exact photo count")
 	postsCmd.Flags().IntVar(&sVideoDuration, "video-duration", 0, "video duration bucket (see filters_plug values in the response)")
-	postsCmd.Flags().StringVar(&sContentTypes, "content-types", "", "comma-separated content types to include: photos, videos, audios, documents, links")
-	postsCmd.Flags().StringVar(&sContentTypesExclude, "content-types-exclude", "", "comma-separated content types to exclude")
+	postsCmd.Flags().StringVar(&sContentTypes, "content-types", "", "comma-separated content types to include: text, photos, videos, audios, links, documents (authoritative list is the content_types entry of filters_plug in any /posts-search response; that list may under-report — e.g. `documents` works yet is sometimes omitted)")
+	postsCmd.Flags().StringVar(&sContentTypesExclude, "content-types-exclude", "", "comma-separated content types to exclude: text, photos, videos, audios, links, documents (see --content-types caveat; the filters_plug list may under-report)")
 	postsCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.ListSearchPosts(context.Background(), hooppy.SearchPostsFilter{

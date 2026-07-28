@@ -64,7 +64,17 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	if f.SortDirection != "" {
 		params.Set("sort_direction", f.SortDirection)
 	}
-	// Content filters (each is a real filters_plug slug).
+	// Content filters. Each slug below is a real filters_plug entry, but
+	// the descriptor is authoritative ONLY for slugs — it is advisory for
+	// values. Measured against a live response:
+	//   - content_types ships values [text, photos, videos, audios, links]
+	//     yet `documents` is a working value the descriptor omits, and
+	//     `text` is accepted (returns the unfiltered count).
+	//   - photos_amount and video_duration ship values: [] (empty), so the
+	//     valid keys are NOT discoverable from the descriptor at all.
+	// A value absent from `values` may still work; an empty `values` array
+	// does NOT mean the filter takes no argument. We therefore pass caller
+	// strings through verbatim and never hardcode a value enum.
 	if f.PhotosAmount > 0 {
 		params.Set("photos_amount", strconv.Itoa(f.PhotosAmount))
 	}

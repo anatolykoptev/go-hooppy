@@ -150,6 +150,15 @@ func TestListSearchPosts_MetricFiltersRejected(t *testing.T) {
 // demonstrably work. This is the test that would have caught the five
 // invented min_* names on the day they were written, and keeps catching a
 // vendor rename.
+//
+// This test asserts SLUGS, not VALUES, on purpose. The descriptor's
+// `values` arrays are advisory, not authoritative: measured against a live
+// response, `documents` is a working content_types value the descriptor
+// omits, and photos_amount/video_duration ship values:[] (empty) yet accept
+// arguments. Asserting values here would couple the test to a non-exhaustive
+// list and force a false "improvement" — do NOT tighten this into a value
+// check. See the content-filters comment in posts_search.go for the measured
+// evidence.
 func TestListSearchPosts_FilterVocabularyPinned(t *testing.T) {
 	// Realistic filters_plug fixture: the complete descriptor measured from
 	// the live API. No account identifiers — only the vendor's filter schema.
