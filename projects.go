@@ -104,7 +104,7 @@ func (c *Client) ListAllSchedules(ctx context.Context) ([]Schedule, error) {
 // served a truncated list. See NewAllListEnvelope for the specific failure
 // this catches and the ones it does not.
 func (c *Client) ListAllSchedulesWithTotal(ctx context.Context) ([]Schedule, int, error) {
-	var all []Schedule
+	all := make([]Schedule, 0)
 	var totalRows int
 	for page := 1; ; page++ {
 		if page > maxListAllPages {
@@ -138,7 +138,7 @@ func (c *Client) ListAllProjects(ctx context.Context) ([]Project, error) {
 // ListAllProjectsWithTotal is ListAllProjects but also returns the server's
 // last-seen total_rows. See ListAllSchedulesWithTotal.
 func (c *Client) ListAllProjectsWithTotal(ctx context.Context) ([]Project, int, error) {
-	var all []Project
+	all := make([]Project, 0)
 	var totalRows int
 	for page := 1; ; page++ {
 		if page > maxListAllPages {
@@ -194,6 +194,9 @@ type AllListEnvelope struct {
 // the unique-count is meaningless without it. This is consistent with the
 // fail-loud choice already made for maxListAllPages.
 func NewAllListEnvelope[T any](list []T, totalRows int, idFunc func(T) int) (AllListEnvelope, error) {
+	if idFunc == nil {
+		return AllListEnvelope{}, fmt.Errorf("hooppy: NewAllListEnvelope requires a non-nil idFunc — the unique-count check is meaningless without it")
+	}
 	unique := make(map[int]struct{}, len(list))
 	for _, item := range list {
 		unique[idFunc(item)] = struct{}{}

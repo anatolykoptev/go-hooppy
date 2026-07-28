@@ -78,7 +78,7 @@ func (c *Client) ListAllPosts(ctx context.Context, f ListPostsFilter) ([]Post, e
 // to NewAllListEnvelope. See projects.ListAllSchedulesWithTotal and
 // NewAllListEnvelope for what the envelope catches and what it does not.
 func (c *Client) ListAllPostsWithTotal(ctx context.Context, f ListPostsFilter) ([]Post, int, error) {
-	var all []Post
+	all := make([]Post, 0)
 	var totalRows int
 	for page := 1; ; page++ {
 		if page > maxListAllPages {
@@ -137,7 +137,7 @@ func (c *Client) UpdatePost(ctx context.Context, id int, payload interface{}) (*
 // endpoints:
 //   - SelectedPagesBySourceIDs: the post's currently selected page IDs,
 //     grouped as {source_id: [page_id, ...]}. For a schedule-driven post
-//     (publication_where_type=1) this is {} — pages come from the schedule.
+//     (publication_when_type=3) this is {} — pages come from the schedule.
 //   - AllPagesIDsBySourceIDs: the full menu of pages available to select,
 //     grouped the same way (used by the Hooppy UI to render the picker).
 //
@@ -171,22 +171,6 @@ func (c *Client) GetPostEdit(ctx context.Context, postID int) (*PostEditResponse
 	return &resp, nil
 }
 
-// scheduleDrivenWhereType is the publication_where_type value measured on
-// the live account as schedule-driven: every scheduled post carries
-// publication_where_type=1 with an EMPTY selected_pages_by_source_ids, and
-// the page list those posts report is the SCHEDULE's page list (when a page
-// is removed from the schedule, every pending post belonging to it loses
-// that page too, in one step, with no write to any post). A post already
-// published keeps its original page list — a frozen snapshot, unaffected by
-// the schedule changing afterwards.
-//
-// This is the ONLY publication_where_type value verified as safe for
-// UpdatePostText to send back with an empty selected_pages_by_source_ids.
-// The Nuxt web bundle labels this value "Страницы" (Pages) in the
-// schedule form; on a post it means page targets come from the schedule,
-// not from the post's own selection.
-const scheduleDrivenWhereType = 1
-
 // UpdatePostText is a high-level helper that changes ONLY the text of an
 // existing post while preserving its schedule, project, attachments, page
 // targets, and publication settings. It fetches the current post state via
@@ -194,27 +178,35 @@ const scheduleDrivenWhereType = 1
 // (keeping every entry's SourceID), and sends the full payload back via
 // PUT /posts/{id}.
 //
-// Verified publication_where_type values:
-//   - 1 (schedule-driven, measured): page targets come from the schedule,
-//     so selected_pages_by_source_ids is empty and sending it back is
-//     harmless. This is NOT a guess or one of two plausible readings — it
-//     is the only behaviour observed on the live account (see
-//     scheduleDrivenWhereType).
+// Page-target guard: a schedule-driven post (publication_when_type=3, by
+// schedule) carries an EMPTY selected_pages_by_source_ids — its page targets
+// come from the schedule, not from the post's own selection, so sending an
+// empty selection back is harmless. A non-schedule-driven post (when_type
+// != 3) carries its OWN page targets; if the edit response does not provide
+// them (empty selection), the helper refuses rather than send a request
+// that would clear the targets (publishing to nothing). The discriminator
+// is when_type, NOT where_type: measured on a live account, where_type=1
+// appears on both schedule-driven and non-schedule-driven posts alike —
+// the field that actually separates them is when_type (3=by schedule). This
+// is the same discriminator the sibling guard below uses and the same one
+// ImportSearchPost/CopySearchPost/RewriteSearchPost use.
 //
-// All other publication_where_type values are rejected with an error when
-// no page selection can be recovered from the edit response (fail-closed:
-// refusing to publish to nothing rather than silently clearing page
-// targets). When a non-empty page selection IS recovered, it is sent back
-// verbatim.
+// Schedule guard: a schedule-driven post (publication_when_type=3) MUST
+// carry a non-zero schedule_id recovered from the edit response. When
+// schedule_id is 0 the helper refuses to issue any request — mirroring the
+// create-path guard in ImportSearchPost/CopySearchPost/RewriteSearchPost
+// that refuses when_type=3 with an empty schedules_ids. The schedule_id
+// field is sent WITHOUT omitempty so a zero is transmitted explicitly
+// rather than silently dropped (which would leave the server with a
+// by-schedule post targeted at no schedule).
 //
-// Schedule guard: a schedule-driven post (publication_when_type=3, by
-// schedule) MUST carry a non-zero schedule_id recovered from the edit
-// response. When schedule_id is 0 the helper refuses to issue any request
-// — mirroring the create-path guard in ImportSearchPost/CopySearchPost/
-// RewriteSearchPost that refuses when_type=3 with an empty schedules_ids.
-// The schedule_id field is sent WITHOUT omitempty so a zero is transmitted
-// explicitly rather than silently dropped (which would leave the server
-// with a by-schedule post targeted at no schedule).
+// Null normalization: the server expects arrays and objects, not null —
+// matching the three sibling writers (CopySearchPost, RewriteSearchPost,
+// ImportSearchPost) which all normalize nil slices/maps to empty. A
+// text-only post (zero attachments) or an edit response omitting the
+// selection key yields nil values that encoding/json marshals as null;
+// UpdatePostText normalizes both to []Attachment{} / map[int][]int{} before
+// building the payload.
 //
 // Attachments: GET /posts/{id}/edit returns the SAME singular vocabulary
 // the scraped-post edit endpoint does — measured across 11 real own-posts
@@ -257,12 +249,15 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 	// ID), NOT the flat selected_pages_ids array used by publish-now.
 	selection := edit.SelectedPagesBySourceIDs
 
-	// Fail closed: a non-schedule-driven post carries its own page targets.
-	// If we cannot recover them, refuse rather than send a request that
-	// would clear the targets (publishing to nothing).
-	if edit.PublicationWhereType != scheduleDrivenWhereType && len(selection) == 0 {
-		return nil, fmt.Errorf("hooppy: UpdatePostText post %d: publication_where_type=%d is not the verified schedule-driven value (%d) and no page selection could be recovered from the edit response — refusing to send a request that would clear page targets",
-			postID, edit.PublicationWhereType, scheduleDrivenWhereType)
+	// Fail closed: a non-schedule-driven post (when_type != 3) carries its
+	// own page targets. If we cannot recover them (empty selection), refuse
+	// rather than send a request that would clear the targets (publishing
+	// to nothing). The discriminator is when_type (3=by schedule), NOT
+	// where_type — where_type=1 appears on both schedule-driven and
+	// non-schedule-driven posts (measured on a live account).
+	if edit.PublicationWhenType != 3 && len(selection) == 0 {
+		return nil, fmt.Errorf("hooppy: UpdatePostText post %d: publication_when_type=%d is not 3 (by schedule) and no page selection could be recovered from the edit response — refusing to send a request that would clear page targets",
+			postID, edit.PublicationWhenType)
 	}
 
 	// Fail closed: a schedule-driven post (when_type=3, by schedule) with a
@@ -276,7 +271,18 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 			postID)
 	}
 
+	// Server expects arrays and objects, not null — matching the three
+	// sibling writers (CopySearchPost, RewriteSearchPost, ImportSearchPost).
+	// A text-only post yields a nil attachments slice; an edit response
+	// omitting the selection key yields a nil map. Both marshal as null,
+	// which the server may interpret as "clear". Normalize to empty.
 	attachments := SearchPostEditAttachments(edit.Attachments)
+	if attachments == nil {
+		attachments = []Attachment{}
+	}
+	if selection == nil {
+		selection = map[int][]int{}
+	}
 	payload := struct {
 		AsCopy                   int              `json:"as_copy"`
 		PublicationWhenType      int              `json:"publication_when_type"`

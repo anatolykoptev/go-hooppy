@@ -479,3 +479,53 @@ func TestNewAllListEnvelope_DuplicateIDErrors(t *testing.T) {
 		t.Fatal("expected error for duplicate id with total_rows matching raw length, got nil — unique-id check must catch the duplicate that a raw-length check misses")
 	}
 }
+
+// TestNewAllListEnvelope_NilIDFunc_ReturnsError verifies that a nil idFunc
+// returns an error instead of panicking. The doc comment promises a
+// fail-loud error; a nil idFunc would panic on the first iteration
+// (idFunc(item) dereferences a nil function pointer).
+func TestNewAllListEnvelope_NilIDFunc_ReturnsError(t *testing.T) {
+	list := []Post{{ID: 1}}
+	_, err := NewAllListEnvelope(list, 1, nil)
+	if err == nil {
+		t.Fatal("expected error for nil idFunc, got nil — the doc promises fail-loud, not a panic")
+	}
+}
+
+// TestListAllSchedules_ZeroRows_EmptyListNotNull verifies that a zero-row
+// walk produces a JSON "list": [] (empty array), not "list": null.
+// AllListEnvelope's doc promises an --all result reads identically to a
+// one-page result; a one-page response with zero rows has "list": [], so
+// the --all envelope must match. Without the fix (var all []Schedule with
+// no append), a nil slice marshals as null.
+func TestListAllSchedules_ZeroRows_EmptyListNotNull(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	all, total, err := c.ListAllSchedulesWithTotal(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllSchedulesWithTotal: %v", err)
+	}
+	env, err := NewAllListEnvelope(all, total, func(s Schedule) int { return s.ID })
+	if err != nil {
+		t.Fatalf("NewAllListEnvelope: %v", err)
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	list, ok := decoded["list"].([]interface{})
+	if !ok {
+		t.Fatalf("list = %v, want JSON array [] (not null) — a zero-row walk must read identically to a one-page zero-row response; got raw=%s", decoded["list"], string(raw))
+	}
+	if len(list) != 0 {
+		t.Errorf("list len = %d, want 0 (zero-row account)", len(list))
+	}
+}

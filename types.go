@@ -64,10 +64,15 @@ type Schedule struct {
 // UNDOCUMENTED: these fields are not in the public OpenAPI spec (v0.1.0).
 // The API may change without notice.
 type SchedulePayload struct {
-	Name                        string `json:"name"`
-	State                       int    `json:"state"`                            // measured: 1=active (Активно), 2=deferred launch (Отложенный запуск), 3=stopped (Остановлено); 0 not observed on the live account. Labels from the Hooppy Nuxt web bundle.
-	PublicationHowType          int    `json:"publication_how_type"`             // 1=manual, 2=by project
-	PublicationWhereType        int    `json:"publication_where_type"`           // 1=schedule-driven (Страницы/Pages): the schedule carries the page list, so a post belonging to it has an empty selected_pages_by_source_ids (measured on the live account — every scheduled post carries where_type=1 with an empty selection; a published post keeps its frozen snapshot). 2=photo albums (Фотоальбомы).
+	Name                 string `json:"name"`
+	State                int    `json:"state"`                  // measured: 1=active (Активно), 2=deferred launch (Отложенный запуск), 3=stopped (Остановлено); 0 not observed on the live account. Labels from the Hooppy Nuxt web bundle.
+	PublicationHowType   int    `json:"publication_how_type"`   // 1=manual, 2=by project
+	PublicationWhereType int    `json:"publication_where_type"` // 1=Страницы/Pages, 2=Фотоальбомы/Photo albums (labels from the Hooppy Nuxt web bundle).
+	// For a schedule-driven post (publication_when_type=3, by schedule) the
+	// schedule carries the page list, so selected_pages_by_source_ids is empty;
+	// a published post keeps its frozen snapshot. where_type=1 appears on both
+	// schedule-driven and non-schedule-driven posts alike — the field that
+	// separates them is when_type, NOT where_type (measured on a live account).
 	WatermarkID                 int    `json:"watermark_id"`                     // 0=none
 	UTMTags                     string `json:"utm_tags"`                         // ""=none
 	IsUniqueContent             int    `json:"is_unique_content"`                // 0/1

@@ -662,6 +662,13 @@ func TestUpdatePostText_ScheduleDriven_ZeroScheduleID_RefusesRequest(t *testing.
 // but schedule_id IS zero. With omitempty the key vanishes from the PUT
 // body; without it the key is present with value 0.
 //
+// The fixture uses a NON-EMPTY page selection so the page-target guard
+// (when_type != 3 && empty selection → refuse) does NOT fire — the test's
+// job is the omitempty check, not the guard. Using an empty selection here
+// would hit the guard and never reach the PUT, which would make the test
+// pass for the wrong reason (codifying the fail-open bypass instead of
+// testing omitempty).
+//
 // Asserts on the DECODED body (json.Unmarshal into map[string]any) and
 // checks KEY PRESENCE — "schedule_id":0 and an absent key differ only by
 // presence, so a substring check on the raw bytes would not catch it.
@@ -675,9 +682,9 @@ func TestUpdatePostText_ScheduleID_NoOmitempty(t *testing.T) {
 		switch r.Method {
 		case http.MethodGet:
 			// when_type=1 (publish now, NOT by schedule) so the schedule
-			// guard does not fire; where_type=1 (schedule-driven) so the
-			// where_type guard does not fire with an empty selection.
-			// schedule_id=0 — the zero that omitempty would silently drop.
+			// guard does not fire. A NON-EMPTY selection so the page-target
+			// guard does not fire either. schedule_id=0 — the zero that
+			// omitempty would silently drop.
 			w.Write([]byte(`{
 				"id":42,
 				"publication_when_type":1,
@@ -686,7 +693,7 @@ func TestUpdatePostText_ScheduleID_NoOmitempty(t *testing.T) {
 				"created_by":1,
 				"texts":[{"text":"old","source_id":0}],
 				"attachments":[],
-				"selected_pages_by_source_ids":{},
+				"selected_pages_by_source_ids":{"1":[10]},
 				"schedule_id":0,
 				"project_id":0
 			}`))
@@ -876,5 +883,128 @@ func TestListAllPosts_FilterPreservedAcrossPages(t *testing.T) {
 		if req.sourceID != "6" {
 			t.Errorf("request %d: source_id = %q, want \"6\" (filter must survive on every page)", i, req.sourceID)
 		}
+	}
+}
+
+// TestUpdatePostText_FailClosed_NotBySchedule_EmptySelection_Refuses is the
+// RED test for the guard re-key from publication_where_type to
+// publication_when_type. A post that is NOT schedule-driven (when_type=1,
+// publish now) but carries where_type=1 (the value the OLD guard treated as
+// the schedule-driven marker) with an empty page selection must REFUSE and
+// issue NO PUT — the post carries its own page targets, and sending an empty
+// selection would clear them (the exact target-wipe this guard exists to
+// prevent).
+//
+// Against the OLD guard (keyed on where_type != 1): where_type=1 → guard
+// does NOT fire → PUT is issued → this test FAILS (it expects refusal).
+// Against the NEW guard (keyed on when_type != 3): when_type=1 != 3 → guard
+// FIRES → refuse → this test PASSES.
+//
+// The discriminator is when_type (3=by schedule), NOT where_type: measured
+// on a live account, where_type=1 appears on both schedule-driven and
+// non-schedule-driven posts alike — the field that actually separates them
+// is when_type.
+func TestUpdatePostText_FailClosed_NotBySchedule_EmptySelection_Refuses(t *testing.T) {
+	var putCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			// when_type=1 (publish now, NOT by schedule) but where_type=1
+			// (the value the old guard mis-keyed on as schedule-driven).
+			// Empty page selection — the post's own targets cannot be
+			// recovered, so the guard must refuse.
+			w.Write([]byte(`{
+				"id":71,
+				"publication_when_type":1,
+				"publication_how_type":1,
+				"publication_where_type":1,
+				"created_by":1,
+				"texts":[{"text":"old","source_id":0}],
+				"attachments":[],
+				"selected_pages_by_source_ids":{},
+				"schedule_id":0,
+				"project_id":0
+			}`))
+		case http.MethodPut:
+			putCalled = true
+			w.Write([]byte(`{"success":true}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.UpdatePostText(context.Background(), 71, "new text")
+	if err == nil {
+		t.Fatal("expected fail-closed error for when_type=1 (not by schedule) with empty selection, got nil — the guard must key on when_type, not where_type")
+	}
+	if putCalled {
+		t.Fatal("PUT was issued despite when_type != 3 and empty selection — must refuse to send a request that clears page targets")
+	}
+	if !contains(err.Error(), "71") {
+		t.Errorf("error must name the post ID (71), got: %v", err)
+	}
+}
+
+// TestUpdatePostText_NullNormalization verifies that UpdatePostText
+// normalizes nil attachments and nil page selections to [] and {} (not
+// null) in the PUT body — matching the three sibling writers
+// (CopySearchPost, RewriteSearchPost, ImportSearchPost) which all open with
+// "Server expects arrays, not null". A text-only post (zero attachments)
+// with an edit response that omits the selected_pages_by_source_ids key
+// yields nil values that encoding/json marshals as null; the server may
+// interpret null as "clear" (UpdatePost's own doc says a wrong payload
+// shape returns 500).
+//
+// Asserts on the DECODED body (map[string]any + presence/type), not on a
+// substring — "null" vs "[]" differs in JSON type, not just bytes.
+func TestUpdatePostText_NullNormalization(t *testing.T) {
+	var putBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			// Schedule-driven post (when_type=3) with schedule_id=7 so
+			// neither guard fires. No attachments, no
+			// selected_pages_by_source_ids key — both decode as nil.
+			w.Write([]byte(`{
+				"id":42,
+				"publication_when_type":3,
+				"publication_how_type":1,
+				"publication_where_type":1,
+				"created_by":1,
+				"texts":[{"text":"old","source_id":0}],
+				"attachments":[],
+				"schedule_id":7,
+				"project_id":0
+			}`))
+		case http.MethodPut:
+			putBody, _ = io.ReadAll(r.Body)
+			w.Write([]byte(`{"success":true}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	if _, err := c.UpdatePostText(context.Background(), 42, "new text"); err != nil {
+		t.Fatalf("UpdatePostText: %v", err)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(putBody, &body); err != nil {
+		t.Fatalf("unmarshal PUT body: %v", err)
+	}
+	// attachments must be a JSON array ([]), not null.
+	atts, ok := body["attachments"].([]interface{})
+	if !ok {
+		t.Fatalf("attachments = %v, want JSON array (not null) — sibling writers normalize nil to []; UpdatePostText must match", body["attachments"])
+	}
+	if len(atts) != 0 {
+		t.Errorf("attachments len = %d, want 0 (text-only post)", len(atts))
+	}
+	// selected_pages_by_source_ids must be a JSON object ({}), not null.
+	sel, ok := body["selected_pages_by_source_ids"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("selected_pages_by_source_ids = %v, want JSON object (not null) — a nil map marshals as null; must be normalized to {}", body["selected_pages_by_source_ids"])
+	}
+	if len(sel) != 0 {
+		t.Errorf("selected_pages_by_source_ids len = %d, want 0 (schedule-driven, empty selection)", len(sel))
 	}
 }
