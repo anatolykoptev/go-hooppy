@@ -217,3 +217,96 @@ func TestCreateSchedule_AllFieldsSerialized(t *testing.T) {
 		t.Logf("fields: %v", capturedBody)
 	}
 }
+
+func TestListSchedules_PageParam(t *testing.T) {
+	tests := []struct {
+		name      string
+		page      int
+		wantParam string
+	}{
+		{"page 0 (default)", 0, ""},
+		{"page 1", 1, "page=1"},
+		{"page 2", 2, "page=2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedURL string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				capturedURL = r.URL.String()
+				w.Write([]byte(`{"schedules":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+			_, err := c.ListSchedules(context.Background(), tt.page)
+			if err != nil {
+				t.Fatalf("ListSchedules: %v", err)
+			}
+			if tt.wantParam == "" {
+				if contains(capturedURL, "page=") {
+					t.Errorf("page 0 should not add page param, got: %s", capturedURL)
+				}
+			} else {
+				if !contains(capturedURL, tt.wantParam) {
+					t.Errorf("URL should contain %s, got: %s", tt.wantParam, capturedURL)
+				}
+			}
+		})
+	}
+}
+
+func TestListProjects_PageParam(t *testing.T) {
+	tests := []struct {
+		name      string
+		page      int
+		wantParam string
+	}{
+		{"page 0 (default)", 0, ""},
+		{"page 1", 1, "page=1"},
+		{"page 2", 2, "page=2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedURL string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				capturedURL = r.URL.String()
+				w.Write([]byte(`{"projects":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+			_, err := c.ListProjects(context.Background(), tt.page)
+			if err != nil {
+				t.Fatalf("ListProjects: %v", err)
+			}
+			if tt.wantParam == "" {
+				if contains(capturedURL, "page=") {
+					t.Errorf("page 0 should not add page param, got: %s", capturedURL)
+				}
+			} else {
+				if !contains(capturedURL, tt.wantParam) {
+					t.Errorf("URL should contain %s, got: %s", tt.wantParam, capturedURL)
+				}
+			}
+		})
+	}
+}
+
+func TestListSchedules_IsHasMore(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"schedules":[{"id":1,"name":"S1"}],"total_rows":53,"is_has_more":true,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	resp, err := c.ListSchedules(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("ListSchedules: %v", err)
+	}
+	if !resp.IsHasMore {
+		t.Error("IsHasMore = false, want true (truncated list)")
+	}
+	if resp.TotalRows != 53 {
+		t.Errorf("TotalRows = %d, want 53", resp.TotalRows)
+	}
+	if resp.RowsLimit != 20 {
+		t.Errorf("RowsLimit = %d, want 20", resp.RowsLimit)
+	}
+}

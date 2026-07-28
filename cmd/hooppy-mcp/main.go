@@ -181,6 +181,7 @@ type listPostsInput struct {
 	PageID          int    `json:"page_id,omitempty" jsonschema:"Filter by group/page ID."`
 	ScheduleID      int    `json:"schedule_id,omitempty" jsonschema:"Filter by schedule ID."`
 	ProjectID       int    `json:"project_id,omitempty" jsonschema:"Filter by project ID."`
+	Page            int    `json:"page,omitempty" jsonschema:"Page number for pagination (0=first page)."`
 }
 
 func registerListPosts(server *mcp.Server) {
@@ -202,6 +203,7 @@ func registerListPosts(server *mcp.Server) {
 				PageID:          in.PageID,
 				ScheduleID:      in.ScheduleID,
 				ProjectID:       in.ProjectID,
+				Page:            in.Page,
 			})
 			if err != nil {
 				return errResult(err.Error())
@@ -399,20 +401,22 @@ func registerUploadDocument(server *mcp.Server) {
 
 // --- list_projects ---
 
-type listProjectsInput struct{}
+type listProjectsInput struct {
+	Page int `json:"page,omitempty" jsonschema:"Page number for pagination (0=first page, 20 rows per page). Omit for first page."`
+}
 
 func registerListProjects(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_projects",
-			Description: "List post projects on Hooppy. Projects group posts for multi-platform publishing.",
+			Description: "List post projects on Hooppy. Projects group posts for multi-platform publishing. Returns 20 rows per page; use page to paginate (response has is_has_more/total_rows).",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ listProjectsInput) (*mcp.CallToolResult, error) {
+		func(ctx context.Context, _ *mcp.CallToolRequest, in listProjectsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListProjects(ctx, 0)
+			resp, err := c.ListProjects(ctx, in.Page)
 			if err != nil {
 				return errResult(err.Error())
 			}
@@ -423,20 +427,22 @@ func registerListProjects(server *mcp.Server) {
 
 // --- list_schedules ---
 
-type listSchedulesInput struct{}
+type listSchedulesInput struct {
+	Page int `json:"page,omitempty" jsonschema:"Page number for pagination (0=first page, 20 rows per page). Omit for first page."`
+}
 
 func registerListSchedules(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_schedules",
-			Description: "List publication schedules on Hooppy. Schedules define recurring publication plans.",
+			Description: "List publication schedules on Hooppy. Schedules define recurring publication plans. Returns 20 rows per page; use page to paginate (response has is_has_more/total_rows).",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ listSchedulesInput) (*mcp.CallToolResult, error) {
+		func(ctx context.Context, _ *mcp.CallToolRequest, in listSchedulesInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListSchedules(ctx, 0)
+			resp, err := c.ListSchedules(ctx, in.Page)
 			if err != nil {
 				return errResult(err.Error())
 			}

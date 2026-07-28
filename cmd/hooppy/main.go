@@ -140,18 +140,29 @@ func registerPosts(root *cobra.Command) {
 		Name:  "list",
 		Short: "List posts",
 	})
-	var unpublished bool
+	var published, unpublished bool
 	var pubDate string
-	var pageID, sourceID, projectID int
+	var pageID, sourceID, projectID, scheduleID, accountID, pageNum int
+	listCmd.Flags().BoolVar(&published, "published", false, "show only published posts")
 	listCmd.Flags().BoolVar(&unpublished, "unpublished", false, "show only unpublished posts")
 	listCmd.Flags().StringVar(&pubDate, "date", "", "filter by publication date (dd.mm.yyyy)")
 	listCmd.Flags().IntVar(&pageID, "page-id", 0, "filter by page ID")
 	listCmd.Flags().IntVar(&sourceID, "source-id", 0, "filter by source ID (social network)")
 	listCmd.Flags().IntVar(&projectID, "project-id", 0, "filter by project ID")
+	listCmd.Flags().IntVar(&scheduleID, "schedule-id", 0, "filter by schedule ID")
+	listCmd.Flags().IntVar(&accountID, "account-id", 0, "filter by account ID")
+	listCmd.Flags().IntVar(&pageNum, "page", 0, "page number for pagination (0=first page)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
+		if published && unpublished {
+			fmt.Fprintln(os.Stderr, "error: --published and --unpublished are mutually exclusive")
+			os.Exit(1)
+		}
 		c := mustClient()
 		var isPub *bool
-		if unpublished {
+		if published {
+			t := true
+			isPub = &t
+		} else if unpublished {
 			f := false
 			isPub = &f
 		}
@@ -161,6 +172,9 @@ func registerPosts(root *cobra.Command) {
 			PageID:          pageID,
 			SourceID:        sourceID,
 			ProjectID:       projectID,
+			ScheduleID:      scheduleID,
+			AccountID:       accountID,
+			Page:            pageNum,
 		})
 		die(err)
 		printJSON(resp)
@@ -323,9 +337,33 @@ func registerProjects(root *cobra.Command) {
 		Name:  "list",
 		Short: "List post projects",
 	})
+	var projPage int
+	var projAll bool
+	listCmd.Flags().IntVar(&projPage, "page", 0, "page number (0=first page)")
+	listCmd.Flags().BoolVar(&projAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListProjects(context.Background(), 0)
+		if projAll {
+			var all []hooppy.Project
+			page := 0
+			for {
+				resp, err := c.ListProjects(context.Background(), page)
+				die(err)
+				all = append(all, resp.List...)
+				if !resp.IsHasMore {
+					break
+				}
+				page++
+			}
+			printJSON(map[string]interface{}{
+				"list":        all,
+				"total_rows":  len(all),
+				"is_has_more": false,
+				"rows_limit":  0,
+			})
+			return
+		}
+		resp, err := c.ListProjects(context.Background(), projPage)
 		die(err)
 		printJSON(resp)
 	}
@@ -401,9 +439,33 @@ func registerSchedules(root *cobra.Command) {
 		Name:  "list",
 		Short: "List publication schedules",
 	})
+	var schedPage int
+	var schedAll bool
+	listCmd.Flags().IntVar(&schedPage, "page", 0, "page number (0=first page)")
+	listCmd.Flags().BoolVar(&schedAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListSchedules(context.Background(), 0)
+		if schedAll {
+			var all []hooppy.Schedule
+			page := 0
+			for {
+				resp, err := c.ListSchedules(context.Background(), page)
+				die(err)
+				all = append(all, resp.List...)
+				if !resp.IsHasMore {
+					break
+				}
+				page++
+			}
+			printJSON(map[string]interface{}{
+				"list":        all,
+				"total_rows":  len(all),
+				"is_has_more": false,
+				"rows_limit":  0,
+			})
+			return
+		}
+		resp, err := c.ListSchedules(context.Background(), schedPage)
 		die(err)
 		printJSON(resp)
 	}
