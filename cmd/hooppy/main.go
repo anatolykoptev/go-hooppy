@@ -36,6 +36,7 @@ func main() {
 	registerNotifications(root)
 	registerSearch(root)
 	registerMCPConfig(root)
+	registerDoctor(root)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -1138,4 +1139,26 @@ func downloadPhoto(url, dest string) error {
 	defer out.Close()
 	_, err = io.Copy(out, resp.Body)
 	return err
+}
+
+// --- doctor ---
+
+func registerDoctor(root *cobra.Command) {
+	cmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+		Name:  "doctor",
+		Short: "Diagnose broken connections from the notification log (read-only)",
+	})
+	var sinceDays int
+	var exitCode bool
+	cmd.Flags().IntVar(&sinceDays, "since", 7, "only report errors whose operation_date falls within the last N days")
+	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error falls inside the --since window, 0 otherwise (for cron / pre-flight)")
+	cmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		report, err := c.RunDoctor(context.Background(), sinceDays)
+		die(err)
+		printJSON(report)
+		if exitCode && len(report.Groups) > 0 {
+			os.Exit(1)
+		}
+	}
 }

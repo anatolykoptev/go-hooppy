@@ -2,6 +2,7 @@ package hooppy
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"strconv"
 )
@@ -19,4 +20,48 @@ func (c *Client) ListNotifications(ctx context.Context, page int) (*Notification
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// ListAllNotifications walks GET /notifications from page 1, accumulating
+// notifications until is_has_more is false. The walk starts at page 1 so
+// the first page is not fetched twice (the Hooppy API is 1-indexed and a
+// request with no page param is byte-identical to ?page=1). See
+// projects.ListAllSchedules for the 1-indexed rationale and the sanity cap.
+//
+// Duplicates arising from a mid-walk collection shift are NOT removed: with
+// offset pagination, a row inserted or deleted mid-walk shifts the window
+// and the server re-serves a row already seen. This entry point drops the
+// server's total_rows, so it cannot detect such duplicates. Use
+// ListAllNotificationsWithTotal with NewAllListEnvelope to detect them (see
+// NewAllListEnvelope for what it does and does not catch).
+//
+// The walk is bounded by maxListAllPages; if the server never clears
+// is_has_more within that bound, ListAllNotifications returns an error
+// instead of looping forever or silently truncating.
+func (c *Client) ListAllNotifications(ctx context.Context) ([]Notification, error) {
+	all, _, err := c.ListAllNotificationsWithTotal(ctx)
+	return all, err
+}
+
+// ListAllNotificationsWithTotal is ListAllNotifications but also returns the
+// server's last-seen total_rows. The pair (list, totalRows) is meant to be
+// passed to NewAllListEnvelope. See projects.ListAllSchedulesWithTotal and
+// NewAllListEnvelope for what the envelope catches and what it does not.
+func (c *Client) ListAllNotificationsWithTotal(ctx context.Context) ([]Notification, int, error) {
+	all := make([]Notification, 0)
+	var totalRows int
+	for page := 1; ; page++ {
+		if page > maxListAllPages {
+			return nil, 0, fmt.Errorf("hooppy: ListAllNotifications exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+		}
+		resp, err := c.ListNotifications(ctx, page)
+		if err != nil {
+			return nil, 0, err
+		}
+		all = append(all, resp.List...)
+		totalRows = resp.TotalRows
+		if !resp.IsHasMore {
+			return all, totalRows, nil
+		}
+	}
 }

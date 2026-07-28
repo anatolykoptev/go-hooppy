@@ -190,9 +190,33 @@ hooppy search rewrite --post-id <id> --text "..." --to <page-id>  # rewrite with
 hooppy search rewrite --post-id <id> --text "..." --to <page-id> --no-attachments  # rewrite, strip attachments
 hooppy search import --post-id <id> --schedules <sched-id>  # batch-copy via PUT /posts/import (server downloads photos async, preserves videos)
 
+# Diagnose broken connections (read-only). GET /accounts reports status: 1
+# even when an account's OAuth token is dead — the notification log is the
+# only endpoint that reports publication failures. doctor walks it, groups
+# errors by (page, error message), and classifies them so you can tell at a
+# glance which connections need a human to reconnect them.
+hooppy doctor                              # last 7 days, exit 1 if any error in window
+hooppy doctor --since 30                   # widen the window to 30 days
+hooppy doctor --exit-code=false            # print the report without the non-zero exit
+
 # Print MCP setup instructions
 hooppy mcp-config
 ```
+
+### `hooppy doctor`
+
+`doctor` is a read-only diagnostic that answers one question: **which connections are broken right now?** It exists because `GET /accounts` reports `status: 1` for an account whose OAuth token is dead — measured on a live account where five networks had been failing every publish for weeks while every account still read `status: 1`. The notification log (`GET /notifications`) is the only endpoint that reports publication failures, and `doctor` makes it legible.
+
+It walks the full notification log, filters to error rows whose `operation_date` falls inside the `--since` window (default 7 days), groups them by (page, error message), and prints a JSON report on stdout. Each group carries the page id, page name, network, the vendor's error string verbatim, an occurrence count, the first and last `operation_date` in the window, and a classification:
+
+- `expired_credential` — the vendor's text asks the user to reconnect the account. The tool cannot fix this; it must be named loudly.
+- `missing_media` — a text-only post routed to a network that requires an image. A targeting mistake in a schedule; user-fixable.
+- `upstream_error` — a 5xx from the social network. Transient; must not carry the same weight as the first two.
+- `unknown` — anything unmatched, carrying the raw vendor string. Never forced into a known bucket.
+
+A row whose `operation_date` fails to parse is reported in `unparseable_rows` — never silently dropped, since dropping a row hides exactly the failure the command exists to surface.
+
+**Exit code:** `--exit-code` (default `true`) — exit 1 if any error falls inside the window, 0 otherwise. This lets `doctor` run in cron or as a pre-flight before a bulk import. Pass `--exit-code=false` to get the report without the non-zero exit.
 
 ## MCP server setup
 
