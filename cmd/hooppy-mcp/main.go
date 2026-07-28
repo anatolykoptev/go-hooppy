@@ -169,8 +169,8 @@ type createPostInput struct {
 	PublishAtDate    string `json:"publish_at_date,omitempty" jsonschema:"Scheduled date in dd.mm.yyyy format. If set with publish_at_hours/minutes, post is scheduled instead of published immediately."`
 	PublishAtHours   string `json:"publish_at_hours,omitempty" jsonschema:"Scheduled hour (HH). Use with publish_at_date."`
 	PublishAtMinutes string `json:"publish_at_minutes,omitempty" jsonschema:"Scheduled minutes (MM). Use with publish_at_date."`
-	ScheduleIDs      []int  `json:"schedule_ids,omitempty" jsonschema:"Schedule IDs for publishing via schedule. If set, page_ids and publish_at_* are ignored."`
-	ProjectID        int    `json:"project_id,omitempty" jsonschema:"Project ID for publishing via project. If set, page_ids and schedule_ids are ignored."`
+	ScheduleIDs      []int  `json:"schedule_ids,omitempty" jsonschema:"Schedule IDs for publishing via schedule (when_type=3). Required when project_id is set — the Hooppy API always needs schedules_ids for when_type=3."`
+	ProjectID        int    `json:"project_id,omitempty" jsonschema:"Project ID for publishing via project. If set, schedule_ids is ALSO required (the API uses schedules_ids for when_type=3; project_id is an optional scope)."`
 }
 
 func registerCreatePost(server *mcp.Server) {
@@ -189,11 +189,16 @@ func registerCreatePost(server *mcp.Server) {
 			var payload interface{}
 			switch {
 			case in.ProjectID > 0:
+				if len(in.ScheduleIDs) == 0 {
+					return errResult("schedule_ids is required even when project_id is set (Hooppy API requires it for when_type=3)")
+				}
 				payload = hooppy.PostPublishByProjectPayload{
 					PublicationWhenType: 3,
 					PublicationHowType:  1,
 					ProjectID:           in.ProjectID,
+					SchedulesIDs:        in.ScheduleIDs,
 					Texts:               texts,
+					Attachments:         []hooppy.Attachment{},
 				}
 			case len(in.ScheduleIDs) > 0:
 				payload = hooppy.PostPublishBySchedulePayload{
@@ -201,6 +206,7 @@ func registerCreatePost(server *mcp.Server) {
 					PublicationHowType:  1,
 					SchedulesIDs:        in.ScheduleIDs,
 					Texts:               texts,
+					Attachments:         []hooppy.Attachment{},
 				}
 			case in.PublishAtDate != "":
 				payload = hooppy.PostPublishAtPayload{
@@ -213,6 +219,7 @@ func registerCreatePost(server *mcp.Server) {
 					},
 					SelectedPagesIDs: in.PageIDs,
 					Texts:            texts,
+					Attachments:      []hooppy.Attachment{},
 				}
 			default:
 				if len(in.PageIDs) == 0 {
@@ -223,6 +230,7 @@ func registerCreatePost(server *mcp.Server) {
 					PublicationHowType:  1,
 					SelectedPagesIDs:    in.PageIDs,
 					Texts:               texts,
+					Attachments:         []hooppy.Attachment{},
 				}
 			}
 

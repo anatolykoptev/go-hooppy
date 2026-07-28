@@ -191,10 +191,14 @@ type PostPublishBySchedulePayload struct {
 }
 
 // PostPublishByProjectPayload publishes via a project.
+// The Hooppy API requires schedules_ids even when project_id is set
+// (when_type=3 always uses schedules). project_id is an optional filter
+// that scopes the post to a specific project.
 type PostPublishByProjectPayload struct {
 	PublicationWhenType int          `json:"publication_when_type"` // 3
 	PublicationHowType  int          `json:"publication_how_type"`  // 1 (ignored)
 	ProjectID           int          `json:"project_id"`
+	SchedulesIDs        []int        `json:"schedules_ids"` // required by API even for project
 	Texts               []PostText   `json:"texts"`
 	Attachments         []Attachment `json:"attachments"`
 }
