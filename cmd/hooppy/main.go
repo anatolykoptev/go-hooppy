@@ -222,6 +222,46 @@ func registerPosts(root *cobra.Command) {
 		die(err)
 		printJSON(resp)
 	}
+
+	// posts crosspost (undocumented) — alternative post creation modes
+	crossPostCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
+		Name:  "crosspost",
+		Short: "Create a post via an alternative mode (undocumented endpoints)",
+	})
+	var cpMode, cpText, cpPageIDs string
+	crossPostCmd.Flags().StringVar(&cpMode, "mode", "", "cross-post mode: search, copy, sources, import, crosspost, rewrite, translate, queue, drafts, templates, rss, feeds, tags, watermarks, batch (required)")
+	crossPostCmd.Flags().StringVar(&cpText, "text", "", "post text (required)")
+	crossPostCmd.Flags().StringVar(&cpPageIDs, "to", "", "comma-separated page IDs (required)")
+	_ = crossPostCmd.MarkFlagRequired("mode")
+	_ = crossPostCmd.MarkFlagRequired("text")
+	_ = crossPostCmd.MarkFlagRequired("to")
+	crossPostCmd.Run = func(_ *cobra.Command, _ []string) {
+		mode := hooppy.CrossPostMode(cpMode)
+		// Validate mode
+		validModes := map[hooppy.CrossPostMode]bool{
+			hooppy.CrossPostModeSearch: true, hooppy.CrossPostModeCopy: true, hooppy.CrossPostModeSources: true,
+			hooppy.CrossPostModeImport: true, hooppy.CrossPostModeCrossPost: true, hooppy.CrossPostModeRewrite: true,
+			hooppy.CrossPostModeTranslate: true, hooppy.CrossPostModeQueue: true, hooppy.CrossPostModeDrafts: true,
+			hooppy.CrossPostModeTemplates: true, hooppy.CrossPostModeRSS: true, hooppy.CrossPostModeFeeds: true,
+			hooppy.CrossPostModeTags: true, hooppy.CrossPostModeWatermarks: true, hooppy.CrossPostModeBatch: true,
+		}
+		if !validModes[mode] {
+			fmt.Fprintf(os.Stderr, "invalid mode %q; valid: search, copy, sources, import, crosspost, rewrite, translate, queue, drafts, templates, rss, feeds, tags, watermarks, batch\n", cpMode)
+			os.Exit(1)
+		}
+		c := mustClient()
+		ids := parseIntList(cpPageIDs)
+		payload := hooppy.PostPublishNowPayload{
+			PublicationWhenType: 1,
+			PublicationHowType:  1,
+			SelectedPagesIDs:    ids,
+			Texts:               []hooppy.PostText{{Text: cpText, SourceID: 0}},
+			Attachments:         []hooppy.Attachment{},
+		}
+		resp, err := c.CrossPostWithMode(context.Background(), mode, payload)
+		die(err)
+		printJSON(resp)
+	}
 }
 
 // --- projects ---
@@ -449,6 +489,34 @@ func registerWatermarks(root *cobra.Command) {
 		die(err)
 		printJSON(resp)
 	}
+
+	// watermarks update
+	wmUpdateCmd := cli.RegisterSubcommand(wmCmd, cli.SubcommandConfig{
+		Name:  "update",
+		Short: "Update a watermark by ID",
+	})
+	var wmUpdName, wmUpdFile string
+	var wmUpdSpace, wmUpdPosition, wmUpdOpacity, wmUpdSize int
+	wmUpdateCmd.Flags().StringVar(&wmUpdName, "name", "", "watermark name")
+	wmUpdateCmd.Flags().StringVar(&wmUpdFile, "file", "", "file path")
+	wmUpdateCmd.Flags().IntVar(&wmUpdSpace, "space", 0, "space")
+	wmUpdateCmd.Flags().IntVar(&wmUpdPosition, "position", 0, "position")
+	wmUpdateCmd.Flags().IntVar(&wmUpdOpacity, "opacity", 0, "opacity (0-100)")
+	wmUpdateCmd.Flags().IntVar(&wmUpdSize, "size", 0, "size")
+	wmUpdateCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy watermarks update <id> [--name=...] [--file=...] ...")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		resp, err := c.UpdateWatermark(context.Background(), id, hooppy.WatermarkPayload{
+			Name: wmUpdName, File: wmUpdFile, Space: wmUpdSpace, Position: wmUpdPosition, Opacity: wmUpdOpacity, Size: wmUpdSize,
+		})
+		die(err)
+		printJSON(resp)
+	}
 }
 
 // --- proxies (undocumented) ---
@@ -507,6 +575,32 @@ func registerProxies(root *cobra.Command) {
 		die(err)
 		c := mustClient()
 		resp, err := c.DeleteProxy(context.Background(), id)
+		die(err)
+		printJSON(resp)
+	}
+
+	// proxies update
+	proxyUpdateCmd := cli.RegisterSubcommand(proxyCmd, cli.SubcommandConfig{
+		Name:  "update",
+		Short: "Update a proxy by ID",
+	})
+	var pUpdName, pUpdIP, pUpdPort, pUpdLogin, pUpdPassword string
+	proxyUpdateCmd.Flags().StringVar(&pUpdName, "name", "", "proxy name")
+	proxyUpdateCmd.Flags().StringVar(&pUpdIP, "ip", "", "IP address")
+	proxyUpdateCmd.Flags().StringVar(&pUpdPort, "port", "", "port")
+	proxyUpdateCmd.Flags().StringVar(&pUpdLogin, "login", "", "login")
+	proxyUpdateCmd.Flags().StringVar(&pUpdPassword, "password", "", "password")
+	proxyUpdateCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy proxies update <id> [--name=...] [--ip=...] ...")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		resp, err := c.UpdateProxy(context.Background(), id, hooppy.ProxyPayload{
+			Name: pUpdName, IP: pUpdIP, Port: pUpdPort, Login: pUpdLogin, Password: pUpdPassword,
+		})
 		die(err)
 		printJSON(resp)
 	}

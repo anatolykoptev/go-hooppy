@@ -17,7 +17,8 @@
 * **Page disconnect (UNDOCUMENTED)**: `DisconnectPage` via DELETE `/accounts/pages/{id}`. Idempotent.
 * **Cross-posting (UNDOCUMENTED)**: 15 methods for alternative post creation modes via PUT `/posts/{mode}`: `SearchPosts`, `CopyPost`, `SourcesPost`, `ImportPost`, `CrossPost`, `RewritePost`, `TranslatePost`, `QueuePost`, `DraftPost`, `TemplatePost`, `RSSPost`, `FeedPost`, `TagPost`, `WatermarkPost`, `BatchPost`. All accept the same payload as `CreatePost` and return `{"id":...}`.
 * **MCP tools**: 6 new tools (total 19): `hooppy_create_project`, `hooppy_get_user`, `hooppy_list_watermarks`, `hooppy_list_proxies`, `hooppy_list_notifications`, `hooppy_disconnect_page`.
-* **CLI commands**: 11 new subcommands covering all new endpoints: `user`, `watermarks {list,create,delete}`, `proxies {list,create,delete}`, `notifications`, `projects {create,delete}`, `schedules {create,delete}`, `pages disconnect`, `posts update`.
+* **CLI commands**: 14 new subcommands covering all new endpoints: `user`, `watermarks {list,create,update,delete}`, `proxies {list,create,update,delete}`, `notifications`, `projects {create,delete}`, `schedules {create,delete}`, `pages disconnect`, `posts update`, `posts crosspost` (all 15 cross-posting modes via `--mode`).
+* **CrossPostWithMode**: generic dispatcher method for cross-posting — accepts `CrossPostMode` enum + any post payload. The mode-specific methods (`SearchPosts`, `CopyPost`, etc.) are thin wrappers around it.
 
 ### Changed
 

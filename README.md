@@ -154,6 +154,13 @@ hooppy schedules delete 55608
 # Update an existing post (undocumented)
 hooppy posts update 533241 --text "Updated text" --to 822454
 
+# Create a post via an alternative mode (undocumented)
+# Modes: search, copy, sources, import, crosspost, rewrite, translate,
+#         queue, drafts, templates, rss, feeds, tags, watermarks, batch
+hooppy posts crosspost --mode search --text "Found via search" --to 2355344
+hooppy posts crosspost --mode copy --text "Copied post" --to 2355344
+hooppy posts crosspost --mode rss --text "From RSS feed" --to 2355344
+
 # Disconnect a page (undocumented)
 hooppy pages disconnect 99999
 
@@ -161,9 +168,11 @@ hooppy pages disconnect 99999
 hooppy user
 hooppy watermarks list
 hooppy watermarks create --name "WM1" --file /path/to/wm.png --opacity 50
+hooppy watermarks update 3324 --name "Renamed" --opacity 80
 hooppy watermarks delete 3324
 hooppy proxies list
 hooppy proxies create --ip 1.2.3.4 --port 8080 --login user --password pass
+hooppy proxies update 8335 --name "Renamed proxy" --ip 5.6.7.8
 hooppy proxies delete 8335
 hooppy notifications
 
