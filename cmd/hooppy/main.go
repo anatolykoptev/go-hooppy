@@ -863,7 +863,7 @@ func registerSearch(root *cobra.Command) {
 	var rwText, rwPages, rwSchedules string
 	var rwWhenType, rwHowType int
 	var rwDate, rwHours, rwMinutes string
-	var rwKeepPhotos bool
+	var rwNoAttachments bool
 	rewriteCmd.Flags().IntVar(&rwPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED)")
 	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (REQUIRED)")
 	rewriteCmd.Flags().StringVar(&rwPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
@@ -873,7 +873,7 @@ func registerSearch(root *cobra.Command) {
 	rewriteCmd.Flags().StringVar(&rwDate, "date", "", "publication date dd.mm.yyyy (for when-type 2)")
 	rewriteCmd.Flags().StringVar(&rwHours, "hours", "", "publication hours HH (for when-type 2)")
 	rewriteCmd.Flags().StringVar(&rwMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
-	rewriteCmd.Flags().BoolVar(&rwKeepPhotos, "keep-photos", false, "copy photos from the scraped post (uses edit endpoint to get working attachment data)")
+	rewriteCmd.Flags().BoolVar(&rwNoAttachments, "no-attachments", false, "strip all attachments (photos, links, etc.) from the scraped post")
 	rewriteCmd.Run = func(_ *cobra.Command, _ []string) {
 		if rwPostID == 0 {
 			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
@@ -907,8 +907,8 @@ func registerSearch(root *cobra.Command) {
 		default:
 			payload.SelectedPagesIDs = parseIntList(rwPages)
 		}
-		if rwKeepPhotos {
-			// Preserve ALL attachments from the scraped post:
+		if !rwNoAttachments {
+			// By default, preserve ALL attachments from the scraped post:
 			// - Photos: download from edit endpoint URLs → re-upload via UploadMedia
 			//   (server doesn't download automatically; MediaItem must have id/name/folder/file_path)
 			// - Other attachments (copyright, link, poll, etc.): pass through as-is

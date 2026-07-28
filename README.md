@@ -186,8 +186,8 @@ hooppy search status                           # check if parsing is in progress
 hooppy search parse --source-resource-id <id> --account-id <id>  # start scraping
 hooppy search stop                             # stop in-progress scraping
 hooppy search copy --post-id <id> --to <page-id>  # copy scraped post to your page
-hooppy search rewrite --post-id <id> --text "..." --to <page-id>  # rewrite with custom text
-hooppy search rewrite --post-id <id> --text "..." --to <page-id> --keep-photos  # rewrite + keep photos
+hooppy search rewrite --post-id <id> --text "..." --to <page-id>  # rewrite with custom text (attachments preserved)
+hooppy search rewrite --post-id <id> --text "..." --to <page-id> --no-attachments  # rewrite, strip attachments
 
 # Print MCP setup instructions
 hooppy mcp-config
