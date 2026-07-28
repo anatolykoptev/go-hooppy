@@ -233,7 +233,7 @@ func TestListSchedules_PageParam(t *testing.T) {
 			var capturedURL string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				capturedURL = r.URL.String()
-				w.Write([]byte(`{"schedules":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
 			}))
 			defer srv.Close()
 			c := newTestClient(t, srv)
@@ -269,7 +269,7 @@ func TestListProjects_PageParam(t *testing.T) {
 			var capturedURL string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				capturedURL = r.URL.String()
-				w.Write([]byte(`{"projects":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
 			}))
 			defer srv.Close()
 			c := newTestClient(t, srv)
@@ -308,5 +308,106 @@ func TestListSchedules_IsHasMore(t *testing.T) {
 	}
 	if resp.RowsLimit != 20 {
 		t.Errorf("RowsLimit = %d, want 20", resp.RowsLimit)
+	}
+}
+
+// TestListAllSchedules_TwoPages verifies the --all walk starts at page 1
+// (not 0), accumulates both pages, and produces no duplicate IDs. Without
+// the fix (walk starting at page 0) the first page is fetched twice because
+// page=0 and page=1 are byte-identical on the server, yielding duplicates
+// and a length that exceeds total_rows.
+func TestListAllSchedules_TwoPages(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("page"))
+		switch r.URL.Query().Get("page") {
+		case "2":
+			w.Write([]byte(`{"list":[{"id":3}],"total_rows":3,"is_has_more":false,"rows_limit":20}`))
+		default: // page 1 (and the buggy page 0 which omits the param)
+			w.Write([]byte(`{"list":[{"id":1},{"id":2}],"total_rows":3,"is_has_more":true,"rows_limit":20}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	all, err := c.ListAllSchedules(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllSchedules: %v", err)
+	}
+
+	// Length must equal the server's total_rows.
+	if len(all) != 3 {
+		t.Fatalf("len(all) = %d, want 3 (server total_rows)", len(all))
+	}
+	// No duplicate IDs.
+	seen := map[int]bool{}
+	for _, s := range all {
+		if seen[s.ID] {
+			t.Errorf("duplicate schedule ID %d in accumulated result", s.ID)
+		}
+		seen[s.ID] = true
+	}
+	// Handler received each page exactly once, starting at page=1.
+	if len(pages) != 2 {
+		t.Fatalf("handler received %d requests, want 2 (pages=%v)", len(pages), pages)
+	}
+	if pages[0] != "1" {
+		t.Errorf("first request page = %q, want \"1\"", pages[0])
+	}
+	if pages[1] != "2" {
+		t.Errorf("second request page = %q, want \"2\"", pages[1])
+	}
+}
+
+// TestListAllProjects_TwoPages mirrors TestListAllSchedules_TwoPages for
+// the projects endpoint.
+func TestListAllProjects_TwoPages(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("page"))
+		switch r.URL.Query().Get("page") {
+		case "2":
+			w.Write([]byte(`{"list":[{"id":3,"name":"P3"}],"total_rows":3,"is_has_more":false,"rows_limit":20}`))
+		default:
+			w.Write([]byte(`{"list":[{"id":1,"name":"P1"},{"id":2,"name":"P2"}],"total_rows":3,"is_has_more":true,"rows_limit":20}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	all, err := c.ListAllProjects(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllProjects: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("len(all) = %d, want 3", len(all))
+	}
+	seen := map[int]bool{}
+	for _, p := range all {
+		if seen[p.ID] {
+			t.Errorf("duplicate project ID %d", p.ID)
+		}
+		seen[p.ID] = true
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Fatalf("pages = %v, want [1 2]", pages)
+	}
+}
+
+// TestListAllSchedules_SanityCap verifies the walk returns an error
+// instead of looping forever when is_has_more never goes false.
+func TestListAllSchedules_SanityCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"list":[{"id":1}],"total_rows":1000000,"is_has_more":true,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListAllSchedules(context.Background())
+	if err == nil {
+		t.Fatal("expected error when is_has_more never goes false, got nil")
+	}
+	if !contains(err.Error(), "exceeded") {
+		t.Errorf("expected cap error mentioning 'exceeded', got: %v", err)
 	}
 }

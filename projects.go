@@ -71,6 +71,60 @@ func (c *Client) ListSchedules(ctx context.Context, page int) (*SchedulesRespons
 	return &resp, nil
 }
 
+// maxListAllPages bounds the ListAll* pagination walks so a server that
+// never clears is_has_more cannot spin forever. 1000 pages × 20 rows per
+// page = 20000 rows, well beyond any realistic account; the cap is a
+// safety net, not a real limit. When the cap is hit the walk returns an
+// error rather than silently truncating.
+const maxListAllPages = 1000
+
+// ListAllSchedules walks /posts/schedules from page 1, accumulating
+// schedules until is_has_more is false, and returns the full list with no
+// duplicates. The walk MUST start at page 1: the Hooppy API is 1-indexed
+// and a request with no page param is byte-identical to ?page=1, so a
+// walk starting at page 0 fetches the first page twice.
+//
+// The walk is bounded by maxListAllPages; if the server never clears
+// is_has_more within that bound, ListAllSchedules returns an error
+// instead of looping forever or silently truncating.
+func (c *Client) ListAllSchedules(ctx context.Context) ([]Schedule, error) {
+	var all []Schedule
+	for page := 1; ; page++ {
+		if page > maxListAllPages {
+			return nil, fmt.Errorf("hooppy: ListAllSchedules exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+		}
+		resp, err := c.ListSchedules(ctx, page)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, resp.List...)
+		if !resp.IsHasMore {
+			return all, nil
+		}
+	}
+}
+
+// ListAllProjects walks /posts/projects from page 1, accumulating
+// projects until is_has_more is false, and returns the full list with no
+// duplicates. See ListAllSchedules for the 1-indexed rationale and the
+// sanity cap.
+func (c *Client) ListAllProjects(ctx context.Context) ([]Project, error) {
+	var all []Project
+	for page := 1; ; page++ {
+		if page > maxListAllPages {
+			return nil, fmt.Errorf("hooppy: ListAllProjects exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+		}
+		resp, err := c.ListProjects(ctx, page)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, resp.List...)
+		if !resp.IsHasMore {
+			return all, nil
+		}
+	}
+}
+
 // CreateSchedule creates a new publication schedule via POST /posts/schedules.
 // Use NewSchedulePayload(name) to get a payload with sensible defaults,
 // then override fields as needed.

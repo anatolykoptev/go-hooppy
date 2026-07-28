@@ -344,22 +344,12 @@ func registerProjects(root *cobra.Command) {
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		if projAll {
-			var all []hooppy.Project
-			page := 0
-			for {
-				resp, err := c.ListProjects(context.Background(), page)
-				die(err)
-				all = append(all, resp.List...)
-				if !resp.IsHasMore {
-					break
-				}
-				page++
-			}
+			all, err := c.ListAllProjects(context.Background())
+			die(err)
 			printJSON(map[string]interface{}{
 				"list":        all,
 				"total_rows":  len(all),
 				"is_has_more": false,
-				"rows_limit":  0,
 			})
 			return
 		}
@@ -446,22 +436,12 @@ func registerSchedules(root *cobra.Command) {
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		if schedAll {
-			var all []hooppy.Schedule
-			page := 0
-			for {
-				resp, err := c.ListSchedules(context.Background(), page)
-				die(err)
-				all = append(all, resp.List...)
-				if !resp.IsHasMore {
-					break
-				}
-				page++
-			}
+			all, err := c.ListAllSchedules(context.Background())
+			die(err)
 			printJSON(map[string]interface{}{
 				"list":        all,
 				"total_rows":  len(all),
 				"is_has_more": false,
-				"rows_limit":  0,
 			})
 			return
 		}
