@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 )
 
 // APIError represents a non-2xx response from the Hooppy API.
@@ -12,6 +14,7 @@ type APIError struct {
 	StatusCode int
 	Body       []byte
 	Message    string
+	RetryAfter time.Duration // parsed from Retry-After header (RFC 7231); 0 if absent
 }
 
 func newAPIError(resp *http.Response) *APIError {
@@ -24,6 +27,7 @@ func newAPIError(resp *http.Response) *APIError {
 	ae := &APIError{
 		StatusCode: resp.StatusCode,
 		Body:       body,
+		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
 	}
 	// Try to extract a message from common JSON shapes: {"message": "..."} or {"error": "..."}.
 	var m map[string]interface{}
@@ -41,6 +45,44 @@ func newAPIError(resp *http.Response) *APIError {
 		ae.Message += "... (truncated)"
 	}
 	return ae
+}
+
+// isRetryableStatus reports whether the HTTP status code warrants a retry.
+// Same set as go-kit/retry.isRetryableStatus (retry.go:157-168).
+func isRetryableStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// parseRetryAfter parses the HTTP Retry-After header per RFC 7231. The
+// value can be either a non-negative integer number of seconds or an
+// HTTP-date. Returns 0 on empty or unparseable input.
+// Modeled on go-kit/llm/errors.go:parseRetryAfter (unexported there).
+func parseRetryAfter(h string) time.Duration {
+	if h == "" {
+		return 0
+	}
+	// Seconds form.
+	if secs, err := strconv.Atoi(h); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	// HTTP-date form.
+	if t, err := http.ParseTime(h); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	return 0
 }
 
 func (e *APIError) Error() string {

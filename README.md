@@ -81,6 +81,42 @@ func main() {
 }
 ```
 
+### Retry and HTTP client configuration
+
+By default, the client does NOT retry failed requests. Enable retry for transient failures (429/5xx) on safe methods (GET, DELETE) via `Config.RetryOptions`:
+
+```go
+client, err := hooppy.NewClient(hooppy.Config{
+    Token: "your-jwt-token",
+    RetryOptions: &retry.Options{
+        MaxAttempts:  3,                   // default: 3
+        InitialDelay: 500 * time.Millisecond, // default: 500ms
+        MaxDelay:     5 * time.Second,     // default: 5s
+        // MaxElapsedTime defaults to 30s if unset.
+        // OnRetry: func(attempt int, err error) { /* observe retries */ },
+    },
+})
+```
+
+Retry behavior:
+- **GET and DELETE** are retried on 429/500/502/503/504 with exponential backoff.
+- **POST and streaming uploads** (CreatePost, BatchDeletePosts, UploadMedia, UploadDocument) NEVER retry — they are non-idempotent.
+- The `Retry-After` header (RFC 7231: seconds or HTTP-date) overrides the backoff delay.
+- **Context is the sole deadline authority** — retry stops when the context is cancelled.
+- `APIError.RetryAfter` exposes the parsed header value (0 if absent).
+
+To customize the HTTP transport (connection pool, TLS, proxies), inject your own `*http.Client`:
+
+```go
+client, err := hooppy.NewClient(hooppy.Config{
+    Token:      "your-jwt-token",
+    HTTPClient: &http.Client{Transport: &http.Transport{
+        MaxIdleConnsPerHost: 30, // tune for high-concurrency (e.g. MCP server)
+        // ... other transport fields
+    }},
+})
+```
+
 ## CLI usage
 
 ```bash

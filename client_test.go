@@ -4,7 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/anatolykoptev/go-kit/retry"
 )
 
 // newTestClient creates a Client pointing at a httptest.Server.
@@ -293,5 +297,318 @@ func TestClient_ResponseExceedsMaxSize(t *testing.T) {
 	_, err = c.ListAccounts(context.Background(), ListAccountsFilter{})
 	if err == nil {
 		t.Fatal("expected error for oversized response")
+	}
+}
+
+// fastRetryOpts returns retry options suitable for tests: 1ms delay, no jitter.
+func fastRetryOpts() *retry.Options {
+	return &retry.Options{
+		MaxAttempts:  3,
+		InitialDelay: time.Millisecond,
+		MaxDelay:     time.Millisecond,
+	}
+}
+
+func TestRetry_GET_429ThenSuccess(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n < 3 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[{"id":1,"name":"acct"}],"total":1}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	resp, err := c.ListAccounts(context.Background(), ListAccountsFilter{})
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	if calls.Load() != 3 {
+		t.Errorf("calls = %d, want 3", calls.Load())
+	}
+	if len(resp.List) != 0 {
+		t.Errorf("resp.List len = %d, want 0 (mock returns empty data shape)", len(resp.List))
+	}
+}
+
+func TestRetry_GET_503ThenSuccess(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n < 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":"unavailable"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[],"total":0}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = c.ListAccounts(context.Background(), ListAccountsFilter{})
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("calls = %d, want 2", calls.Load())
+	}
+}
+
+func TestRetry_DELETE_429ThenSuccess(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = c.DeletePost(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("DeletePost: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("calls = %d, want 2", calls.Load())
+	}
+}
+
+func TestRetry_POST_NotRetried(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = c.CreatePost(context.Background(), map[string]string{"text": "hello"})
+	if err == nil {
+		t.Fatal("expected error from 429")
+	}
+	if calls.Load() != 1 {
+		t.Errorf("POST calls = %d, want 1 (POST must not retry)", calls.Load())
+	}
+}
+
+func TestRetry_401NotRetried(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"invalid token"}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = c.ListAccounts(context.Background(), ListAccountsFilter{})
+	if err == nil {
+		t.Fatal("expected error from 401")
+	}
+	if calls.Load() != 1 {
+		t.Errorf("calls = %d, want 1 (401 must not retry)", calls.Load())
+	}
+}
+
+func TestRetry_404NotRetried(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"not found"}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = c.DeletePost(context.Background(), 999)
+	if err == nil {
+		t.Fatal("expected error from 404")
+	}
+	if calls.Load() != 1 {
+		t.Errorf("calls = %d, want 1 (404 must not retry)", calls.Load())
+	}
+}
+
+func TestRetry_ContextCancelStopsRetry(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"unavailable"}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: &retry.Options{
+		MaxAttempts:  10,
+		InitialDelay: 5 * time.Second,
+		MaxDelay:     5 * time.Second,
+	}})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = c.ListAccounts(ctx, ListAccountsFilter{})
+	if err == nil {
+		t.Fatal("expected error from context cancellation")
+	}
+	// First call happens immediately, then retry waits 5s but context cancels at 100ms.
+	if calls.Load() != 1 {
+		t.Errorf("calls = %d, want 1 (context should cancel before 2nd attempt)", calls.Load())
+	}
+}
+
+func TestRetry_MaxAttemptsExhausted(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"unavailable"}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = c.ListAccounts(context.Background(), ListAccountsFilter{})
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if calls.Load() != 3 {
+		t.Errorf("calls = %d, want 3 (MaxAttempts)", calls.Load())
+	}
+	var ae *APIError
+	if !errorsAs(err, &ae) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	if ae.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("ae.StatusCode = %d, want 503", ae.StatusCode)
+	}
+}
+
+func TestRetry_RetryAfterHeaderHonored(t *testing.T) {
+	var calls atomic.Int64
+	var firstCallTime time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			firstCallTime = time.Now()
+			w.Header().Set("Retry-After", "1") // 1 second
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		elapsed := time.Since(firstCallTime)
+		if elapsed < 900*time.Millisecond {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"retry too fast"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[],"total":0}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: &retry.Options{
+		MaxAttempts:  3,
+		InitialDelay: 10 * time.Second, // high default; Retry-After should override
+		MaxDelay:     10 * time.Second,
+	}})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = c.ListAccounts(context.Background(), ListAccountsFilter{})
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("calls = %d, want 2", calls.Load())
+	}
+}
+
+func TestRetry_ZeroConfigNoRetry(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"unavailable"}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv) // no RetryOptions
+	_, err := c.ListAccounts(context.Background(), ListAccountsFilter{})
+	if err == nil {
+		t.Fatal("expected error from 503")
+	}
+	if calls.Load() != 1 {
+		t.Errorf("calls = %d, want 1 (no retry without RetryOptions)", calls.Load())
+	}
+}
+
+func TestRetry_PreservesAPIErrorBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"specific rate limit message"}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = c.ListAccounts(context.Background(), ListAccountsFilter{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var ae *APIError
+	if !errorsAs(err, &ae) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	if ae.Message != "specific rate limit message" {
+		t.Errorf("ae.Message = %q, want %q", ae.Message, "specific rate limit message")
+	}
+	if ae.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("ae.StatusCode = %d, want 429", ae.StatusCode)
+	}
+}
+
+func TestConfig_HTTPClientOverride(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[],"total":0}`))
+	}))
+	defer srv.Close()
+	custom := &http.Client{}
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, HTTPClient: custom})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if c.http != custom {
+		t.Error("c.http != custom HTTPClient")
+	}
+	_, err = c.ListAccounts(context.Background(), ListAccountsFilter{})
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
 	}
 }
