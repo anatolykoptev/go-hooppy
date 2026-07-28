@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/anatolykoptev/go-kit v0.97.8
 	github.com/anatolykoptev/go-mcpserver v0.18.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/spf13/cobra v1.10.2
 )

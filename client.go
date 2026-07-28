@@ -14,6 +14,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // MaxUploadBytes is the default upper limit on file upload size (50 MB).
@@ -58,6 +60,12 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 	if _, err := url.Parse(baseURL); err != nil {
 		return nil, fmt.Errorf("hooppy: invalid base URL: %w", err)
+	}
+	// Pre-validate JWT expiry if the token looks like a JWT (3 dot-separated parts).
+	// We parse without signature verification (we don't have the signing key);
+	// the goal is to fail fast on expired tokens instead of waiting for a 401.
+	if err := checkJWTExpiry(cfg.Token); err != nil {
+		return nil, err
 	}
 	timeout := cfg.Timeout
 	if timeout == 0 {
@@ -105,10 +113,36 @@ func NewClientFromEnv() (*Client, error) {
 			}
 		}
 	}
+	if token == "" {
+		return nil, errors.New("hooppy: token not found — set HOOPPY_TOKEN env var or create ~/.config/hooppy/token")
+	}
 	return NewClient(Config{
 		BaseURL: os.Getenv("HOOPPY_BASE_URL"),
 		Token:   token,
 	})
+}
+
+// checkJWTExpiry parses the token as a JWT (without signature verification)
+// and returns an error if the exp claim is in the past. Non-JWT tokens (no
+// exp claim or not 3-part dot-separated) are silently accepted for backward
+// compatibility with opaque tokens.
+func checkJWTExpiry(token string) error {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil // not a JWT, skip check
+	}
+	var claims jwt.RegisteredClaims
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	if _, _, err := parser.ParseUnverified(token, &claims); err != nil {
+		return nil // can't parse, let the API decide
+	}
+	if claims.ExpiresAt == nil {
+		return nil // no exp claim, skip
+	}
+	if claims.ExpiresAt.Before(time.Now()) {
+		return fmt.Errorf("hooppy: token expired at %s", claims.ExpiresAt.Format(time.RFC3339))
+	}
+	return nil
 }
 
 // doGET performs a GET request and decodes the JSON response into out.
