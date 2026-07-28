@@ -145,11 +145,11 @@ func TestAccountsResponse_RoundTrip(t *testing.T) {
 
 func TestPage_RoundTrip(t *testing.T) {
 	orig := Page{
-		ID:             2355344,
+		ID:             123456,
 		SourceID:       3,
-		AccountID:      32323,
-		SocialPageID:   "333711379818750",
-		SocialPageName: "GRAND BAZAR",
+		AccountID:      7890,
+		SocialPageID:   "123456789012345",
+		SocialPageName: "Test Page",
 	}
 	data, err := json.Marshal(orig)
 	if err != nil {
@@ -159,10 +159,10 @@ func TestPage_RoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if decoded.SocialPageID != "333711379818750" {
+	if decoded.SocialPageID != "123456789012345" {
 		t.Errorf("SocialPageID = %q, want string", decoded.SocialPageID)
 	}
-	if decoded.SocialPageName != "GRAND BAZAR" {
+	if decoded.SocialPageName != "Test Page" {
 		t.Errorf("SocialPageName = %q", decoded.SocialPageName)
 	}
 }

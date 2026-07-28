@@ -1,5 +1,7 @@
 package hooppy
 
+import "encoding/json"
+
 // Types derived from the Hooppy OpenAPI 3.0 specification (openapi.yaml).
 // The live API may return additional undocumented fields; Go's json.Unmarshal
 // silently ignores them, so only documented fields are modelled here.
@@ -581,4 +583,135 @@ type PostsResponse struct {
 	TotalRows int    `json:"total_rows"`
 	IsHasMore bool   `json:"is_has_more"`
 	RowsLimit int    `json:"rows_limit"`
+}
+
+// --- Posts search (scraping external pages) — UNDOCUMENTED ---
+
+// SearchPostPhoto is a photo attachment in a scraped post.
+type SearchPostPhoto struct {
+	ID      int    `json:"id"`
+	OwnerID int    `json:"owner_id"`
+	URL     string `json:"url"`
+	Info    string `json:"info"`
+}
+
+// SearchPostOwner is the source page/group of a scraped post.
+type SearchPostOwner struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Name  string `json:"name"`
+	Alias string `json:"alias"`
+	Photo string `json:"photo"`
+	Link  string `json:"link"`
+}
+
+// SearchPost is a post scraped from an external social media page.
+type SearchPost struct {
+	ID                     int               `json:"id"`
+	IsAttachmentsInProcess int               `json:"is_attachments_in_process"`
+	SourceID               int               `json:"source_id"`
+	PublicationDate        string            `json:"publication_date"`
+	Text                   string            `json:"text"`
+	Photos                 []SearchPostPhoto `json:"photos"`
+	Videos                 []json.RawMessage `json:"videos"`
+	Audios                 []json.RawMessage `json:"audios"`
+	Documents              []json.RawMessage `json:"documents"`
+	Owner                  SearchPostOwner   `json:"owner"`
+	Link                   string            `json:"link"`
+	Likes                  string            `json:"likes"`
+	Reposts                string            `json:"reposts"`
+	Views                  string            `json:"views"`
+	Comments               string            `json:"comments"`
+	Involvement            string            `json:"involvement"`
+	VideoDuration          int               `json:"video_duration"`
+	IsUsed                 int               `json:"is_used"`
+}
+
+// SearchPostsResponse wraps GET /posts-search.
+type SearchPostsResponse struct {
+	List        []SearchPost      `json:"list"`
+	TotalRows   int               `json:"total_rows"`
+	IsHasMore   bool              `json:"is_has_more"`
+	RowsLimit   int               `json:"rows_limit"`
+	FiltersPlug []json.RawMessage `json:"filters_plug"`
+}
+
+// SearchPostsFilter is the query filter for GET /posts-search.
+type SearchPostsFilter struct {
+	Text             string
+	DateFrom         string // dd.mm.yyyy
+	DateTo           string // dd.mm.yyyy
+	SourceType       int    // 1=social, 2=RSS
+	SourceID         int    // social network ID (1=VK, 7=Instagram, etc.)
+	SourceResourceID int    // source resource ID (from ListSourceResources)
+	OwnerID          int    // page ID within source
+	Page             int
+}
+
+// SourceResource is a configured source of posts to scrape (a group of social media pages).
+type SourceResource struct {
+	ID                    int    `json:"id"`
+	UserID                int    `json:"user_id"`
+	Name                  string `json:"name"`
+	SourceType            int    `json:"source_type"` // 1=social, 2=RSS
+	SearchType            int    `json:"search_type"` // 1=pages, 2=hashtag
+	SourceID              int    `json:"source_id"`   // social network ID
+	Data                  string `json:"data"`        // URLs separated by \n
+	Hashtag               string `json:"hashtag"`
+	Link                  string `json:"link"`
+	PostsFilter           *bool  `json:"posts_filter"`
+	PostsText             *bool  `json:"posts_text"`
+	PostsUpgrade          *bool  `json:"posts_upgrade"`
+	PostsTextModification *bool  `json:"posts_text_modification"`
+}
+
+// SourceResourcesResponse wraps GET /posts-search/source-resources.
+type SourceResourcesResponse struct {
+	List []SourceResource `json:"list"`
+}
+
+// SocialAccount is an authenticated account that can be used as a parser.
+type SocialAccount struct {
+	ID       int    `json:"id"`
+	SourceID int    `json:"source_id"`
+	Name     string `json:"name"`
+}
+
+// ParsingFormResponse wraps GET /posts-search/parsing/form.
+type ParsingFormResponse struct {
+	SourceResources     []SourceResource `json:"source_resources"`
+	SocialAccounts      []SocialAccount  `json:"social_accounts"`
+	IsParsingInProgress bool             `json:"is_parsing_in_progress"`
+}
+
+// ParsingStartPayload is the request body for POST /posts-search/parsing/start.
+type ParsingStartPayload struct {
+	SourceType                int `json:"source_type"`                   // 1=social, 2=RSS
+	SearchType                int `json:"search_type"`                   // 1=pages, 2=hashtag
+	SourceID                  int `json:"source_id"`                     // social network ID
+	SourceResourceID          int `json:"source_resource_id"`            // source resource ID
+	SocialAccountForParsingID int `json:"social_account_for_parsing_id"` // account to parse with
+	DateFrom                  int `json:"date_from"`                     // unix timestamp, 0=any
+	DateTo                    int `json:"date_to"`                       // unix timestamp, 0=any
+}
+
+// ParsingStartResponse wraps POST /posts-search/parsing/start.
+type ParsingStartResponse struct {
+	Success bool `json:"success"`
+}
+
+// CopySearchPostPayload copies a scraped post (from GET /posts-search) to the
+// user's own pages. The server auto-fills text and attachments from the
+// scraped post identified by SearchPostID — no need to pass texts/attachments.
+//
+// UNDOCUMENTED: PUT /posts/copy with search_post_id is not in the public OpenAPI spec.
+type CopySearchPostPayload struct {
+	SearchPostID        int              `json:"search_post_id"`             // ID from GET /posts-search (REQUIRED)
+	PublicationWhenType int              `json:"publication_when_type"`      // 1=now, 2=at specific time, 3=by schedule
+	PublicationHowType  int              `json:"publication_how_type"`       // 1
+	SelectedPagesIDs    []int            `json:"selected_pages_ids"`         // for when_type=1 or 2
+	SchedulesIDs        []int            `json:"schedules_ids"`              // for when_type=3
+	PublicationDate     *PublicationDate `json:"publication_date,omitempty"` // for when_type=2
+	Texts               []PostText       `json:"texts"`                      // auto-filled by server when search_post_id is set
+	Attachments         []Attachment     `json:"attachments"`                // auto-filled by server when search_post_id is set
 }

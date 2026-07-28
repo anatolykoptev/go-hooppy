@@ -71,7 +71,7 @@ func main() {
     result, err := client.CreatePost(context.Background(), hooppy.PostPublishNowPayload{
         PublicationWhenType: 1,
         PublicationHowType:  1,
-        SelectedPagesIDs:    []int{822454, 22543},
+        SelectedPagesIDs:    []int{123456, 789012}, // your page IDs from hooppy pages list
         Texts:               []hooppy.PostText{{Text: "Hello from go-hooppy!", SourceID: 0}},
     })
     if err != nil {
@@ -128,13 +128,13 @@ hooppy accounts list --source 6   # Pinterest only
 hooppy pages list --source 1      # VK pages
 
 # Create and publish a post
-hooppy posts create --text "Hello world" --to 822454,22543
+hooppy posts create --text "Hello world" --to <page-id>,<page-id>
 
 # List unpublished posts
 hooppy posts list --unpublished
 
 # Delete a post
-hooppy posts delete 533241
+hooppy posts delete <post-id>
 
 # Upload media
 hooppy files upload-media ./photo.jpg
@@ -144,39 +144,48 @@ hooppy projects list
 hooppy schedules list
 
 # Create / update / delete projects (undocumented)
-hooppy projects create --name "My Project" --page 2355344
-hooppy projects update 21778 --name "Renamed Project"
-hooppy projects delete 21778
+hooppy projects create --name "My Project" --page <page-id>
+hooppy projects update <project-id> --name "Renamed Project"
+hooppy projects delete <project-id>
 
 # Create / update / delete schedules (undocumented)
 hooppy schedules create --name "Daily 09:00"
-hooppy schedules update 55608 --name "Renamed" --state 0
-hooppy schedules delete 55608
+hooppy schedules update <schedule-id> --name "Renamed" --state 0
+hooppy schedules delete <schedule-id>
 
 # Update an existing post (undocumented)
-hooppy posts update 533241 --text "Updated text" --to 822454
+hooppy posts update <post-id> --text "Updated text" --to <page-id>
 
 # Create a post via an alternative mode (undocumented)
 # Modes: search, copy, sources, import, crosspost, rewrite, translate,
 #         queue, drafts, templates, rss, feeds, tags, watermarks, batch
-hooppy posts crosspost --mode search --text "Found via search" --to 2355344
-hooppy posts crosspost --mode copy --text "Copied post" --to 2355344
-hooppy posts crosspost --mode rss --text "From RSS feed" --to 2355344
+hooppy posts crosspost --mode search --text "Found via search" --to <page-id>
+hooppy posts crosspost --mode copy --text "Copied post" --to <page-id>
+hooppy posts crosspost --mode rss --text "From RSS feed" --to <page-id>
 
 # Disconnect a page (undocumented)
-hooppy pages disconnect 99999
+hooppy pages disconnect <page-id>
 
 # User profile / watermarks / proxies / notifications (undocumented)
 hooppy user
 hooppy watermarks list
 hooppy watermarks create --name "WM1" --file /path/to/wm.png --opacity 50
-hooppy watermarks update 3324 --name "Renamed" --opacity 80
-hooppy watermarks delete 3324
+hooppy watermarks update <id> --name "Renamed" --opacity 80
+hooppy watermarks delete <id>
 hooppy proxies list
 hooppy proxies create --ip 1.2.3.4 --port 8080 --login user --password pass
-hooppy proxies update 8335 --name "Renamed proxy" --ip 5.6.7.8
-hooppy proxies delete 8335
+hooppy proxies update <id> --name "Renamed proxy" --ip 5.6.7.8
+hooppy proxies delete <id>
 hooppy notifications
+
+# Search and scrape posts from external social media pages (UNDOCUMENTED)
+hooppy search sources                          # list configured source resources
+hooppy search posts --source-resource-id <id>  # list scraped posts from a source
+hooppy search posts --source-resource-id <id> --text "search query" --date-from 01.01.2026
+hooppy search status                           # check if parsing is in progress
+hooppy search parse --source-resource-id <id> --account-id <id>  # start scraping
+hooppy search stop                             # stop in-progress scraping
+hooppy search copy --post-id <id> --to <page-id>  # copy scraped post to your page
 
 # Print MCP setup instructions
 hooppy mcp-config
@@ -243,6 +252,12 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 | `hooppy_delete_proxy` | Delete a proxy server |
 | `hooppy_list_notifications` | List publication notifications |
 | `hooppy_disconnect_page` | Disconnect a social media page |
+| `hooppy_list_search_posts` | List posts scraped from external pages (UNDOCUMENTED) |
+| `hooppy_list_source_resources` | List configured source resources to scrape from (UNDOCUMENTED) |
+| `hooppy_parsing_status` | Check scraping status + available parsers (UNDOCUMENTED) |
+| `hooppy_start_parsing` | Start scraping posts from an external source (UNDOCUMENTED) |
+| `hooppy_stop_parsing` | Stop in-progress scraping job (UNDOCUMENTED) |
+| `hooppy_copy_search_post` | Copy a scraped post to your own pages (UNDOCUMENTED) |
 
 ## Social network source IDs
 

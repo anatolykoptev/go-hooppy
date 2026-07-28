@@ -32,6 +32,7 @@ func main() {
 	registerWatermarks(root)
 	registerProxies(root)
 	registerNotifications(root)
+	registerSearch(root)
 	registerMCPConfig(root)
 
 	if err := root.Execute(); err != nil {
@@ -138,7 +139,13 @@ func registerPosts(root *cobra.Command) {
 		Short: "List posts",
 	})
 	var unpublished bool
+	var pubDate string
+	var pageID, sourceID, projectID int
 	listCmd.Flags().BoolVar(&unpublished, "unpublished", false, "show only unpublished posts")
+	listCmd.Flags().StringVar(&pubDate, "date", "", "filter by publication date (dd.mm.yyyy)")
+	listCmd.Flags().IntVar(&pageID, "page-id", 0, "filter by page ID")
+	listCmd.Flags().IntVar(&sourceID, "source-id", 0, "filter by source ID (social network)")
+	listCmd.Flags().IntVar(&projectID, "project-id", 0, "filter by project ID")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		var isPub *bool
@@ -146,7 +153,13 @@ func registerPosts(root *cobra.Command) {
 			f := false
 			isPub = &f
 		}
-		resp, err := c.ListPosts(context.Background(), hooppy.ListPostsFilter{IsPublished: isPub})
+		resp, err := c.ListPosts(context.Background(), hooppy.ListPostsFilter{
+			IsPublished:     isPub,
+			PublicationDate: pubDate,
+			PageID:          pageID,
+			SourceID:        sourceID,
+			ProjectID:       projectID,
+		})
 		die(err)
 		printJSON(resp)
 	}
@@ -680,6 +693,163 @@ func registerMCPConfig(root *cobra.Command) {
 		fmt.Println()
 		fmt.Println("# Or via HTTP (if running hooppy-mcp without --stdio):")
 		cli.PrintMCPConfig("hooppy", "http://localhost:8080/mcp", "http")
+	}
+}
+
+func registerSearch(root *cobra.Command) {
+	searchCmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+		Name:  "search",
+		Short: "Search and scrape posts from external social media pages",
+	})
+
+	// search sources
+	sourcesCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
+		Name:  "sources",
+		Short: "List configured source resources (external pages to scrape from)",
+	})
+	sourcesCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.ListSourceResources(context.Background())
+		die(err)
+		printJSON(resp)
+	}
+
+	// search posts
+	postsCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
+		Name:  "posts",
+		Short: "List scraped posts from external pages",
+	})
+	var sText, sDateFrom, sDateTo string
+	var sSourceType, sSourceID, sSourceResourceID, sOwnerID, sPage int
+	postsCmd.Flags().StringVar(&sText, "text", "", "search by text")
+	postsCmd.Flags().StringVar(&sDateFrom, "date-from", "", "filter by date from (dd.mm.yyyy)")
+	postsCmd.Flags().StringVar(&sDateTo, "date-to", "", "filter by date to (dd.mm.yyyy)")
+	postsCmd.Flags().IntVar(&sSourceType, "source-type", 0, "source type: 1=social, 2=RSS")
+	postsCmd.Flags().IntVar(&sSourceID, "source-id", 0, "social network ID (1=VK, 7=Instagram, etc.)")
+	postsCmd.Flags().IntVar(&sSourceResourceID, "source-resource-id", 0, "source resource ID (see 'search sources')")
+	postsCmd.Flags().IntVar(&sOwnerID, "owner-id", 0, "page ID within source")
+	postsCmd.Flags().IntVar(&sPage, "page", 0, "pagination page number")
+	postsCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.ListSearchPosts(context.Background(), hooppy.SearchPostsFilter{
+			Text:             sText,
+			DateFrom:         sDateFrom,
+			DateTo:           sDateTo,
+			SourceType:       sSourceType,
+			SourceID:         sSourceID,
+			SourceResourceID: sSourceResourceID,
+			OwnerID:          sOwnerID,
+			Page:             sPage,
+		})
+		die(err)
+		printJSON(resp)
+	}
+
+	// search status
+	statusCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
+		Name:  "status",
+		Short: "Show parsing status (in-progress or not)",
+	})
+	statusCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.GetParsingForm(context.Background())
+		die(err)
+		printJSON(resp)
+	}
+
+	// search parse
+	parseCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
+		Name:  "parse",
+		Short: "Start scraping posts from an external source resource",
+	})
+	var pSourceType, pSearchType, pSourceID, pSourceResourceID, pAccountID, pDateFrom, pDateTo int
+	parseCmd.Flags().IntVar(&pSourceType, "source-type", 1, "source type: 1=social, 2=RSS")
+	parseCmd.Flags().IntVar(&pSearchType, "search-type", 1, "search method: 1=pages, 2=hashtag")
+	parseCmd.Flags().IntVar(&pSourceID, "source-id", 1, "social network ID (1=VK, 7=Instagram, etc.)")
+	parseCmd.Flags().IntVar(&pSourceResourceID, "source-resource-id", 0, "source resource ID (REQUIRED, see 'search sources')")
+	parseCmd.Flags().IntVar(&pAccountID, "account-id", 0, "social account ID to use as parser (see 'search status')")
+	parseCmd.Flags().IntVar(&pDateFrom, "date-from", 0, "unix timestamp, 0=any")
+	parseCmd.Flags().IntVar(&pDateTo, "date-to", 0, "unix timestamp, 0=any")
+	parseCmd.Run = func(_ *cobra.Command, _ []string) {
+		if pSourceResourceID == 0 {
+			fmt.Fprintln(os.Stderr, "error: --source-resource-id is required (see 'hooppy search sources')")
+			os.Exit(1)
+		}
+		c := mustClient()
+		resp, err := c.StartParsing(context.Background(), hooppy.ParsingStartPayload{
+			SourceType:                pSourceType,
+			SearchType:                pSearchType,
+			SourceID:                  pSourceID,
+			SourceResourceID:          pSourceResourceID,
+			SocialAccountForParsingID: pAccountID,
+			DateFrom:                  pDateFrom,
+			DateTo:                    pDateTo,
+		})
+		die(err)
+		printJSON(resp)
+	}
+
+	// search stop
+	stopCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
+		Name:  "stop",
+		Short: "Stop any in-progress scraping job",
+	})
+	stopCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		err := c.StopParsing(context.Background())
+		die(err)
+		fmt.Println(`{"success":true}`)
+	}
+
+	// search copy
+	copyCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
+		Name:  "copy",
+		Short: "Copy a scraped post to your own pages (auto-fills text + photos from the scraped post)",
+	})
+	var copyPostID int
+	var copyPages string
+	var copyWhenType, copyHowType int
+	var copySchedules string
+	var copyDate, copyHours, copyMinutes string
+	copyCmd.Flags().IntVar(&copyPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED)")
+	copyCmd.Flags().StringVar(&copyPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
+	copyCmd.Flags().IntVar(&copyWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
+	copyCmd.Flags().IntVar(&copyHowType, "how-type", 1, "publication how type (1=default)")
+	copyCmd.Flags().StringVar(&copySchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
+	copyCmd.Flags().StringVar(&copyDate, "date", "", "publication date dd.mm.yyyy (for when-type 2)")
+	copyCmd.Flags().StringVar(&copyHours, "hours", "", "publication hours HH (for when-type 2)")
+	copyCmd.Flags().StringVar(&copyMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
+	copyCmd.Run = func(_ *cobra.Command, _ []string) {
+		if copyPostID == 0 {
+			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
+			os.Exit(1)
+		}
+		if copyWhenType == 2 && (copyDate == "" || copyHours == "" || copyMinutes == "") {
+			fmt.Fprintln(os.Stderr, "error: --date, --hours, --minutes are required for --when-type 2")
+			os.Exit(1)
+		}
+		c := mustClient()
+		payload := hooppy.CopySearchPostPayload{
+			SearchPostID:        copyPostID,
+			PublicationWhenType: copyWhenType,
+			PublicationHowType:  copyHowType,
+		}
+		switch copyWhenType {
+		case 3:
+			payload.SchedulesIDs = parseIntList(copySchedules)
+		case 2:
+			payload.SelectedPagesIDs = parseIntList(copyPages)
+			payload.PublicationDate = &hooppy.PublicationDate{
+				Date:    copyDate,
+				Hours:   copyHours,
+				Minutes: copyMinutes,
+			}
+		default:
+			payload.SelectedPagesIDs = parseIntList(copyPages)
+		}
+		resp, err := c.CopySearchPost(context.Background(), payload)
+		die(err)
+		printJSON(resp)
 	}
 }
 

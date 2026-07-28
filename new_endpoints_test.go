@@ -14,7 +14,7 @@ func TestGetUser(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/users/me" {
 			t.Errorf("GET /users/me, got %s %s", r.Method, r.URL.Path)
 		}
-		w.Write([]byte(`{"user":{"id":5751,"email":"test@example.com","plan_type":1}}`))
+		w.Write([]byte(`{"user":{"id":12345,"email":"user@example.com","plan_type":1}}`))
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -23,11 +23,11 @@ func TestGetUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUser: %v", err)
 	}
-	if resp.User.ID != 5751 {
-		t.Errorf("ID = %d, want 5751", resp.User.ID)
+	if resp.User.ID != 12345 {
+		t.Errorf("ID = %d, want 12345", resp.User.ID)
 	}
-	if resp.User.Email != "test@example.com" {
-		t.Errorf("Email = %q, want test@example.com", resp.User.Email)
+	if resp.User.Email != "user@example.com" {
+		t.Errorf("Email = %q, want user@example.com", resp.User.Email)
 	}
 }
 
@@ -209,7 +209,7 @@ func TestCreateProject(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	payload := NewProjectPayload("Test Project", 2355344)
+	payload := NewProjectPayload("Test Project", 123456)
 	resp, err := c.CreateProject(context.Background(), payload)
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -251,7 +251,7 @@ func TestUpdatePost(t *testing.T) {
 	payload := PostPublishNowPayload{
 		PublicationWhenType: 1,
 		PublicationHowType:  1,
-		SelectedPagesIDs:    []int{2355344},
+		SelectedPagesIDs:    []int{123456},
 		Texts:               []PostText{{Text: "updated", SourceID: 0}},
 		Attachments:         []Attachment{},
 	}
