@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -930,7 +932,31 @@ func registerSearch(root *cobra.Command) {
 				os.Exit(1)
 			}
 			if len(found.Photos) > 0 {
-				payload.Attachments = []hooppy.Attachment{hooppy.ScrapedPhotoAttachment(found.Photos)}
+				// Download each photo, upload via UploadMedia, collect media IDs.
+				// Scraped VK photo IDs can't be used directly — VK doesn't allow
+				// attaching photos from another group to your own post.
+				items := make([]map[string]interface{}, 0, len(found.Photos))
+				for i, ph := range found.Photos {
+					tmpPath := fmt.Sprintf("/tmp/hooppy_photo_%d_%d.jpg", rwPostID, i)
+					if err := downloadPhoto(ph.URL, tmpPath); err != nil {
+						fmt.Fprintf(os.Stderr, "error: download photo %d: %v\n", i, err)
+						os.Exit(1)
+					}
+					media, err := c.UploadMedia(context.Background(), tmpPath, "")
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "error: upload photo %d: %v\n", i, err)
+						os.Exit(1)
+					}
+					items = append(items, map[string]interface{}{
+						"id":   media.Photo.ID,
+						"type": "photo",
+					})
+					os.Remove(tmpPath)
+				}
+				payload.Attachments = []hooppy.Attachment{{
+					Type: "photos",
+					Data: items,
+				}}
 			}
 		}
 		resp, err := c.RewriteSearchPost(context.Background(), payload)
@@ -955,4 +981,22 @@ func parseIntList(s string) []int {
 		ids = append(ids, n)
 	}
 	return ids
+}
+
+func downloadPhoto(url, dest string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, resp.Body)
+	return err
 }

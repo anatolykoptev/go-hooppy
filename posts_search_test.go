@@ -344,6 +344,10 @@ func TestRewriteSearchPost_Scheduled(t *testing.T) {
 }
 
 func TestScrapedPhotoAttachment(t *testing.T) {
+	// ScrapedPhotoAttachment is deprecated — scraped VK photo IDs can't be
+	// attached to your own post (VK doesn't allow cross-group references).
+	// The helper is kept for reference; tests verify it still builds the
+	// correct structure in case it's useful for non-VK sources in the future.
 	photos := []SearchPostPhoto{
 		{ID: 111, OwnerID: -222, URL: "https://example.com/1.jpg"},
 		{ID: 333, OwnerID: -222, URL: "https://example.com/2.jpg"},

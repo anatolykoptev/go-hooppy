@@ -145,10 +145,12 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	return &resp, nil
 }
 
-// ScrapedPhotoAttachment builds an Attachment from a scraped post's photos.
-// The server copies the photos asynchronously from the source social network.
-// Works for immediate publish (when_type=1); for scheduled publish (when_type=2),
-// upload photos via UploadMedia first and use those IDs instead.
+// ScrapedPhotoAttachment builds an Attachment from scraped post photos.
+//
+// DEPRECATED: scraped photo IDs (VK owner_id + photo id) cannot be attached
+// to your own post — VK doesn't allow cross-group photo references. Use
+// UploadMedia to download and re-upload photos, then pass those media IDs
+// in attachments instead. This helper is kept for reference only.
 func ScrapedPhotoAttachment(photos []SearchPostPhoto) Attachment {
 	items := make([]map[string]interface{}, 0, len(photos))
 	for _, ph := range photos {

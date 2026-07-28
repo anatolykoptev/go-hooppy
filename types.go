@@ -704,11 +704,10 @@ type ParsingStartResponse struct {
 // to the user's own pages. Used by both CopySearchPost (PUT /posts/copy) and
 // RewriteSearchPost (PUT /posts/rewrite).
 //
-// To keep the original photos, pass the scraped post's photo IDs in Attachments
-// with type "photos" and each photo's id + owner_id. The server copies them
-// asynchronously from the source social network. This works for immediate
-// publish (when_type=1); for scheduled publish (when_type=2), upload photos
-// via UploadMedia first and pass the uploaded media IDs instead.
+// Photo handling: scraped photo IDs (VK owner_id + photo id) CANNOT be used
+// directly — VK doesn't allow cross-group photo references. To include photos,
+// download them from the scraped post's photos[].url, upload via UploadMedia,
+// and pass the resulting media IDs in Attachments.
 //
 // UNDOCUMENTED: PUT /posts/copy and PUT /posts/rewrite with search_post_id
 // are not in the public OpenAPI spec.
