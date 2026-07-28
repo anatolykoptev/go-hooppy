@@ -75,28 +75,44 @@ var errorClassTable = []struct {
 }
 
 // networkNameTable maps a notification row's source_id to the network name
-// rendered in the doctor report's "network" field. MEASURED from the social
-// page links on a live Hooppy account — the vendor may add ids without
-// notice. An id absent from this table renders as "unknown", which is the
-// honest answer for an id the account exposes no page link for (e.g.
-// source_id 18 on the measured account). Two distinct ids (7 and 10) both
-// resolve to "instagram" — recorded as measured, not assumed wrong.
+// rendered in the doctor report's "network" field. Extracted from the
+// vendor's public web bundle (https://hooppy.ru/_nuxt/, no auth) — the
+// authoritative id→name table the vendor's own client ships. The vendor may
+// add ids without notice.
+//
+// An id absent from this table MUST render as "unknown" rather than being
+// coerced into a guess — the same rule errorClassTable already follows for
+// unmatched messages. Two ids (10 and 11) are observed on live accounts but
+// appear in no vendor table found; pages under id 10 carry instagram.com
+// links, which suggests a second Instagram connection method, but that is
+// inference, not evidence — so both stay unmapped and render "unknown" as
+// observed-but-unnamed rather than absent.
+//
+// The map is known-incomplete by construction: the vendor also ships connect
+// flows for Threads, WhatsApp, TenChat, RuTube, Likee, Wibes, Yappy,
+// WordPress and Joomla whose numeric ids are not in the bundle table. If a
+// notification arrives for one of those, it renders "unknown" until the id
+// is added here.
 //
 // This is deliberately separate from the library-wide SourceID map in
 // sources.go (which is inferred from the public hooppy.ru/en page and has
 // different provenance). The doctor reports on a specific account's
-// notifications, and the measured page-link mapping is the ground truth for
-// that account's network names.
+// notifications, and the vendor bundle's id→name mapping is the ground truth
+// for the network names.
 var networkNameTable = map[int]string{
-	1:  "vk",
-	2:  "odnoklassniki",
-	3:  "facebook",
-	4:  "twitter",
-	6:  "pinterest",
-	7:  "instagram",
-	9:  "telegram",
-	10: "instagram",
-	13: "dzen",
+	1:  "vk",            // VKontakte
+	2:  "odnoklassniki", // Odnoklassniki
+	3:  "facebook",      // Facebook
+	4:  "twitter",       // Twitter
+	6:  "pinterest",     // Pinterest
+	7:  "instagram",     // Instagram
+	9:  "telegram",      // Telegram
+	13: "dzen",          // Dzen
+	14: "tiktok",        // TikTok
+	16: "viber",         // Viber
+	17: "youtube",       // YouTube
+	18: "linkedin",      // LinkedIn
+	28: "max",           // Max
 }
 
 // networkName returns the network name for a source_id, or "unknown" for an

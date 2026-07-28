@@ -315,26 +315,38 @@ func TestClassifyError_MeasuredVendorStrings(t *testing.T) {
 	}
 }
 
-// TestNetworkName_MeasuredSourceIDs is the regression gate for the network
-// field. It asserts each measured source_id resolves to the right network
-// name, that two distinct ids (7 and 10) both resolve to "instagram" as
-// measured, and that an id absent from the table (18 — exists on the
-// measured account but exposes no page link) renders "unknown".
-func TestNetworkName_MeasuredSourceIDs(t *testing.T) {
+// TestNetworkName_VendorBundleMap is the regression gate for the network
+// field. It pins every id→name pair extracted from the vendor's public web
+// bundle (https://hooppy.ru/_nuxt/) and asserts one unmapped id renders
+// "unknown" rather than being coerced — the same rule errorClassTable
+// follows for unmatched messages. Without this test the map is a silent-rot
+// surface exactly like the classification table was: a vendor id renumbering
+// or a slug typo would go unnoticed until someone runs doctor against the
+// live log again.
+//
+// source_id 10 is observed on live accounts (pages under it carry
+// instagram.com links) but appears in no vendor table found — it stays
+// unmapped and renders "unknown" as observed-but-unnamed, not absent.
+func TestNetworkName_VendorBundleMap(t *testing.T) {
 	cases := []struct {
 		sourceID int
 		want     string
 	}{
-		{1, "vk"},
-		{2, "odnoklassniki"},
-		{3, "facebook"},
-		{4, "twitter"},
-		{6, "pinterest"},
-		{7, "instagram"},
-		{9, "telegram"},
-		{10, "instagram"}, // two distinct ids both resolve to instagram — measured
-		{13, "dzen"},
-		{18, "unknown"}, // exists on the account, no page link — honest unknown
+		{1, "vk"},            // VKontakte
+		{2, "odnoklassniki"}, // Odnoklassniki
+		{3, "facebook"},      // Facebook
+		{4, "twitter"},       // Twitter
+		{6, "pinterest"},     // Pinterest
+		{7, "instagram"},     // Instagram
+		{9, "telegram"},      // Telegram
+		{13, "dzen"},         // Dzen
+		{14, "tiktok"},       // TikTok
+		{16, "viber"},        // Viber
+		{17, "youtube"},      // YouTube
+		{18, "linkedin"},     // LinkedIn
+		{28, "max"},          // Max
+		// Unmapped ids render "unknown" rather than being coerced.
+		{10, "unknown"}, // observed on live accounts, no vendor table entry — observed-but-unnamed
 		{999, "unknown"},
 	}
 	for _, tc := range cases {
