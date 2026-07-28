@@ -1053,10 +1053,10 @@ func registerSearch(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// search import — batch copy via PUT /posts/import with full text + attachments
+	// search import — copy one scraped post via PUT /posts/import with full text + attachments
 	importCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
 		Name:  "import",
-		Short: "Batch-copy a scraped post with full text + photos/videos via PUT /posts/import (server downloads photos async)",
+		Short: "Copy a scraped post with full text + photos/videos via PUT /posts/import (server downloads photos async)",
 	})
 	var impPostID int
 	var impSchedules string
