@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"testing"
+	"time"
 )
 
 func TestNewAPIError_JSONMessageField(t *testing.T) {
@@ -160,5 +161,105 @@ func TestUUIDv4_Uniqueness(t *testing.T) {
 			t.Fatalf("duplicate UUID at iteration %d: %s", i, id)
 		}
 		seen[id] = true
+	}
+}
+
+func TestParseRetryAfter_Seconds(t *testing.T) {
+	if d := parseRetryAfter("60"); d != 60*time.Second {
+		t.Errorf("parseRetryAfter(\"60\") = %v, want 60s", d)
+	}
+	if d := parseRetryAfter("0"); d != 0 {
+		t.Errorf("parseRetryAfter(\"0\") = %v, want 0", d)
+	}
+}
+
+func TestParseRetryAfter_HTTPDate(t *testing.T) {
+	future := time.Now().Add(2 * time.Hour).UTC().Format(http.TimeFormat)
+	d := parseRetryAfter(future)
+	if d <= 0 || d > 2*time.Hour+5*time.Second {
+		t.Errorf("parseRetryAfter(future HTTP-date) = %v, want ~2h", d)
+	}
+}
+
+func TestParseRetryAfter_PastHTTPDate(t *testing.T) {
+	past := time.Now().Add(-1 * time.Hour).UTC().Format(http.TimeFormat)
+	if d := parseRetryAfter(past); d != 0 {
+		t.Errorf("parseRetryAfter(past HTTP-date) = %v, want 0", d)
+	}
+}
+
+func TestParseRetryAfter_Empty(t *testing.T) {
+	if d := parseRetryAfter(""); d != 0 {
+		t.Errorf("parseRetryAfter(\"\") = %v, want 0", d)
+	}
+}
+
+func TestParseRetryAfter_Invalid(t *testing.T) {
+	if d := parseRetryAfter("not-a-date-or-number"); d != 0 {
+		t.Errorf("parseRetryAfter(invalid) = %v, want 0", d)
+	}
+}
+
+func TestParseRetryAfter_NegativeSeconds(t *testing.T) {
+	if d := parseRetryAfter("-5"); d != 0 {
+		t.Errorf("parseRetryAfter(\"-5\") = %v, want 0", d)
+	}
+}
+
+func TestNewAPIError_RetryAfterHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	_, err := c.ListAccounts(context.Background(), ListAccountsFilter{})
+	var ae *APIError
+	if !errorsAs(err, &ae) {
+		t.Fatal("expected *APIError")
+	}
+	if ae.RetryAfter != 30*time.Second {
+		t.Errorf("RetryAfter = %v, want 30s", ae.RetryAfter)
+	}
+}
+
+func TestNewAPIError_NoRetryAfterHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"internal"}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	_, err := c.ListAccounts(context.Background(), ListAccountsFilter{})
+	var ae *APIError
+	if !errorsAs(err, &ae) {
+		t.Fatal("expected *APIError")
+	}
+	if ae.RetryAfter != 0 {
+		t.Errorf("RetryAfter = %v, want 0", ae.RetryAfter)
+	}
+}
+
+func TestIsRetryableStatus(t *testing.T) {
+	cases := []struct {
+		code int
+		want bool
+	}{
+		{http.StatusTooManyRequests, true},
+		{http.StatusInternalServerError, true},
+		{http.StatusBadGateway, true},
+		{http.StatusServiceUnavailable, true},
+		{http.StatusGatewayTimeout, true},
+		{http.StatusOK, false},
+		{http.StatusBadRequest, false},
+		{http.StatusUnauthorized, false},
+		{http.StatusForbidden, false},
+		{http.StatusNotFound, false},
+	}
+	for _, tc := range cases {
+		if got := isRetryableStatus(tc.code); got != tc.want {
+			t.Errorf("isRetryableStatus(%d) = %v, want %v", tc.code, got, tc.want)
+		}
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anatolykoptev/go-kit/retry"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -38,15 +39,18 @@ type Client struct {
 	http             *http.Client
 	maxUploadBytes   int64
 	maxResponseBytes int64
+	retryOpts        *retry.Options
 }
 
 // Config holds parameters for constructing a Client.
 type Config struct {
-	BaseURL          string        // overrides DefaultBaseURL if non-empty
-	Token            string        // JWT bearer token (required)
-	Timeout          time.Duration // per-request header timeout; default 30s (controls ResponseHeaderTimeout, NOT total request time — context is the sole deadline authority)
-	MaxUploadBytes   int64         // max file size for uploads; default 50 MB
-	MaxResponseBytes int64         // max response body size; default 10 MB
+	BaseURL          string         // overrides DefaultBaseURL if non-empty
+	Token            string         // JWT bearer token (required)
+	Timeout          time.Duration  // per-request header timeout; default 30s (controls ResponseHeaderTimeout, NOT total request time — context is the sole deadline authority)
+	MaxUploadBytes   int64          // max file size for uploads; default 50 MB
+	MaxResponseBytes int64          // max response body size; default 10 MB
+	HTTPClient       *http.Client   // if non-nil, overrides the default *http.Client (caller owns transport config — pool sizing, TLS, proxies). Follows the go-kit WithHTTPClient pattern.
+	RetryOptions     *retry.Options // if non-nil, enables retry for GET and DELETE requests on transient failures (429/5xx). POST and streaming uploads NEVER retry (non-idempotent). Context is the sole deadline authority. Use OnRetry for observability.
 }
 
 // NewClient creates a new Hooppy API client.
@@ -90,12 +94,17 @@ func NewClient(cfg Config) (*Client, error) {
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConnsPerHost:   10,
 	}
+	httpClient := &http.Client{Transport: transport}
+	if cfg.HTTPClient != nil {
+		httpClient = cfg.HTTPClient
+	}
 	return &Client{
 		baseURL:          strings.TrimRight(baseURL, "/"),
 		token:            cfg.Token,
-		http:             &http.Client{Transport: transport},
+		http:             httpClient,
 		maxUploadBytes:   maxUpload,
 		maxResponseBytes: maxResp,
+		retryOpts:        cfg.RetryOptions,
 	}, nil
 }
 
@@ -146,16 +155,28 @@ func checkJWTExpiry(token string) error {
 }
 
 // doGET performs a GET request and decodes the JSON response into out.
+// When retry is enabled (Config.RetryOptions non-nil), transient failures
+// (429/5xx) are retried with exponential backoff.
 func (c *Client) doGET(ctx context.Context, path string, params url.Values, out interface{}) error {
 	u := c.baseURL + path
 	if len(params) > 0 {
 		u += "?" + params.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return fmt.Errorf("hooppy: build request: %w", err)
+	buildReq := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, fmt.Errorf("hooppy: build request: %w", err)
+		}
+		c.setAuth(req)
+		return req, nil
 	}
-	c.setAuth(req)
+	if c.retryOpts != nil {
+		return c.doWithRetry(ctx, buildReq, out)
+	}
+	req, err := buildReq()
+	if err != nil {
+		return err
+	}
 	return c.do(req, out)
 }
 
@@ -175,12 +196,25 @@ func (c *Client) doPOST(ctx context.Context, path string, body interface{}, out 
 }
 
 // doDELETE performs a DELETE request and decodes the response.
+// When retry is enabled (Config.RetryOptions non-nil), transient failures
+// (429/5xx) are retried with exponential backoff. DELETE is idempotent
+// per RFC 9110 §9.3.2.
 func (c *Client) doDELETE(ctx context.Context, path string, out interface{}) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+path, nil)
-	if err != nil {
-		return fmt.Errorf("hooppy: build request: %w", err)
+	buildReq := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+path, nil)
+		if err != nil {
+			return nil, fmt.Errorf("hooppy: build request: %w", err)
+		}
+		c.setAuth(req)
+		return req, nil
 	}
-	c.setAuth(req)
+	if c.retryOpts != nil {
+		return c.doWithRetry(ctx, buildReq, out)
+	}
+	req, err := buildReq()
+	if err != nil {
+		return err
+	}
 	return c.do(req, out)
 }
 
@@ -264,4 +298,57 @@ func (c *Client) do(req *http.Request, out interface{}) error {
 		return fmt.Errorf("hooppy: decode response: %w", err)
 	}
 	return nil
+}
+
+// doWithRetry wraps a request-builder closure with retry.Do for transient
+// failures (429/5xx). Non-retryable APIErrors (4xx) and body-read/decode
+// errors are wrapped with retry.Permanent to stop immediately. Retryable
+// APIErrors with a Retry-After header use retry.RetryAfter to override
+// the exponential backoff. MaxElapsedTime defaults to 30s if unset.
+// Context is the sole deadline authority — retry.Do respects ctx.Done().
+func (c *Client) doWithRetry(ctx context.Context, buildReq func() (*http.Request, error), out interface{}) error {
+	opts := *c.retryOpts // copy so applyDefaults doesn't mutate the caller's Options
+	if opts.MaxElapsedTime == 0 {
+		opts.MaxElapsedTime = 30 * time.Second
+	}
+	_, err := retry.Do[struct{}](ctx, opts, func() (struct{}, error) {
+		req, err := buildReq()
+		if err != nil {
+			return struct{}{}, retry.Permanent(err)
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("hooppy: request: %w", err) // transient network error, retryable
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			ae := newAPIError(resp)
+			if isRetryableStatus(resp.StatusCode) {
+				if ae.RetryAfter > 0 {
+					return struct{}{}, retry.RetryAfter(ae.RetryAfter, ae)
+				}
+				return struct{}{}, ae // retryable, bare error
+			}
+			return struct{}{}, retry.Permanent(ae) // non-retryable 4xx
+		}
+		if out == nil {
+			return struct{}{}, nil
+		}
+		limited := io.LimitReader(resp.Body, c.maxResponseBytes+1)
+		data, err := io.ReadAll(limited)
+		if err != nil {
+			return struct{}{}, retry.Permanent(fmt.Errorf("hooppy: read response: %w", err))
+		}
+		if len(data) == 0 {
+			return struct{}{}, retry.Permanent(fmt.Errorf("hooppy: empty response body for HTTP %d", resp.StatusCode))
+		}
+		if int64(len(data)) > c.maxResponseBytes {
+			return struct{}{}, retry.Permanent(fmt.Errorf("hooppy: response exceeds max size %d bytes", c.maxResponseBytes))
+		}
+		if err := json.Unmarshal(data, out); err != nil {
+			return struct{}{}, retry.Permanent(fmt.Errorf("hooppy: decode response: %w", err))
+		}
+		return struct{}{}, nil
+	})
+	return err
 }
