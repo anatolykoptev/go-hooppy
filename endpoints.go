@@ -5,12 +5,20 @@ const (
 	pathAccounts         = "/accounts"
 	pathPages            = "/accounts/pages"
 	pathProjects         = "/posts/projects"
+	pathProjectDelete    = "/posts/projects/%d"
 	pathSchedules        = "/posts/schedules"
+	pathScheduleDelete   = "/posts/schedules/%d"
 	pathUploadMedia      = "/files/media/upload"
 	pathUploadDocument   = "/files/documents/upload"
 	pathPosts            = "/posts"
 	pathPostDelete       = "/posts/%d"
 	pathPostsBatchDelete = "/posts/batch/delete"
+	// Undocumented endpoints (not in OpenAPI spec v0.1.0).
+	// Discovered via API probing — may change without notice.
+	pathPostsSearch  = "/posts/search"
+	pathPostsCopy    = "/posts/copy"
+	pathPostsSources = "/posts/sources"
+	pathPostsImport  = "/posts/import"
 )
 
 // DefaultBaseURL is the production Hooppy API base URL.
