@@ -348,3 +348,30 @@ func TestCrossPostModes(t *testing.T) {
 		}
 	}
 }
+
+func TestCrossPostWithMode(t *testing.T) {
+	var capturedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Write([]byte(`{"id":42}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.CrossPostWithMode(context.Background(), CrossPostModeSearch, PostPublishNowPayload{
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{1},
+		Texts:               []PostText{{Text: "test", SourceID: 0}},
+		Attachments:         []Attachment{},
+	})
+	if err != nil {
+		t.Fatalf("CrossPostWithMode: %v", err)
+	}
+	if capturedPath != "/posts/search" {
+		t.Errorf("path = %s, want /posts/search", capturedPath)
+	}
+	if resp.ID != 42 {
+		t.Errorf("ID = %d, want 42", resp.ID)
+	}
+}

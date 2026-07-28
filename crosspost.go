@@ -5,6 +5,15 @@ import (
 	"fmt"
 )
 
+// CrossPostWithMode creates a post via the specified cross-posting mode
+// (PUT /posts/{mode}). This is the generic dispatcher; the mode-specific
+// methods (SearchPosts, CopyPost, etc.) are thin wrappers around it.
+//
+// UNDOCUMENTED: these endpoints are not in the public OpenAPI spec (v0.1.0).
+func (c *Client) CrossPostWithMode(ctx context.Context, mode CrossPostMode, payload interface{}) (*PostIDResponse, error) {
+	return c.createPostWithMode(ctx, mode, payload)
+}
+
 // createPostWithMode sends a PUT request to /posts/{mode} with the given
 // payload. All cross-posting endpoints accept the same payload as POST /posts
 // and return {"id":...}.

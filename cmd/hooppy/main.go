@@ -28,6 +28,10 @@ func main() {
 	registerProjects(root)
 	registerSchedules(root)
 	registerFiles(root)
+	registerUser(root)
+	registerWatermarks(root)
+	registerProxies(root)
+	registerNotifications(root)
 	registerMCPConfig(root)
 
 	if err := root.Execute(); err != nil {
@@ -81,16 +85,40 @@ func registerAccounts(root *cobra.Command) {
 // --- pages ---
 
 func registerPages(root *cobra.Command) {
-	cmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+	pagesCmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
 		Name:  "pages",
+		Short: "Manage connected groups/pages",
+	})
+
+	// pages list
+	listCmd := cli.RegisterSubcommand(pagesCmd, cli.SubcommandConfig{
+		Name:  "list",
 		Short: "List connected groups/pages",
 	})
 	var sourceID, accountID int
-	cmd.Flags().IntVar(&sourceID, "source", 0, "filter by social network source ID")
-	cmd.Flags().IntVar(&accountID, "account", 0, "filter by account ID")
-	cmd.Run = func(_ *cobra.Command, _ []string) {
+	listCmd.Flags().IntVar(&sourceID, "source", 0, "filter by social network source ID")
+	listCmd.Flags().IntVar(&accountID, "account", 0, "filter by account ID")
+	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.ListPages(context.Background(), hooppy.ListPagesFilter{SourceID: sourceID, AccountID: accountID})
+		die(err)
+		printJSON(resp)
+	}
+
+	// pages disconnect (undocumented)
+	disconnectCmd := cli.RegisterSubcommand(pagesCmd, cli.SubcommandConfig{
+		Name:  "disconnect",
+		Short: "Disconnect a page by ID (undocumented endpoint)",
+	})
+	disconnectCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy pages disconnect <id>")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		resp, err := c.DisconnectPage(context.Background(), id)
 		die(err)
 		printJSON(resp)
 	}
@@ -164,18 +192,130 @@ func registerPosts(root *cobra.Command) {
 		die(err)
 		printJSON(resp)
 	}
+
+	// posts update (undocumented)
+	updateCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
+		Name:  "update",
+		Short: "Update an existing post by ID (undocumented endpoint)",
+	})
+	var updText, updPageIDs string
+	updateCmd.Flags().StringVar(&updText, "text", "", "post text (required)")
+	updateCmd.Flags().StringVar(&updPageIDs, "to", "", "comma-separated page IDs (required)")
+	_ = updateCmd.MarkFlagRequired("text")
+	_ = updateCmd.MarkFlagRequired("to")
+	updateCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy posts update <id> --text=... --to=...")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		ids := parseIntList(updPageIDs)
+		resp, err := c.UpdatePost(context.Background(), id, hooppy.PostPublishNowPayload{
+			PublicationWhenType: 1,
+			PublicationHowType:  1,
+			SelectedPagesIDs:    ids,
+			Texts:               []hooppy.PostText{{Text: updText, SourceID: 0}},
+			Attachments:         []hooppy.Attachment{},
+		})
+		die(err)
+		printJSON(resp)
+	}
+
+	// posts crosspost (undocumented) — alternative post creation modes
+	crossPostCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
+		Name:  "crosspost",
+		Short: "Create a post via an alternative mode (undocumented endpoints)",
+	})
+	var cpMode, cpText, cpPageIDs string
+	crossPostCmd.Flags().StringVar(&cpMode, "mode", "", "cross-post mode: search, copy, sources, import, crosspost, rewrite, translate, queue, drafts, templates, rss, feeds, tags, watermarks, batch (required)")
+	crossPostCmd.Flags().StringVar(&cpText, "text", "", "post text (required)")
+	crossPostCmd.Flags().StringVar(&cpPageIDs, "to", "", "comma-separated page IDs (required)")
+	_ = crossPostCmd.MarkFlagRequired("mode")
+	_ = crossPostCmd.MarkFlagRequired("text")
+	_ = crossPostCmd.MarkFlagRequired("to")
+	crossPostCmd.Run = func(_ *cobra.Command, _ []string) {
+		mode := hooppy.CrossPostMode(cpMode)
+		// Validate mode
+		validModes := map[hooppy.CrossPostMode]bool{
+			hooppy.CrossPostModeSearch: true, hooppy.CrossPostModeCopy: true, hooppy.CrossPostModeSources: true,
+			hooppy.CrossPostModeImport: true, hooppy.CrossPostModeCrossPost: true, hooppy.CrossPostModeRewrite: true,
+			hooppy.CrossPostModeTranslate: true, hooppy.CrossPostModeQueue: true, hooppy.CrossPostModeDrafts: true,
+			hooppy.CrossPostModeTemplates: true, hooppy.CrossPostModeRSS: true, hooppy.CrossPostModeFeeds: true,
+			hooppy.CrossPostModeTags: true, hooppy.CrossPostModeWatermarks: true, hooppy.CrossPostModeBatch: true,
+		}
+		if !validModes[mode] {
+			fmt.Fprintf(os.Stderr, "invalid mode %q; valid: search, copy, sources, import, crosspost, rewrite, translate, queue, drafts, templates, rss, feeds, tags, watermarks, batch\n", cpMode)
+			os.Exit(1)
+		}
+		c := mustClient()
+		ids := parseIntList(cpPageIDs)
+		payload := hooppy.PostPublishNowPayload{
+			PublicationWhenType: 1,
+			PublicationHowType:  1,
+			SelectedPagesIDs:    ids,
+			Texts:               []hooppy.PostText{{Text: cpText, SourceID: 0}},
+			Attachments:         []hooppy.Attachment{},
+		}
+		resp, err := c.CrossPostWithMode(context.Background(), mode, payload)
+		die(err)
+		printJSON(resp)
+	}
 }
 
 // --- projects ---
 
 func registerProjects(root *cobra.Command) {
-	cmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+	projectsCmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
 		Name:  "projects",
+		Short: "Manage post projects",
+	})
+
+	// projects list
+	listCmd := cli.RegisterSubcommand(projectsCmd, cli.SubcommandConfig{
+		Name:  "list",
 		Short: "List post projects",
 	})
-	cmd.Run = func(_ *cobra.Command, _ []string) {
+	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.ListProjects(context.Background(), 0)
+		die(err)
+		printJSON(resp)
+	}
+
+	// projects create (undocumented)
+	createCmd := cli.RegisterSubcommand(projectsCmd, cli.SubcommandConfig{
+		Name:  "create",
+		Short: "Create a project (undocumented endpoint)",
+	})
+	var projName string
+	var projPageID int
+	createCmd.Flags().StringVar(&projName, "name", "", "project name (required)")
+	createCmd.Flags().IntVar(&projPageID, "page", 0, "page ID to associate (required)")
+	_ = createCmd.MarkFlagRequired("name")
+	_ = createCmd.MarkFlagRequired("page")
+	createCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.CreateProject(context.Background(), hooppy.NewProjectPayload(projName, projPageID))
+		die(err)
+		printJSON(resp)
+	}
+
+	// projects delete (undocumented)
+	deleteCmd := cli.RegisterSubcommand(projectsCmd, cli.SubcommandConfig{
+		Name:  "delete",
+		Short: "Delete a project by ID (undocumented endpoint)",
+	})
+	deleteCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy projects delete <id>")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		resp, err := c.DeleteProject(context.Background(), id)
 		die(err)
 		printJSON(resp)
 	}
@@ -184,13 +324,52 @@ func registerProjects(root *cobra.Command) {
 // --- schedules ---
 
 func registerSchedules(root *cobra.Command) {
-	cmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+	schedulesCmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
 		Name:  "schedules",
+		Short: "Manage publication schedules",
+	})
+
+	// schedules list
+	listCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
+		Name:  "list",
 		Short: "List publication schedules",
 	})
-	cmd.Run = func(_ *cobra.Command, _ []string) {
+	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.ListSchedules(context.Background(), 0)
+		die(err)
+		printJSON(resp)
+	}
+
+	// schedules create (undocumented)
+	createCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
+		Name:  "create",
+		Short: "Create a schedule (undocumented endpoint)",
+	})
+	var schedName string
+	createCmd.Flags().StringVar(&schedName, "name", "", "schedule name (required)")
+	_ = createCmd.MarkFlagRequired("name")
+	createCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.CreateSchedule(context.Background(), hooppy.NewSchedulePayload(schedName))
+		die(err)
+		printJSON(resp)
+	}
+
+	// schedules delete (undocumented)
+	deleteCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
+		Name:  "delete",
+		Short: "Delete a schedule by ID (undocumented endpoint)",
+	})
+	deleteCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy schedules delete <id>")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		resp, err := c.DeleteSchedule(context.Background(), id)
 		die(err)
 		printJSON(resp)
 	}
@@ -230,6 +409,213 @@ func registerFiles(root *cobra.Command) {
 		}
 		c := mustClient()
 		resp, err := c.UploadDocument(context.Background(), args[0], "")
+		die(err)
+		printJSON(resp)
+	}
+}
+
+// --- user (undocumented) ---
+
+func registerUser(root *cobra.Command) {
+	cmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+		Name:  "user",
+		Short: "Get current user profile (undocumented endpoint)",
+	})
+	cmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.GetUser(context.Background())
+		die(err)
+		printJSON(resp)
+	}
+}
+
+// --- watermarks (undocumented) ---
+
+func registerWatermarks(root *cobra.Command) {
+	wmCmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+		Name:  "watermarks",
+		Short: "Manage watermarks (undocumented endpoints)",
+	})
+
+	// watermarks list
+	listCmd := cli.RegisterSubcommand(wmCmd, cli.SubcommandConfig{
+		Name:  "list",
+		Short: "List watermarks",
+	})
+	listCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.ListWatermarks(context.Background(), 0)
+		die(err)
+		printJSON(resp)
+	}
+
+	// watermarks create
+	createCmd := cli.RegisterSubcommand(wmCmd, cli.SubcommandConfig{
+		Name:  "create",
+		Short: "Create a watermark",
+	})
+	var wmName, wmFile string
+	var wmSpace, wmPosition, wmOpacity, wmSize int
+	createCmd.Flags().StringVar(&wmName, "name", "", "watermark name (required)")
+	createCmd.Flags().StringVar(&wmFile, "file", "", "file path")
+	createCmd.Flags().IntVar(&wmSpace, "space", 0, "space")
+	createCmd.Flags().IntVar(&wmPosition, "position", 0, "position")
+	createCmd.Flags().IntVar(&wmOpacity, "opacity", 0, "opacity (0-100)")
+	createCmd.Flags().IntVar(&wmSize, "size", 0, "size")
+	_ = createCmd.MarkFlagRequired("name")
+	createCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.CreateWatermark(context.Background(), hooppy.WatermarkPayload{
+			Name: wmName, File: wmFile, Space: wmSpace, Position: wmPosition, Opacity: wmOpacity, Size: wmSize,
+		})
+		die(err)
+		printJSON(resp)
+	}
+
+	// watermarks delete
+	deleteCmd := cli.RegisterSubcommand(wmCmd, cli.SubcommandConfig{
+		Name:  "delete",
+		Short: "Delete a watermark by ID",
+	})
+	deleteCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy watermarks delete <id>")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		resp, err := c.DeleteWatermark(context.Background(), id)
+		die(err)
+		printJSON(resp)
+	}
+
+	// watermarks update
+	wmUpdateCmd := cli.RegisterSubcommand(wmCmd, cli.SubcommandConfig{
+		Name:  "update",
+		Short: "Update a watermark by ID",
+	})
+	var wmUpdName, wmUpdFile string
+	var wmUpdSpace, wmUpdPosition, wmUpdOpacity, wmUpdSize int
+	wmUpdateCmd.Flags().StringVar(&wmUpdName, "name", "", "watermark name")
+	wmUpdateCmd.Flags().StringVar(&wmUpdFile, "file", "", "file path")
+	wmUpdateCmd.Flags().IntVar(&wmUpdSpace, "space", 0, "space")
+	wmUpdateCmd.Flags().IntVar(&wmUpdPosition, "position", 0, "position")
+	wmUpdateCmd.Flags().IntVar(&wmUpdOpacity, "opacity", 0, "opacity (0-100)")
+	wmUpdateCmd.Flags().IntVar(&wmUpdSize, "size", 0, "size")
+	wmUpdateCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy watermarks update <id> [--name=...] [--file=...] ...")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		resp, err := c.UpdateWatermark(context.Background(), id, hooppy.WatermarkPayload{
+			Name: wmUpdName, File: wmUpdFile, Space: wmUpdSpace, Position: wmUpdPosition, Opacity: wmUpdOpacity, Size: wmUpdSize,
+		})
+		die(err)
+		printJSON(resp)
+	}
+}
+
+// --- proxies (undocumented) ---
+
+func registerProxies(root *cobra.Command) {
+	proxyCmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+		Name:  "proxies",
+		Short: "Manage proxy servers (undocumented endpoints)",
+	})
+
+	// proxies list
+	listCmd := cli.RegisterSubcommand(proxyCmd, cli.SubcommandConfig{
+		Name:  "list",
+		Short: "List proxies",
+	})
+	listCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.ListProxies(context.Background())
+		die(err)
+		printJSON(resp)
+	}
+
+	// proxies create
+	createCmd := cli.RegisterSubcommand(proxyCmd, cli.SubcommandConfig{
+		Name:  "create",
+		Short: "Create a proxy",
+	})
+	var pName, pIP, pPort, pLogin, pPassword string
+	createCmd.Flags().StringVar(&pName, "name", "", "proxy name")
+	createCmd.Flags().StringVar(&pIP, "ip", "", "IP address (required)")
+	createCmd.Flags().StringVar(&pPort, "port", "", "port (required)")
+	createCmd.Flags().StringVar(&pLogin, "login", "", "login")
+	createCmd.Flags().StringVar(&pPassword, "password", "", "password")
+	_ = createCmd.MarkFlagRequired("ip")
+	_ = createCmd.MarkFlagRequired("port")
+	createCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.CreateProxy(context.Background(), hooppy.ProxyPayload{
+			Name: pName, IP: pIP, Port: pPort, Login: pLogin, Password: pPassword,
+		})
+		die(err)
+		printJSON(resp)
+	}
+
+	// proxies delete
+	deleteCmd := cli.RegisterSubcommand(proxyCmd, cli.SubcommandConfig{
+		Name:  "delete",
+		Short: "Delete a proxy by ID",
+	})
+	deleteCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy proxies delete <id>")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		resp, err := c.DeleteProxy(context.Background(), id)
+		die(err)
+		printJSON(resp)
+	}
+
+	// proxies update
+	proxyUpdateCmd := cli.RegisterSubcommand(proxyCmd, cli.SubcommandConfig{
+		Name:  "update",
+		Short: "Update a proxy by ID",
+	})
+	var pUpdName, pUpdIP, pUpdPort, pUpdLogin, pUpdPassword string
+	proxyUpdateCmd.Flags().StringVar(&pUpdName, "name", "", "proxy name")
+	proxyUpdateCmd.Flags().StringVar(&pUpdIP, "ip", "", "IP address")
+	proxyUpdateCmd.Flags().StringVar(&pUpdPort, "port", "", "port")
+	proxyUpdateCmd.Flags().StringVar(&pUpdLogin, "login", "", "login")
+	proxyUpdateCmd.Flags().StringVar(&pUpdPassword, "password", "", "password")
+	proxyUpdateCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy proxies update <id> [--name=...] [--ip=...] ...")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		resp, err := c.UpdateProxy(context.Background(), id, hooppy.ProxyPayload{
+			Name: pUpdName, IP: pUpdIP, Port: pUpdPort, Login: pUpdLogin, Password: pUpdPassword,
+		})
+		die(err)
+		printJSON(resp)
+	}
+}
+
+// --- notifications (undocumented) ---
+
+func registerNotifications(root *cobra.Command) {
+	cmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+		Name:  "notifications",
+		Short: "List publication status notifications (undocumented endpoint)",
+	})
+	cmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		resp, err := c.ListNotifications(context.Background(), 0)
 		die(err)
 		printJSON(resp)
 	}
