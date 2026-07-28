@@ -1014,12 +1014,13 @@ type listSearchPostsInput struct {
 	Page                int     `json:"page,omitempty" jsonschema:"Pagination page number."`
 	SortBy              string  `json:"sort_by,omitempty" jsonschema:"Sort field: publication_date, likes, reposts, comments, views, involvement."`
 	SortDirection       string  `json:"sort_direction,omitempty" jsonschema:"Sort direction: desc (default) or asc."`
-	MinLikes            int     `json:"min_likes,omitempty" jsonschema:"Minimum likes. 0=no filter."`
-	MinViews            int     `json:"min_views,omitempty" jsonschema:"Minimum views. 0=no filter."`
-	MinComments         int     `json:"min_comments,omitempty" jsonschema:"Minimum comments. 0=no filter."`
-	MinReposts          int     `json:"min_reposts,omitempty" jsonschema:"Minimum reposts. 0=no filter."`
-	MinInvolvement      float64 `json:"min_involvement,omitempty" jsonschema:"Minimum engagement (e.g. 10.5). 0=no filter."`
+	MinLikes            int     `json:"min_likes,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-likes filter; use sort_by=likes instead. Setting this errors."`
+	MinViews            int     `json:"min_views,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-views filter; use sort_by=views instead. Setting this errors."`
+	MinComments         int     `json:"min_comments,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-comments filter; use sort_by=comments instead. Setting this errors."`
+	MinReposts          int     `json:"min_reposts,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-reposts filter; use sort_by=reposts instead. Setting this errors."`
+	MinInvolvement      float64 `json:"min_involvement,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-involvement filter; use sort_by=involvement instead. Setting this errors."`
 	PhotosAmount        int     `json:"photos_amount,omitempty" jsonschema:"Exact photo count. 0=no filter."`
+	VideoDuration       int     `json:"video_duration,omitempty" jsonschema:"Video duration bucket (see filters_plug values in the response). 0=no filter."`
 	ContentTypes        string  `json:"content_types,omitempty" jsonschema:"Comma-separated content types to include: photos, videos, audios, documents, links (AND filter)."`
 	ContentTypesExclude string  `json:"content_types_exclude,omitempty" jsonschema:"Comma-separated content types to exclude."`
 }
@@ -1052,6 +1053,7 @@ func registerListSearchPosts(server *mcp.Server) {
 				MinReposts:          in.MinReposts,
 				MinInvolvement:      in.MinInvolvement,
 				PhotosAmount:        in.PhotosAmount,
+				VideoDuration:       in.VideoDuration,
 				ContentTypes:        in.ContentTypes,
 				ContentTypesExclude: in.ContentTypesExclude,
 			})

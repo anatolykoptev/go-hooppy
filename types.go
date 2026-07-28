@@ -1,6 +1,11 @@
 package hooppy
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // Types derived from the Hooppy OpenAPI 3.0 specification (openapi.yaml).
 // The live API may return additional undocumented fields; Go's json.Unmarshal
@@ -701,6 +706,7 @@ type SearchPostsFilter struct {
 	MinInvolvement float64
 	// Content filters (empirically verified).
 	PhotosAmount        int    // exact photo count
+	VideoDuration       int    // video duration bucket (values from filters_plug descriptor)
 	ContentTypes        string // comma-separated: photos, videos, audios, documents, links (AND filter)
 	ContentTypesExclude string // comma-separated — exclude posts with these types
 }
@@ -795,4 +801,62 @@ type SearchPostEditResponse struct {
 	CreatedBy            int              `json:"created_by"`
 	Texts                []PostText       `json:"texts"`
 	Attachments          []Attachment     `json:"attachments"`
+}
+
+// SearchPost metric parse accessors (issue #62).
+//
+// Wire format: the server sends Likes, Reposts, Views, Comments and
+// Involvement as display-formatted STRINGS, not numbers — e.g.
+// {"views": "334,881", "likes": "1", "involvement": "0.520"}. Integer
+// metrics use a thousands separator (comma in the observed locale); the
+// separator is NOT guaranteed to be a comma across the vendor's locales, so
+// the struct fields stay string and these accessors strip the separator and
+// parse. Involvement is a decimal ratio (0.0–100.0-ish), not a percentage
+// string. Malformed input returns an error rather than a silent 0 — a
+// helper that returned 0 on failure would recreate the exact
+// silent-wrongness this accessor exists to prevent (a naive string
+// comparison ranks "334,881" below "87,008").
+//
+// Do NOT retype the fields to numbers with a custom unmarshaller: a silent
+// parse failure on an unexpected separator would be worse than the current
+// honest string.
+func (p SearchPost) ViewsInt() (int, error)    { return parseMetricInt("views", p.Views) }
+func (p SearchPost) LikesInt() (int, error)    { return parseMetricInt("likes", p.Likes) }
+func (p SearchPost) RepostsInt() (int, error)  { return parseMetricInt("reposts", p.Reposts) }
+func (p SearchPost) CommentsInt() (int, error) { return parseMetricInt("comments", p.Comments) }
+func (p SearchPost) InvolvementFloat() (float64, error) {
+	return parseMetricFloat("involvement", p.Involvement)
+}
+
+// parseMetricInt strips the observed thousands separator (comma) and parses
+// an integer metric string as sent by the server (e.g. "334,881" → 334881).
+// An empty string is treated as 0 (the server sends "" for absent metrics).
+// Any other unparseable form — including an unexpected separator from a
+// different locale — returns an error rather than a silent 0, so a caller
+// cannot accidentally rank on a wrong value.
+func parseMetricInt(name, v string) (int, error) {
+	if v == "" {
+		return 0, nil
+	}
+	s := strings.ReplaceAll(v, ",", "")
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("hooppy: SearchPost.%s: parse %q: %w", name, v, err)
+	}
+	return n, nil
+}
+
+// parseMetricFloat strips the observed thousands separator (comma) and parses
+// a decimal metric string (involvement is a ratio, e.g. "0.520" or "1,234.56").
+// Same error discipline as parseMetricInt.
+func parseMetricFloat(name, v string) (float64, error) {
+	if v == "" {
+		return 0, nil
+	}
+	s := strings.ReplaceAll(v, ",", "")
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("hooppy: SearchPost.%s: parse %q: %w", name, v, err)
+	}
+	return f, nil
 }

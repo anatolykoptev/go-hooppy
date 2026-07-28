@@ -72,14 +72,12 @@ func TestListSearchPosts(t *testing.T) {
 	}
 }
 
-func TestListSearchPosts_MetricsAndSorting(t *testing.T) {
-	var gotSortBy, gotSortDir, gotMinLikes, gotMinViews, gotContentTypes string
+func TestListSearchPosts_SortingAndContent(t *testing.T) {
+	var gotSortBy, gotSortDir, gotContentTypes string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		gotSortBy = q.Get("sort_by")
 		gotSortDir = q.Get("sort_direction")
-		gotMinLikes = q.Get("min_likes")
-		gotMinViews = q.Get("min_views")
 		gotContentTypes = q.Get("content_types")
 		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
 	}))
@@ -89,8 +87,6 @@ func TestListSearchPosts_MetricsAndSorting(t *testing.T) {
 	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
 		SortBy:        "likes",
 		SortDirection: "desc",
-		MinLikes:      5000,
-		MinViews:      1000000,
 		ContentTypes:  "photos,videos",
 	})
 	if err != nil {
@@ -102,34 +98,141 @@ func TestListSearchPosts_MetricsAndSorting(t *testing.T) {
 	if gotSortDir != "desc" {
 		t.Errorf("sort_direction = %q, want desc", gotSortDir)
 	}
-	if gotMinLikes != "5000" {
-		t.Errorf("min_likes = %q, want 5000", gotMinLikes)
-	}
-	if gotMinViews != "1000000" {
-		t.Errorf("min_views = %q, want 1000000", gotMinViews)
-	}
 	if gotContentTypes != "photos,videos" {
 		t.Errorf("content_types = %q, want photos,videos", gotContentTypes)
 	}
 }
 
-func TestListSearchPosts_MinInvolvement(t *testing.T) {
-	var gotMinInvolvement string
+// TestListSearchPosts_MetricFiltersRejected covers issue #63 (a): the five
+// min_* metric threshold flags (min_likes, min_views, min_comments,
+// min_reposts, min_involvement) are NOT server-side filters — the API
+// silently ignores them and returns an unfiltered result set. The library
+// now refuses them before any request is issued, pointing the caller at
+// --sort-by, which does work server-side. The flags stay registered (a flag
+// that errors with an explanation is strictly better than one that lies),
+// so this is NOT a breaking change.
+func TestListSearchPosts_MetricFiltersRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		f    SearchPostsFilter
+	}{
+		{"MinLikes", SearchPostsFilter{MinLikes: 5000}},
+		{"MinViews", SearchPostsFilter{MinViews: 1000000}},
+		{"MinComments", SearchPostsFilter{MinComments: 10}},
+		{"MinReposts", SearchPostsFilter{MinReposts: 5}},
+		{"MinInvolvement", SearchPostsFilter{MinInvolvement: 10.5}},
+	}
+	// A server that, if ever reached, would lie that the filter was applied.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMinInvolvement = r.URL.Query().Get("min_involvement")
 		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := c.ListSearchPosts(context.Background(), tc.f)
+			if err == nil {
+				t.Fatalf("ListSearchPosts with %s: expected an error refusing the metric threshold filter, got nil — the API has no such server-side parameter and would silently return an unfiltered result", tc.name)
+			}
+		})
+	}
+}
+
+// TestListSearchPosts_FilterVocabularyPinned covers issue #63 (c): the
+// /posts-search endpoint publishes its real filter vocabulary in every
+// response's filters_plug array (one entry per valid filter, keyed by
+// `slug`). This test captures a realistic filters_plug fixture, drives
+// ListSearchPosts with every VALID filter populated, and asserts that every
+// parameter the function puts on the wire appears as a slug in the
+// descriptor — excepting the three sort/pagination parameters (page,
+// sort_by, sort_direction), which the descriptor does not list but which
+// demonstrably work. This is the test that would have caught the five
+// invented min_* names on the day they were written, and keeps catching a
+// vendor rename.
+func TestListSearchPosts_FilterVocabularyPinned(t *testing.T) {
+	// Realistic filters_plug fixture: the complete descriptor measured from
+	// the live API. No account identifiers — only the vendor's filter schema.
+	const filtersPlugFixture = `[
+		{"slug":"text","type":"input","name":"Text"},
+		{"slug":"date_from","type":"date","name":"Date from"},
+		{"slug":"date_to","type":"date","name":"Date to"},
+		{"slug":"source_type","type":"select","name":"Source type","values":[{"key":"1","name":"Social"},{"key":"2","name":"RSS"}]},
+		{"slug":"source_id","type":"select","name":"Source","values":[{"key":"1","name":"VK"},{"key":"7","name":"Instagram"}]},
+		{"slug":"source_resource_id","type":"select","name":"Resource","values":[]},
+		{"slug":"owner_id","type":"select","name":"Owner","values":[]},
+		{"slug":"content_types","type":"checkbox","name":"Content types","values":[{"key":"photos","name":"Photos"},{"key":"videos","name":"Videos"},{"key":"audios","name":"Audios"},{"key":"documents","name":"Documents"},{"key":"links","name":"Links"}]},
+		{"slug":"content_types_exclude","type":"checkbox","name":"Exclude content types","values":[{"key":"photos","name":"Photos"},{"key":"videos","name":"Videos"}]},
+		{"slug":"photos_amount","type":"select","name":"Photos amount","values":[{"key":"1","name":"1"},{"key":"2","name":"2"},{"key":"3","name":"3+"}]},
+		{"slug":"video_duration","type":"select","name":"Video duration","values":[{"key":"1","name":"Short"},{"key":"2","name":"Medium"},{"key":"3","name":"Long"}]}
+	]`
+	type plugEntry struct {
+		Slug string `json:"slug"`
+	}
+	var plug []plugEntry
+	if err := json.Unmarshal([]byte(filtersPlugFixture), &plug); err != nil {
+		t.Fatalf("decode filters_plug fixture: %v", err)
+	}
+	validSlugs := make(map[string]bool, len(plug))
+	for _, e := range plug {
+		validSlugs[e.Slug] = true
+	}
+
+	// sort/pagination params the descriptor does NOT list but which work.
+	sortPagParams := map[string]bool{"page": true, "sort_by": true, "sort_direction": true}
+
+	var capturedKeys []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k := range r.URL.Query() {
+			capturedKeys = append(capturedKeys, k)
+		}
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	// Populate every VALID filter (no metric thresholds — those are refused
+	// by the guard and never reach the wire; see TestListSearchPosts_MetricFiltersRejected).
 	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
-		MinInvolvement: 10.5,
+		Text:                "query",
+		DateFrom:            "01.01.2026",
+		DateTo:              "31.01.2026",
+		SourceType:          1,
+		SourceID:            1,
+		SourceResourceID:    123,
+		OwnerID:             100,
+		Page:                2,
+		SortBy:              "likes",
+		SortDirection:       "desc",
+		PhotosAmount:        3,
+		VideoDuration:       2,
+		ContentTypes:        "photos,videos",
+		ContentTypesExclude: "audios",
 	})
 	if err != nil {
 		t.Fatalf("ListSearchPosts: %v", err)
 	}
-	if gotMinInvolvement != "10.5" {
-		t.Errorf("min_involvement = %q, want 10.5", gotMinInvolvement)
+	if len(capturedKeys) == 0 {
+		t.Fatal("no query parameters captured — server handler was not reached or sent no params")
+	}
+
+	seen := make(map[string]bool, len(capturedKeys))
+	for _, k := range capturedKeys {
+		seen[k] = true
+	}
+	// video_duration is the one real filter we previously omitted (issue #63 b).
+	// Asserting it is on the wire makes this test RED if the addition is reverted.
+	if !seen["video_duration"] {
+		t.Errorf("video_duration not on the wire — captured keys: %v", capturedKeys)
+	}
+
+	for _, k := range capturedKeys {
+		if sortPagParams[k] {
+			continue
+		}
+		if !validSlugs[k] {
+			t.Errorf("parameter %q is on the wire but is NOT a slug in the filters_plug descriptor — the API does not recognize this filter and would silently ignore it (false-confidence bug class)", k)
+		}
 	}
 }
 

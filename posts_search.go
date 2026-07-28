@@ -12,7 +12,25 @@ import (
 //
 // UNDOCUMENTED: GET /posts-search is not in the public OpenAPI spec (v0.1.0).
 // Discovered via API probing — may change without notice.
+//
+// Filter vocabulary: the API publishes its real filters in every response's
+// filters_plug array (slug/type/name/values). The five min_* metric threshold
+// fields below (MinLikes, MinViews, MinComments, MinReposts, MinInvolvement)
+// are NOT server-side filters — the API silently ignores them and returns an
+// unfiltered result set that looks filtered (three different thresholds
+// produce byte-identical output). Setting any of them returns an error
+// before any request is issued; use SortBy (likes|views|reposts|comments|
+// involvement) instead, which DOES work server-side. The fields are kept on
+// the struct so callers get a clear error rather than a silent lie — see
+// issue #63.
 func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*SearchPostsResponse, error) {
+	// Refuse the five metric-threshold filters before any request: the API
+	// has no such server-side parameters, so emitting them would silently
+	// return an unfiltered result set that looks filtered. Sorting by the
+	// same metric (SortBy) is the supported path and works server-side.
+	if f.MinLikes > 0 || f.MinViews > 0 || f.MinComments > 0 || f.MinReposts > 0 || f.MinInvolvement > 0 {
+		return nil, fmt.Errorf("hooppy: ListSearchPosts: min_likes/min_views/min_comments/min_reposts/min_involvement are not server-side filters — the API silently ignores them and returns an unfiltered result set; use sort_by (likes|views|reposts|comments|involvement) instead, which does work server-side (issue #63)")
+	}
 	params := url.Values{}
 	if f.Text != "" {
 		params.Set("text", f.Text)
@@ -38,32 +56,20 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	if f.Page > 0 {
 		params.Set("page", strconv.Itoa(f.Page))
 	}
-	// Sorting
+	// Sorting (empirically verified — not in filters_plug, which describes
+	// filters only, not sorting or pagination).
 	if f.SortBy != "" {
 		params.Set("sort_by", f.SortBy)
 	}
 	if f.SortDirection != "" {
 		params.Set("sort_direction", f.SortDirection)
 	}
-	// Metric filters
-	if f.MinLikes > 0 {
-		params.Set("min_likes", strconv.Itoa(f.MinLikes))
-	}
-	if f.MinViews > 0 {
-		params.Set("min_views", strconv.Itoa(f.MinViews))
-	}
-	if f.MinComments > 0 {
-		params.Set("min_comments", strconv.Itoa(f.MinComments))
-	}
-	if f.MinReposts > 0 {
-		params.Set("min_reposts", strconv.Itoa(f.MinReposts))
-	}
-	if f.MinInvolvement > 0 {
-		params.Set("min_involvement", strconv.FormatFloat(f.MinInvolvement, 'f', -1, 64))
-	}
-	// Content filters
+	// Content filters (each is a real filters_plug slug).
 	if f.PhotosAmount > 0 {
 		params.Set("photos_amount", strconv.Itoa(f.PhotosAmount))
+	}
+	if f.VideoDuration > 0 {
+		params.Set("video_duration", strconv.Itoa(f.VideoDuration))
 	}
 	if f.ContentTypes != "" {
 		params.Set("content_types", f.ContentTypes)
