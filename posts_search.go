@@ -379,10 +379,13 @@ func SearchPostEditAttachments(editAttachments []Attachment) []Attachment {
 	return result
 }
 
-// ImportSearchPost copies a scraped post via PUT /posts/import (the batch
-// import endpoint). Unlike RewriteSearchPost (POST /posts with as_copy=1),
-// this endpoint accepts comma-separated search post IDs in payload.IDs and
-// can copy multiple posts in one request.
+// ImportSearchPost copies a scraped post via PUT /posts/import. Unlike
+// RewriteSearchPost (POST /posts with as_copy=1), the import endpoint
+// accepts comma-separated search post IDs in its ids field and can copy
+// multiple posts in one request. This wrapper sends a SINGLE id:
+// payload.SearchPostID is serialized (via strconv.Itoa) as the sole entry
+// in ids. A batch (multi-id) form is scoped to issue #54 and is not
+// implemented here.
 //
 // The server downloads photos async (is_attachments_in_process=1 → 0) when
 // attachments contain photo objects with a `url` field. Videos are stored as

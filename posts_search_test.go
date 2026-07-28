@@ -599,6 +599,63 @@ func TestScrapedPhotoAttachment(t *testing.T) {
 	}
 }
 
+// TestImportSearchPost asserts the wire shape of a successful ImportSearchPost
+// request: PUT /posts/import with as_copy=1, the hardcoded
+// publication_where_type=1, ids as the string form of the single search-post
+// id, and the attachments passed through as one {type: "photos"} entry.
+// Mirrors TestCopySearchPost (the nearer sibling) but decodes the body rather
+// than substring-matching, and covers the import-specific fields (as_copy,
+// publication_where_type, ids) that CopySearchPost does not send.
+func TestImportSearchPost(t *testing.T) {
+	var capturedBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/posts/import" {
+			t.Errorf("PUT /posts/import, got %s %s", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Write([]byte(`{"id":7001}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        2003,
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "Imported text", SourceID: 0}},
+		Attachments: []Attachment{
+			{Type: "photos", Data: []interface{}{
+				map[string]interface{}{"id": "photo1", "url": "https://example.com/1.jpg"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost: %v", err)
+	}
+	if resp.ID != 7001 {
+		t.Errorf("ID = %d, want 7001", resp.ID)
+	}
+	if capturedBody["as_copy"].(float64) != 1 {
+		t.Errorf("as_copy = %v, want 1", capturedBody["as_copy"])
+	}
+	if capturedBody["publication_where_type"].(float64) != 1 {
+		t.Errorf("publication_where_type = %v, want 1 (hardcoded by ImportSearchPost)", capturedBody["publication_where_type"])
+	}
+	if capturedBody["ids"] != "2003" {
+		t.Errorf("ids = %v, want '2003' (string form of SearchPostID)", capturedBody["ids"])
+	}
+	attachments, ok := capturedBody["attachments"].([]interface{})
+	if !ok || len(attachments) != 1 {
+		t.Fatalf("attachments = %v, want array of 1 {type: \"photos\"} entry", capturedBody["attachments"])
+	}
+	attMap := attachments[0].(map[string]interface{})
+	if attMap["type"] != "photos" {
+		t.Errorf("attachments[0].type = %v, want 'photos'", attMap["type"])
+	}
+}
+
 // TestImportSearchPost_ScheduleDrivenNoSchedules verifies the fail-closed
 // guard: a schedule-driven import (publication_when_type=3) targeted at an
 // EMPTY schedules list issues NO request and returns an error, rather than

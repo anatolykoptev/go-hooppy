@@ -79,19 +79,21 @@ func (c *Client) ListSchedules(ctx context.Context, page int) (*SchedulesRespons
 const maxListAllPages = 1000
 
 // ListAllSchedules walks /posts/schedules from page 1, accumulating
-// schedules until is_has_more is false, and returns the full list with no
-// duplicates. The walk MUST start at page 1: the Hooppy API is 1-indexed
-// and a request with no page param is byte-identical to ?page=1, so a
-// walk starting at page 0 fetches the first page twice.
+// schedules until is_has_more is false. The walk MUST start at page 1: the
+// Hooppy API is 1-indexed and a request with no page param is
+// byte-identical to ?page=1, so a walk starting at page 0 fetches the first
+// page twice. Starting at page 1 removes that one duplicate source only.
+//
+// Duplicates arising from a mid-walk collection shift are NOT removed: with
+// offset pagination, a row inserted or deleted mid-walk shifts the window
+// and the server re-serves a row already seen. This entry point drops the
+// server's total_rows, so it cannot detect such duplicates. Use
+// ListAllSchedulesWithTotal with NewAllListEnvelope to detect them (see
+// NewAllListEnvelope for what it does and does not catch).
 //
 // The walk is bounded by maxListAllPages; if the server never clears
 // is_has_more within that bound, ListAllSchedules returns an error
 // instead of looping forever or silently truncating.
-//
-// ListAllSchedules drops the server's last-seen total_rows. Callers that
-// need it (to detect one specific truncation failure — see
-// NewAllListEnvelope for what it does and does not catch) should use
-// ListAllSchedulesWithTotal and NewAllListEnvelope.
 func (c *Client) ListAllSchedules(ctx context.Context) ([]Schedule, error) {
 	all, _, err := c.ListAllSchedulesWithTotal(ctx)
 	return all, err
@@ -123,12 +125,16 @@ func (c *Client) ListAllSchedulesWithTotal(ctx context.Context) ([]Schedule, int
 }
 
 // ListAllProjects walks /posts/projects from page 1, accumulating
-// projects until is_has_more is false, and returns the full list with no
-// duplicates. See ListAllSchedules for the 1-indexed rationale and the
-// sanity cap.
+// projects until is_has_more is false. The walk starts at page 1 so the
+// first page is not fetched twice (see ListAllSchedules for the 1-indexed
+// rationale and the sanity cap). Starting at page 1 removes that one
+// duplicate source only.
 //
-// ListAllProjects drops the server's last-seen total_rows. Callers that
-// need it should use ListAllProjectsWithTotal and NewAllListEnvelope (see
+// Duplicates arising from a mid-walk collection shift are NOT removed: with
+// offset pagination, a row inserted or deleted mid-walk shifts the window
+// and the server re-serves a row already seen. This entry point drops the
+// server's total_rows, so it cannot detect such duplicates. Use
+// ListAllProjectsWithTotal with NewAllListEnvelope to detect them (see
 // NewAllListEnvelope for what the envelope catches and what it does not).
 func (c *Client) ListAllProjects(ctx context.Context) ([]Project, error) {
 	all, _, err := c.ListAllProjectsWithTotal(ctx)
@@ -189,6 +195,16 @@ type AllListEnvelope struct {
 //     one; the missing row is never served, total_rows drops by one to
 //     match, and unique_count == total_rows passes while the list is short
 //     by one item. This check is NOT a proof that the walk was complete.
+//
+// Measured premise (read-only, GET /posts): the server's total_rows
+// honours the query filter, not the unfiltered collection total. An
+// unfiltered request, a request filtered by social network, and a request
+// filtered by schedule each return a progressively smaller total_rows
+// consistent with the rows actually served, and a filtered walk that fits
+// in a single page reports is_has_more=false with total_rows equal to the
+// served count. So the unique-count check above is safe under filters — a
+// filtered --all walk does not error unconditionally against an unfiltered
+// total.
 //
 // idFunc extracts the unique identity of each element. It MUST be non-nil;
 // the unique-count is meaningless without it. This is consistent with the

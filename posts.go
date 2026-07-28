@@ -59,15 +59,19 @@ func (c *Client) ListPosts(ctx context.Context, f ListPostsFilter) (*PostsRespon
 }
 
 // ListAllPosts walks GET /posts from page 1 with the given filter,
-// accumulating posts until is_has_more is false, and returns the full list
-// with no duplicates. The filter's non-page fields are preserved across the
-// walk; only Page is incremented. See projects.ListAllSchedules for the
-// 1-indexed rationale and the sanity cap.
+// accumulating posts until is_has_more is false. The walk starts at page 1
+// so the first page is not fetched twice (the Hooppy API is 1-indexed and a
+// request with no page param is byte-identical to ?page=1). The filter's
+// non-page fields are preserved across the walk; only Page is incremented.
+// See projects.ListAllSchedules for the 1-indexed rationale and the sanity
+// cap.
 //
-// ListAllPosts drops the server's last-seen total_rows. Callers that need
-// it (to detect one specific truncation failure — see NewAllListEnvelope
-// for what it does and does not catch) should use ListAllPostsWithTotal
-// and NewAllListEnvelope.
+// Duplicates arising from a mid-walk collection shift are NOT removed: with
+// offset pagination, a row inserted or deleted mid-walk shifts the window
+// and the server re-serves a row already seen. This entry point drops the
+// server's total_rows, so it cannot detect such duplicates. Use
+// ListAllPostsWithTotal with NewAllListEnvelope to detect them (see
+// NewAllListEnvelope for what it does and does not catch).
 func (c *Client) ListAllPosts(ctx context.Context, f ListPostsFilter) ([]Post, error) {
 	all, _, err := c.ListAllPostsWithTotal(ctx, f)
 	return all, err
