@@ -908,15 +908,18 @@ func registerSearch(root *cobra.Command) {
 			payload.SelectedPagesIDs = parseIntList(rwPages)
 		}
 		if rwKeepPhotos {
-			// Download photos from the scraped post and re-upload via UploadMedia.
-			// The edit endpoint returns photo URLs (VK CDN) — the server doesn't
-			// download them automatically. We must download → upload → pass
-			// the full MediaItem in attachments.
+			// Preserve ALL attachments from the scraped post:
+			// - Photos: download from edit endpoint URLs → re-upload via UploadMedia
+			//   (server doesn't download automatically; MediaItem must have id/name/folder/file_path)
+			// - Other attachments (copyright, link, poll, etc.): pass through as-is
 			edit, err := c.GetSearchPostEdit(context.Background(), rwPostID)
 			die(err)
 			var mediaItems []interface{}
+			var attachments []hooppy.Attachment
 			for i, att := range edit.Attachments {
 				if att.Type != "photo" && att.Type != "video" {
+					// Non-photo attachment — pass through as-is
+					attachments = append(attachments, att)
 					continue
 				}
 				// Extract URL from the attachment data
@@ -941,10 +944,10 @@ func registerSearch(root *cobra.Command) {
 				os.Remove(tmpPath)
 			}
 			if len(mediaItems) > 0 {
-				payload.Attachments = []hooppy.Attachment{{
-					Type: "photos",
-					Data: mediaItems,
-				}}
+				attachments = append([]hooppy.Attachment{{Type: "photos", Data: mediaItems}}, attachments...)
+			}
+			if len(attachments) > 0 {
+				payload.Attachments = attachments
 			}
 		}
 		resp, err := c.RewriteSearchPost(context.Background(), payload)

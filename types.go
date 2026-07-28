@@ -464,6 +464,45 @@ type SettingsAttachment struct {
 	Data Settings `json:"data"`
 }
 
+// Poll represents a poll attachment.
+type Poll struct {
+	Question          string       `json:"question"`
+	Answers           []PollAnswer `json:"answers"`
+	IsAnonymous       bool         `json:"is_anonymous"`
+	IsMultipleAnswers bool         `json:"is_multiple_answers"`
+	UntilTime         int          `json:"until_time"`
+	BGImage           *MediaItem   `json:"bg_image,omitempty"`
+}
+
+// PollAnswer represents a single poll answer option.
+type PollAnswer struct {
+	Text string `json:"text"`
+}
+
+// Repost represents a repost attachment (VK/OK).
+type Repost struct {
+	Link  string `json:"link"`
+	Title string `json:"title"`
+}
+
+// Comment represents a comment attachment.
+type Comment struct {
+	Text             string     `json:"text"`
+	PublishByAccount bool       `json:"publish_by_account"`
+	Photo            *MediaItem `json:"photo,omitempty"`
+}
+
+// TelegramButton represents a single Telegram inline button.
+type TelegramButton struct {
+	Name string `json:"name"`
+	Link string `json:"link"`
+}
+
+// TelegramButtons wraps a list of Telegram buttons.
+type TelegramButtons struct {
+	List []TelegramButton `json:"list"`
+}
+
 // Attachment is a discriminated union of MediaAttachment,
 // DocumentsAttachment, or SettingsAttachment. Use the concrete types
 // directly when building a post payload.

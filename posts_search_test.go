@@ -408,6 +408,105 @@ func TestSearchPostPhotos(t *testing.T) {
 	}
 }
 
+func TestSearchPostNonPhotoAttachments(t *testing.T) {
+	edit := &SearchPostEditResponse{
+		Attachments: []Attachment{
+			{Type: "photo", Data: map[string]interface{}{"id": "photo1"}},
+			{Type: "copyright", Data: "https://vk.com/wall-123_456"},
+			{Type: "link", Data: "https://example.com"},
+			{Type: "video", Data: map[string]interface{}{"id": "video1"}},
+		},
+	}
+	result := SearchPostNonPhotoAttachments(edit)
+	if len(result) != 2 {
+		t.Fatalf("len = %d, want 2 (copyright + link, not photo/video)", len(result))
+	}
+	if result[0].Type != "copyright" {
+		t.Errorf("result[0].Type = %q, want 'copyright'", result[0].Type)
+	}
+	if result[1].Type != "link" {
+		t.Errorf("result[1].Type = %q, want 'link'", result[1].Type)
+	}
+}
+
+func TestAttachmentHelpers(t *testing.T) {
+	tests := []struct {
+		name     string
+		att      Attachment
+		wantType string
+	}{
+		{"LinkAttachment", LinkAttachment("https://example.com"), "link"},
+		{"SourceAttachment", SourceAttachment("https://vk.com/wall-1_2"), "source"},
+		{"CopyrightAttachment", CopyrightAttachment("https://vk.com/wall-1_2"), "copyright"},
+		{"TitleAttachment", TitleAttachment("My Title"), "title"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.att.Type != tc.wantType {
+				t.Errorf("Type = %q, want %q", tc.att.Type, tc.wantType)
+			}
+		})
+	}
+}
+
+func TestPollAttachment(t *testing.T) {
+	att := PollAttachment(Poll{
+		Question:    "Best city?",
+		Answers:     []PollAnswer{{Text: "SPB"}, {Text: "MSK"}},
+		IsAnonymous: true,
+	})
+	if att.Type != "poll" {
+		t.Errorf("Type = %q, want 'poll'", att.Type)
+	}
+	poll, ok := att.Data.(Poll)
+	if !ok {
+		t.Fatalf("Data = %T, want Poll", att.Data)
+	}
+	if poll.Question != "Best city?" {
+		t.Errorf("Question = %q", poll.Question)
+	}
+	if len(poll.Answers) != 2 {
+		t.Errorf("Answers = %d, want 2", len(poll.Answers))
+	}
+	if !poll.IsAnonymous {
+		t.Errorf("IsAnonymous = false, want true")
+	}
+}
+
+func TestRepostAttachment(t *testing.T) {
+	att := RepostAttachment("https://vk.com/wall-1_2", "Original Post")
+	if att.Type != "repost" {
+		t.Errorf("Type = %q, want 'repost'", att.Type)
+	}
+	r, ok := att.Data.(Repost)
+	if !ok {
+		t.Fatalf("Data = %T, want Repost", att.Data)
+	}
+	if r.Link != "https://vk.com/wall-1_2" {
+		t.Errorf("Link = %q", r.Link)
+	}
+	if r.Title != "Original Post" {
+		t.Errorf("Title = %q", r.Title)
+	}
+}
+
+func TestTelegramButtonsAttachment(t *testing.T) {
+	att := TelegramButtonsAttachment([]TelegramButton{
+		{Name: "Website", Link: "https://example.com"},
+		{Name: "Telegram", Link: "https://t.me/example"},
+	})
+	if att.Type != "telegram_buttons" {
+		t.Errorf("Type = %q, want 'telegram_buttons'", att.Type)
+	}
+	tb, ok := att.Data.(TelegramButtons)
+	if !ok {
+		t.Fatalf("Data = %T, want TelegramButtons", att.Data)
+	}
+	if len(tb.List) != 2 {
+		t.Errorf("List = %d, want 2", len(tb.List))
+	}
+}
+
 func TestScrapedPhotoAttachment(t *testing.T) {
 	// ScrapedPhotoAttachment is deprecated — scraped VK photo IDs can't be
 	// attached to your own post (VK doesn't allow cross-group references).

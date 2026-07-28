@@ -164,6 +164,72 @@ func SearchPostPhotos(edit *SearchPostEditResponse) *Attachment {
 	}
 }
 
+// SearchPostNonPhotoAttachments extracts all non-photo/video attachments from
+// a SearchPostEditResponse and returns them as Attachment objects suitable for
+// passing in CopySearchPostPayload.Attachments.
+//
+// The edit endpoint returns attachments as [{type: "copyright", data: "url"}, ...].
+// These are passed through as-is — the server accepts the same types in POST /posts.
+// Supported types seen in deferred posts: copyright (VK source link), link
+// (external URL). The UI also supports: poll, repost, source, comment, title,
+// telegram_buttons, location, ad, audios, documents, settings.
+func SearchPostNonPhotoAttachments(edit *SearchPostEditResponse) []Attachment {
+	var result []Attachment
+	for _, att := range edit.Attachments {
+		if att.Type == "photo" || att.Type == "video" {
+			continue
+		}
+		result = append(result, att)
+	}
+	return result
+}
+
+// LinkAttachment builds a link attachment from a URL string.
+func LinkAttachment(url string) Attachment {
+	return Attachment{Type: "link", Data: url}
+}
+
+// SourceAttachment builds a source attachment from a URL string.
+// "source" is the UI's name for the original post link.
+func SourceAttachment(url string) Attachment {
+	return Attachment{Type: "source", Data: url}
+}
+
+// CopyrightAttachment builds a copyright attachment from a URL string.
+// "copyright" is the server's name for the VK source link.
+func CopyrightAttachment(url string) Attachment {
+	return Attachment{Type: "copyright", Data: url}
+}
+
+// TitleAttachment builds a title attachment from a string.
+func TitleAttachment(title string) Attachment {
+	return Attachment{Type: "title", Data: title}
+}
+
+// PollAttachment builds a poll attachment from a Poll struct.
+func PollAttachment(poll Poll) Attachment {
+	return Attachment{Type: "poll", Data: poll}
+}
+
+// RepostAttachment builds a repost attachment.
+func RepostAttachment(link, title string) Attachment {
+	return Attachment{Type: "repost", Data: Repost{Link: link, Title: title}}
+}
+
+// CommentAttachment builds a comment attachment.
+func CommentAttachment(text string, publishByAccount bool) Attachment {
+	return Attachment{Type: "comment", Data: Comment{
+		Text:             text,
+		PublishByAccount: publishByAccount,
+	}}
+}
+
+// TelegramButtonsAttachment builds a telegram_buttons attachment from a list
+// of button {name, link} pairs.
+func TelegramButtonsAttachment(buttons []TelegramButton) Attachment {
+	return Attachment{Type: "telegram_buttons", Data: TelegramButtons{List: buttons}}
+}
+
 // RewriteSearchPost rewrites a scraped post (from GET /posts-search) and
 // publishes it to the user's own pages. Pass custom text in payload.Texts to
 // override the original. To keep the original photos, call GetSearchPostEdit
