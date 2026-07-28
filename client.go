@@ -285,6 +285,8 @@ func (c *Client) doMultipartStream(ctx context.Context, path, fileField, filenam
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, pr)
 	if err != nil {
+		// Close the pipe reader so the writer goroutine exits instead of leaking.
+		pr.Close()
 		return fmt.Errorf("hooppy: build request: %w", err)
 	}
 	c.setAuth(req)

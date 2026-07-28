@@ -60,20 +60,26 @@ func (c *Client) UploadDocument(ctx context.Context, path, fileID string) (*Uplo
 
 // openFileForUpload opens a file for reading, validates it is a regular file,
 // and enforces the max size limit. Returns the open file handle, its size, or an error.
+//
+// The file is opened BEFORE the stat/size check to avoid a TOCTOU race where
+// the path could be replaced (e.g. with a symlink) between stat and open.
 func openFileForUpload(path string, maxBytes int64) (*os.File, int64, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, 0, fmt.Errorf("hooppy: stat file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, 0, fmt.Errorf("hooppy: not a regular file: %s", path)
-	}
-	if info.Size() > maxBytes {
-		return nil, 0, fmt.Errorf("hooppy: file %s (%d bytes) exceeds max upload size %d bytes", path, info.Size(), maxBytes)
-	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, 0, fmt.Errorf("hooppy: open file: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, fmt.Errorf("hooppy: stat file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, 0, fmt.Errorf("hooppy: not a regular file: %s", path)
+	}
+	if info.Size() > maxBytes {
+		f.Close()
+		return nil, 0, fmt.Errorf("hooppy: file %s (%d bytes) exceeds max upload size %d bytes", path, info.Size(), maxBytes)
 	}
 	return f, info.Size(), nil
 }

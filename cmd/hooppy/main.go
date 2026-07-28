@@ -319,6 +319,27 @@ func registerProjects(root *cobra.Command) {
 		die(err)
 		printJSON(resp)
 	}
+
+	// projects update (undocumented)
+	projUpdateCmd := cli.RegisterSubcommand(projectsCmd, cli.SubcommandConfig{
+		Name:  "update",
+		Short: "Update a project name by ID (undocumented endpoint)",
+	})
+	var projUpdName string
+	projUpdateCmd.Flags().StringVar(&projUpdName, "name", "", "new project name (required)")
+	_ = projUpdateCmd.MarkFlagRequired("name")
+	projUpdateCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy projects update <id> --name=...")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		resp, err := c.UpdateProject(context.Background(), id, projUpdName)
+		die(err)
+		printJSON(resp)
+	}
 }
 
 // --- schedules ---
@@ -370,6 +391,31 @@ func registerSchedules(root *cobra.Command) {
 		die(err)
 		c := mustClient()
 		resp, err := c.DeleteSchedule(context.Background(), id)
+		die(err)
+		printJSON(resp)
+	}
+
+	// schedules update (undocumented)
+	schedUpdateCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
+		Name:  "update",
+		Short: "Update a schedule by ID (undocumented endpoint)",
+	})
+	var schedUpdName string
+	var schedUpdState int
+	schedUpdateCmd.Flags().StringVar(&schedUpdName, "name", "", "schedule name (required)")
+	schedUpdateCmd.Flags().IntVar(&schedUpdState, "state", 1, "state: 1=active, 0=paused")
+	_ = schedUpdateCmd.MarkFlagRequired("name")
+	schedUpdateCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy schedules update <id> --name=... [--state=1]")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		payload := hooppy.NewSchedulePayload(schedUpdName)
+		payload.State = schedUpdState
+		resp, err := c.UpdateSchedule(context.Background(), id, payload)
 		die(err)
 		printJSON(resp)
 	}
