@@ -216,6 +216,26 @@ The full OpenAPI 3.0 specification is in [`openapi.yaml`](openapi.yaml) (copied 
 Base URL: `https://api.hooppy.ru/api`  
 Auth: `Authorization: Bearer <JWT token>`
 
+### Undocumented endpoints
+
+The following endpoints are NOT in the public OpenAPI spec (v0.1.0) but were discovered via live API probing. They may change without notice. Use with caution.
+
+| Method | Endpoint | Go method | Notes |
+|---|---|---|---|
+| `POST` | `/posts/schedules` | `CreateSchedule` | 34 required fields; use `NewSchedulePayload(name)` for defaults |
+| `PUT` | `/posts/schedules/{id}` | `UpdateSchedule` | Same 34 fields as create |
+| `DELETE` | `/posts/schedules/{id}` | `DeleteSchedule` | Returns `{"success":true,"schedules":[...]}` |
+| `PUT` | `/posts/projects/{id}` | `UpdateProject` | Body: `{"name":"..."}` |
+| `DELETE` | `/posts/projects/{id}` | `DeleteProject` | Returns `{"success":true}` |
+
+```go
+// Create a schedule with defaults
+payload := hooppy.NewSchedulePayload("My Daily Schedule")
+payload.PublishAsStory = 1   // enable stories
+payload.IsCommentsDisabled = 1
+resp, err := client.CreateSchedule(context.Background(), payload)
+```
+
 ## License
 
 Apache 2.0 — same as the Hooppy OpenAPI specification.

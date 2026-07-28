@@ -33,9 +33,94 @@ type Project struct {
 }
 
 // Schedule defines a recurring publication plan.
+// Schedule is a publishing schedule. The Hooppy API returns many fields
+// beyond id/name; the ones below were discovered via live API probing
+// (DELETE /posts/schedules/{id} response). Fields not yet modelled are
+// silently ignored by encoding/json.
 type Schedule struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
+	ID                   int    `json:"id"`
+	UserID               int    `json:"user_id,omitempty"`
+	Position             int    `json:"position,omitempty"`
+	Name                 string `json:"name"`
+	State                int    `json:"state,omitempty"`
+	StopDate             int    `json:"stop_date,omitempty"`
+	StartDate            int    `json:"start_date,omitempty"`
+	IsDeleted            int    `json:"is_deleted,omitempty"`
+	PublicationHowType   int    `json:"publication_how_type,omitempty"`
+	PublicationWhereType int    `json:"publication_where_type,omitempty"`
+}
+
+// SchedulePayload is the request body for POST /posts/schedules (create)
+// and PUT /posts/schedules/{id} (update). The Hooppy API requires ALL
+// fields to be present (discovered via iterative 500-error probing —
+// each missing field returns "Undefined index: <field>").
+//
+// Use NewSchedulePayload(name) to get a payload with sensible defaults
+// (all flags off/0, state=1, publication_how_type=1, publication_where_type=1);
+// then override only the fields you need.
+//
+// UNDOCUMENTED: these fields are not in the public OpenAPI spec (v0.1.0).
+// The API may change without notice.
+type SchedulePayload struct {
+	Name                        string `json:"name"`
+	State                       int    `json:"state"`                            // 1=active, 0=paused
+	PublicationHowType          int    `json:"publication_how_type"`             // 1=manual, 2=by project
+	PublicationWhereType        int    `json:"publication_where_type"`           // 1=pages
+	WatermarkID                 int    `json:"watermark_id"`                     // 0=none
+	UTMTags                     string `json:"utm_tags"`                         // ""=none
+	IsUniqueContent             int    `json:"is_unique_content"`                // 0/1
+	IsPostsRepeated             int    `json:"is_posts_repeated"`                // 0/1
+	IsRandomContent             int    `json:"is_random_content"`                // 0/1
+	IsCommentsDisabled          int    `json:"is_comments_disabled"`             // 0/1
+	PublishAsStory              int    `json:"publish_as_story"`                 // 0/1
+	PublishAsStorySourceIDs     int    `json:"publish_as_story_source_ids"`      // 0=none
+	PublishAsReels              int    `json:"publish_as_reels"`                 // 0/1
+	PublishAsClips              int    `json:"publish_as_clips"`                 // 0/1
+	PublishAsShorts             int    `json:"publish_as_shorts"`                // 0/1
+	PublishAsArticle            int    `json:"publish_as_article"`               // 0/1
+	PublishAsArticleByLink      int    `json:"publish_as_article_by_link"`       // 0/1
+	PublishInChannel            int    `json:"publish_in_channel"`               // 0/1
+	ShareStoriesToFeed          int    `json:"share_stories_to_feed"`            // 0/1
+	ShareStoriesToFeedSourceIDs int    `json:"share_stories_to_feed_source_ids"` // 0=none
+	ShareReelsToFeed            int    `json:"share_reels_to_feed"`              // 0/1
+	ShareClipsToFeed            int    `json:"share_clips_to_feed"`              // 0/1
+	ShareClipsToFeedWithText    int    `json:"share_clips_to_feed_with_text"`    // 0/1
+	ShareClipsToFeedIfNoVideo   int    `json:"share_clips_to_feed_if_no_video"`  // 0/1
+	ShareChannelToFeed          int    `json:"share_channel_to_feed"`            // 0/1
+	ExpandClipsTitle            int    `json:"expand_clips_title"`               // 0/1
+	PublishAsUser               int    `json:"publish_as_user"`                  // 0/1
+	AddLinkToUser               int    `json:"add_link_to_user"`                 // 0/1
+	MessageToCommunity          int    `json:"message_to_community"`             // 0/1
+	MessageToChannel            int    `json:"message_to_channel"`               // 0/1
+	DownloadVKVideos            int    `json:"download_vk_videos"`               // 0/1
+	SaveVKVideosNames           int    `json:"save_vk_videos_names"`             // 0/1
+	PlanByNetwork               int    `json:"plan_by_network"`                  // 0/1
+	PublishAsCarousel           int    `json:"publish_as_carousel"`              // 0/1
+}
+
+// NewSchedulePayload returns a SchedulePayload with sensible defaults:
+// all flags off (0), state=active, publication_how_type=manual,
+// publication_where_type=pages. Override fields as needed before
+// calling CreateSchedule or UpdateSchedule.
+func NewSchedulePayload(name string) SchedulePayload {
+	return SchedulePayload{
+		Name:                 name,
+		State:                1,
+		PublicationHowType:   1,
+		PublicationWhereType: 1,
+	}
+}
+
+// ScheduleResponse is returned by POST/PUT/DELETE /posts/schedules.
+// The API returns the full schedule list on success.
+type ScheduleResponse struct {
+	Success   bool       `json:"success"`
+	Schedules []Schedule `json:"schedules"`
+}
+
+// DeleteResponse is returned by DELETE endpoints (schedules, projects).
+type DeleteResponse struct {
+	Success bool `json:"success"`
 }
 
 // Post is a minimal post representation. The live API returns many more

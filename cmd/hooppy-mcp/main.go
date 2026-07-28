@@ -43,6 +43,10 @@ func registerTools(server *mcp.Server) {
 	registerUploadDocument(server)
 	registerListProjects(server)
 	registerListSchedules(server)
+	// Undocumented endpoints (not in OpenAPI spec v0.1.0)
+	registerCreateSchedule(server)
+	registerDeleteSchedule(server)
+	registerDeleteProject(server)
 }
 
 // --- helpers ---
@@ -387,6 +391,84 @@ func registerListSchedules(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			resp, err := c.ListSchedules(ctx, 0)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- create_schedule (undocumented endpoint) ---
+
+type createScheduleInput struct {
+	Name string `json:"name" jsonschema:"Schedule name."`
+}
+
+func registerCreateSchedule(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_create_schedule",
+			Description: "Create a publication schedule on Hooppy. Uses default settings (all flags off, state=active). UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in createScheduleInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.CreateSchedule(ctx, hooppy.NewSchedulePayload(in.Name))
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- delete_schedule (undocumented endpoint) ---
+
+type deleteScheduleInput struct {
+	ID int `json:"id" jsonschema:"Schedule ID to delete."`
+}
+
+func registerDeleteSchedule(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_delete_schedule",
+			Description: "Delete a publication schedule on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in deleteScheduleInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.DeleteSchedule(ctx, in.ID)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- delete_project (undocumented endpoint) ---
+
+type deleteProjectInput struct {
+	ID int `json:"id" jsonschema:"Project ID to delete."`
+}
+
+func registerDeleteProject(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_delete_project",
+			Description: "Delete a project on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in deleteProjectInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.DeleteProject(ctx, in.ID)
 			if err != nil {
 				return errResult(err.Error())
 			}

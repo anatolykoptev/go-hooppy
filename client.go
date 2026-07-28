@@ -195,6 +195,33 @@ func (c *Client) doPOST(ctx context.Context, path string, body interface{}, out 
 	return c.do(req, out)
 }
 
+// doPUT performs a PUT request with a JSON body and decodes the response.
+// When retry is enabled, transient failures (429/5xx) are retried.
+// PUT is idempotent per RFC 9110 §9.3.4.
+func (c *Client) doPUT(ctx context.Context, path string, body interface{}, out interface{}) error {
+	buildReq := func() (*http.Request, error) {
+		var buf bytes.Buffer
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			return nil, fmt.Errorf("hooppy: encode body: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+path, &buf)
+		if err != nil {
+			return nil, fmt.Errorf("hooppy: build request: %w", err)
+		}
+		c.setAuth(req)
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}
+	if c.retryOpts != nil {
+		return c.doWithRetry(ctx, buildReq, out)
+	}
+	req, err := buildReq()
+	if err != nil {
+		return err
+	}
+	return c.do(req, out)
+}
+
 // doDELETE performs a DELETE request and decodes the response.
 // When retry is enabled (Config.RetryOptions non-nil), transient failures
 // (429/5xx) are retried with exponential backoff. DELETE is idempotent
