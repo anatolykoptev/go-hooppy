@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -85,8 +87,8 @@ func TestRunDoctor_GroupsAndClassification(t *testing.T) {
 	if g100.PageName != "VK Main Page" {
 		t.Errorf("page 100 name = %q, want VK Main Page", g100.PageName)
 	}
-	if g100.Network != "vk" {
-		t.Errorf("page 100 network = %q, want vk", g100.Network)
+	if g100.Network != "vkontakte" {
+		t.Errorf("page 100 network = %q, want vkontakte", g100.Network)
 	}
 
 	// Page 200: missing media.
@@ -108,45 +110,144 @@ func TestRunDoctor_GroupsAndClassification(t *testing.T) {
 	}
 }
 
-// TestRunDoctor_TokensNeverReachOutput is the credential-leak guard. The
-// stub notification's embedded page object carries live OAuth tokens
-// (access_token, bot_token, password). The stub pages list ALSO carries
-// them (to guard against someone widening the Page struct). The test
-// marshals the full DoctorReport to JSON — exactly what the CLI prints —
-// and asserts NONE of the token VALUES appear. It checks values, not key
-// names, so it catches any future struct widening that flows tokens into
-// the report. This test MUST fail if someone widens Notification to model
-// `page` as a token-carrying struct or widens Page/DoctorGroup to include
-// a credential field that reaches output.
+// TestRunDoctor_TokensNeverReachOutput is the credential-leak guard. It
+// enforces the property at the DECODE BOUNDARY — where the tokens enter Go
+// memory — not only at the report level:
+//
+//  1. DECODE BOUNDARY (values): marshal the []Notification from
+//     ListAllNotifications and the []Page from ListAllPages against a stub
+//     that carries live token values in every place the vendor's JSON
+//     provides them (the embedded `page` object in notifications, and the
+//     page fields directly). Assert the token VALUES are absent from both
+//     marshalled outputs. This catches the mutation where someone widens
+//     Notification to model `page` as a token-carrying struct OR widens
+//     Page to include a credential field — the tokens would then survive
+//     the decode and appear in the marshalled output.
+//
+//  2. DECODE BOUNDARY (struct shape): a reflection assertion that neither
+//     Notification nor Page exposes a field whose json tag matches a
+//     credential field name. This catches the mutation at compile-time
+//     granularity: even if the token value happens to be empty, the
+//     struct shape itself is rejected.
+//
+//  3. REPORT LEVEL (second layer): marshal the full DoctorReport — exactly
+//     what the CLI prints — and assert no token value appears. This is a
+//     belt-and-suspenders check; the decode boundary is the primary guard.
+//
+// The property matters beyond doctor: widening Page also leaks through
+// `hooppy pages list` stdout and the MCP pages tool, so the decode-boundary
+// guard protects every consumer of ListAllPages, not just doctor.
 func TestRunDoctor_TokensNeverReachOutput(t *testing.T) {
 	const (
-		accessToken = "SECRET_ACCESS_TOKEN_12345"
-		botToken    = "SECRET_BOT_TOKEN_67890"
-		password    = "SECRET_PASSWORD_ABCDEF"
+		accessToken       = "SECRET_ACCESS_TOKEN_12345"
+		botToken          = "SECRET_BOT_TOKEN_67890"
+		password          = "SECRET_PASSWORD_ABCDEF"
+		refreshToken      = "SECRET_REFRESH_TOKEN_99999"
+		wpAppPassword     = "SECRET_WP_APP_PASSWORD_77777"
+		accessTokenSecret = "SECRET_ACCESS_TOKEN_SECRET_55555"
 	)
+	allTokens := []string{accessToken, botToken, password, refreshToken, wpAppPassword, accessTokenSecret}
 	recent := vendorDate(time.Now().Add(-1 * 24 * time.Hour))
-	// The embedded page object carries the tokens. Notification does NOT
-	// model `page`, so encoding/json drops the entire object at the decode
-	// boundary — the tokens never enter Go memory through this path.
+	// The embedded page object carries every credential field the vendor's
+	// JSON provides. Notification does NOT model `page`, so encoding/json
+	// drops the entire object at the decode boundary — the tokens never
+	// enter Go memory through this path. If someone adds a `Page *Page`
+	// field to Notification AND credential fields to Page, the tokens
+	// survive the decode and appear in the marshalled []Notification.
 	notifications := `{"list":[
 		{"id":1,"is_error":1,"page_id":100,"source_id":1,"operation_date":"` + recent + `","data":"Необходимо переподключить аккаунт",
 		 "page":{"id":100,"source_id":1,"social_page_name":"Leaky Page",
 		         "access_token":"` + accessToken + `",
 		         "bot_token":"` + botToken + `",
-		         "password":"` + password + `"}}
+		         "refresh_token":"` + refreshToken + `",
+		         "password":"` + password + `",
+		         "wp_app_password":"` + wpAppPassword + `",
+		         "access_token_secret":"` + accessTokenSecret + `"}}
 	],"total_rows":1,"is_has_more":false,"rows_limit":12}`
-	// The pages list also carries the tokens — guards against Page widening.
+	// The pages list carries every credential field directly — guards
+	// against Page widening. If someone adds any of these fields to the
+	// Page struct, the tokens survive the decode and appear in marshalled
+	// []Page (and in `hooppy pages list` stdout, and the MCP pages tool).
 	pages := `{"list":[
 		{"id":100,"source_id":1,"social_page_name":"Leaky Page",
 		 "access_token":"` + accessToken + `",
 		 "bot_token":"` + botToken + `",
-		 "password":"` + password + `"}
+		 "refresh_token":"` + refreshToken + `",
+		 "password":"` + password + `",
+		 "wp_app_password":"` + wpAppPassword + `",
+		 "access_token_secret":"` + accessTokenSecret + `"}
 	],"total_rows":1,"is_has_more":false,"rows_limit":20}`
 
 	srv := stubDoctorServer(t, notifications, pages)
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
+	// --- Layer 1a: []Notification decode boundary (values) ---
+	notifList, err := c.ListAllNotifications(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllNotifications: %v", err)
+	}
+	notifJSON, err := json.Marshal(notifList)
+	if err != nil {
+		t.Fatalf("json.Marshal(notifList): %v", err)
+	}
+	notifStr := string(notifJSON)
+	for _, token := range allTokens {
+		if strings.Contains(notifStr, token) {
+			t.Errorf("CREDENTIAL LEAK at decode boundary ([]Notification): token value %q appears in marshalled notifications:\n%s", token, notifStr)
+		}
+	}
+
+	// --- Layer 1b: []Page decode boundary (values) ---
+	pageList, err := c.ListAllPages(context.Background(), ListPagesFilter{})
+	if err != nil {
+		t.Fatalf("ListAllPages: %v", err)
+	}
+	pageJSON, err := json.Marshal(pageList)
+	if err != nil {
+		t.Fatalf("json.Marshal(pageList): %v", err)
+	}
+	pageStr := string(pageJSON)
+	for _, token := range allTokens {
+		if strings.Contains(pageStr, token) {
+			t.Errorf("CREDENTIAL LEAK at decode boundary ([]Page): token value %q appears in marshalled pages:\n%s", token, pageStr)
+		}
+	}
+
+	// --- Layer 2: struct shape (reflection) ---
+	// Neither Notification nor Page may expose a field whose json tag
+	// matches a credential field name. This catches the mutation even
+	// when the token value is empty — the struct shape itself is rejected.
+	credentialTagRe := regexp.MustCompile(`^(access_token|bot_token|refresh_token|password|wp_app_password|access_token_secret)$`)
+	for _, st := range []struct {
+		name string
+		typ  interface{}
+	}{
+		{"Notification", Notification{}},
+		{"Page", Page{}},
+	} {
+		t.Run("struct_shape/"+st.name, func(t *testing.T) {
+			v := reflect.ValueOf(st.typ)
+			tt := v.Type()
+			for i := 0; i < tt.NumField(); i++ {
+				f := tt.Field(i)
+				tag := f.Tag.Get("json")
+				// Strip options like ",omitempty" to get the bare tag name.
+				tagName := tag
+				if idx := strings.Index(tag, ","); idx >= 0 {
+					tagName = tag[:idx]
+				}
+				if tagName == "-" {
+					continue // explicitly unexported/ignored
+				}
+				if credentialTagRe.MatchString(tagName) {
+					t.Errorf("%s.%s has json tag %q matching a credential field — credential fields must not be modelled on this struct", st.name, f.Name, tagName)
+				}
+			}
+		})
+	}
+
+	// --- Layer 3: report level (second layer) ---
 	report, err := c.RunDoctor(context.Background(), 7)
 	if err != nil {
 		t.Fatalf("RunDoctor: %v", err)
@@ -156,9 +257,9 @@ func TestRunDoctor_TokensNeverReachOutput(t *testing.T) {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 	outStr := string(out)
-	for _, token := range []string{accessToken, botToken, password} {
+	for _, token := range allTokens {
 		if strings.Contains(outStr, token) {
-			t.Errorf("CREDENTIAL LEAK: token value %q appears in doctor output:\n%s", token, outStr)
+			t.Errorf("CREDENTIAL LEAK at report level: token value %q appears in doctor output:\n%s", token, outStr)
 		}
 	}
 }
@@ -315,44 +416,45 @@ func TestClassifyError_MeasuredVendorStrings(t *testing.T) {
 	}
 }
 
-// TestNetworkName_VendorBundleMap is the regression gate for the network
-// field. It pins every id→name pair extracted from the vendor's public web
-// bundle (https://hooppy.ru/_nuxt/) and asserts one unmapped id renders
-// "unknown" rather than being coerced — the same rule errorClassTable
-// follows for unmatched messages. Without this test the map is a silent-rot
-// surface exactly like the classification table was: a vendor id renumbering
-// or a slug typo would go unnoticed until someone runs doctor against the
-// live log again.
+// TestSourceID_String_DoctorRelevantIDs is the regression gate for the
+// network field doctor renders via SourceID.String(). It pins every id
+// doctor encounters on a live account and asserts one truly unmapped id
+// renders "unknown" rather than being coerced — the same rule
+// errorClassTable follows for unmatched messages. Without this test the
+// id→name table is a silent-rot surface: a vendor id renumbering or a slug
+// typo would go unnoticed until someone runs doctor against the live log.
 //
-// source_id 10 is observed on live accounts (pages under it carry
-// instagram.com links) but appears in no vendor table found — it stays
-// unmapped and renders "unknown" as observed-but-unnamed, not absent.
-func TestNetworkName_VendorBundleMap(t *testing.T) {
+// Ids 10 and 11 are observed on live accounts and MUST NOT render
+// "unknown" — the library names them (instagram_fb, telegram_account).
+// Earlier they were in a separate table that doctor did not consult; now
+// doctor delegates to SourceID.String() and they resolve.
+func TestSourceID_String_DoctorRelevantIDs(t *testing.T) {
 	cases := []struct {
 		sourceID int
 		want     string
 	}{
-		{1, "vk"},            // VKontakte
-		{2, "odnoklassniki"}, // Odnoklassniki
-		{3, "facebook"},      // Facebook
-		{4, "twitter"},       // Twitter
-		{6, "pinterest"},     // Pinterest
-		{7, "instagram"},     // Instagram
-		{9, "telegram"},      // Telegram
-		{13, "dzen"},         // Dzen
-		{14, "tiktok"},       // TikTok
-		{16, "viber"},        // Viber
-		{17, "youtube"},      // YouTube
-		{18, "linkedin"},     // LinkedIn
-		{28, "max"},          // Max
+		{1, "vkontakte"},
+		{2, "odnoklassniki"},
+		{3, "facebook"},
+		{4, "twitter"},
+		{6, "pinterest"},
+		{7, "instagram"},
+		{9, "telegram"},
+		{10, "instagram_fb"},     // observed live — must NOT be "unknown"
+		{11, "telegram_account"}, // observed live — must NOT be "unknown"
+		{13, "dzen"},
+		{14, "tiktok"},
+		{16, "viber"},
+		{17, "youtube"},
+		{18, "linkedin"},
+		{28, "max"},
 		// Unmapped ids render "unknown" rather than being coerced.
-		{10, "unknown"}, // observed on live accounts, no vendor table entry — observed-but-unnamed
 		{999, "unknown"},
 	}
 	for _, tc := range cases {
-		got := networkName(tc.sourceID)
+		got := SourceID(tc.sourceID).String()
 		if got != tc.want {
-			t.Errorf("networkName(%d) = %q, want %q", tc.sourceID, got, tc.want)
+			t.Errorf("SourceID(%d).String() = %q, want %q", tc.sourceID, got, tc.want)
 		}
 	}
 }

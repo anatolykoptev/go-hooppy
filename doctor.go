@@ -74,57 +74,6 @@ var errorClassTable = []struct {
 	},
 }
 
-// networkNameTable maps a notification row's source_id to the network name
-// rendered in the doctor report's "network" field. Extracted from the
-// vendor's public web bundle (https://hooppy.ru/_nuxt/, no auth) — the
-// authoritative id→name table the vendor's own client ships. The vendor may
-// add ids without notice.
-//
-// An id absent from this table MUST render as "unknown" rather than being
-// coerced into a guess — the same rule errorClassTable already follows for
-// unmatched messages. Two ids (10 and 11) are observed on live accounts but
-// appear in no vendor table found; pages under id 10 carry instagram.com
-// links, which suggests a second Instagram connection method, but that is
-// inference, not evidence — so both stay unmapped and render "unknown" as
-// observed-but-unnamed rather than absent.
-//
-// The map is known-incomplete by construction: the vendor also ships connect
-// flows for Threads, WhatsApp, TenChat, RuTube, Likee, Wibes, Yappy,
-// WordPress and Joomla whose numeric ids are not in the bundle table. If a
-// notification arrives for one of those, it renders "unknown" until the id
-// is added here.
-//
-// This is deliberately separate from the library-wide SourceID map in
-// sources.go (which is inferred from the public hooppy.ru/en page and has
-// different provenance). The doctor reports on a specific account's
-// notifications, and the vendor bundle's id→name mapping is the ground truth
-// for the network names.
-var networkNameTable = map[int]string{
-	1:  "vk",            // VKontakte
-	2:  "odnoklassniki", // Odnoklassniki
-	3:  "facebook",      // Facebook
-	4:  "twitter",       // Twitter
-	6:  "pinterest",     // Pinterest
-	7:  "instagram",     // Instagram
-	9:  "telegram",      // Telegram
-	13: "dzen",          // Dzen
-	14: "tiktok",        // TikTok
-	16: "viber",         // Viber
-	17: "youtube",       // YouTube
-	18: "linkedin",      // LinkedIn
-	28: "max",           // Max
-}
-
-// networkName returns the network name for a source_id, or "unknown" for an
-// id absent from networkNameTable. The "unknown" answer is intentional —
-// see the networkNameTable caveat.
-func networkName(sourceID int) string {
-	if name, ok := networkNameTable[sourceID]; ok {
-		return name
-	}
-	return "unknown"
-}
-
 // classifyError maps a vendor error string to a classification bucket.
 // It performs case-insensitive substring matching against errorClassTable.
 // An unmatched string returns classUnknown — it is never forced into a
@@ -192,9 +141,17 @@ type DoctorUnparseable struct {
 // DoctorReport is the output of RunDoctor: the grouped publication failures
 // inside the --since window, plus any rows whose operation_date failed to
 // parse. It is the JSON the `hooppy doctor` command prints on stdout.
+//
+// WalkIncomplete is true when NewAllListEnvelope detected a truncated walk
+// (unique id count != server total_rows) for either the notifications or
+// pages walk. Doctor does NOT abort on a truncated walk — its purpose is to
+// surface failures, not hide them behind a hard error — but it flags the
+// walk as incomplete so the operator knows the report may be missing rows,
+// and the CLI exit code reflects it.
 type DoctorReport struct {
 	SinceDays       int                 `json:"since_days"`
 	WindowStart     time.Time           `json:"window_start"`
+	WalkIncomplete  bool                `json:"walk_incomplete,omitempty"`
 	Groups          []DoctorGroup       `json:"groups"`
 	UnparseableRows []DoctorUnparseable `json:"unparseable_rows,omitempty"`
 }
@@ -205,6 +162,13 @@ type DoctorReport struct {
 // via GET /accounts/pages (the narrow Page struct — id/source/social ids/
 // name/photo only, no credential fields). It is read-only and mutates
 // nothing.
+//
+// Both walks (notifications and pages) use the WithTotal variants plus
+// NewAllListEnvelope to detect a truncated walk (unique id count != server
+// total_rows). Doctor does NOT abort on a truncated walk — its purpose is
+// to surface failures, not hide them — but sets WalkIncomplete so the
+// operator knows the report may be missing rows, and the CLI exit code
+// reflects it.
 //
 // Page-name resolution: the notification row embeds a full `page` object
 // that carries live OAuth credentials (access_token, bot_token,
@@ -229,18 +193,25 @@ func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, e
 	}
 	windowStart := time.Now().AddDate(0, 0, -sinceDays)
 
-	notifications, err := c.ListAllNotifications(ctx)
+	notifications, notifTotal, err := c.ListAllNotificationsWithTotal(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("hooppy: doctor: walk notifications: %w", err)
+	}
+	walkIncomplete := false
+	if _, envErr := NewAllListEnvelope(notifications, notifTotal, func(n Notification) int { return n.ID }); envErr != nil {
+		walkIncomplete = true
 	}
 
 	// Resolve page names via the narrow Page struct (no credential fields).
 	// The embedded `page` object in each notification is NOT decoded —
 	// Notification does not model it, so the vendor's token fields are
 	// dropped at the decode boundary.
-	pages, err := c.ListAllPages(ctx, ListPagesFilter{})
+	pages, pagesTotal, err := c.ListAllPagesWithTotal(ctx, ListPagesFilter{})
 	if err != nil {
 		return nil, fmt.Errorf("hooppy: doctor: walk pages: %w", err)
+	}
+	if _, envErr := NewAllListEnvelope(pages, pagesTotal, func(p Page) int { return p.ID }); envErr != nil {
+		walkIncomplete = true
 	}
 	pageByName := make(map[int]string, len(pages))
 	for _, p := range pages {
@@ -305,6 +276,7 @@ func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, e
 	report := &DoctorReport{
 		SinceDays:       sinceDays,
 		WindowStart:     windowStart,
+		WalkIncomplete:  walkIncomplete,
 		Groups:          make([]DoctorGroup, 0, len(groups)),
 		UnparseableRows: unparseable,
 	}
@@ -313,7 +285,7 @@ func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, e
 			PageID:         key.pageID,
 			PageName:       pageByName[key.pageID],
 			SourceID:       acc.sourceID,
-			Network:        networkName(acc.sourceID),
+			Network:        SourceID(acc.sourceID).String(),
 			ErrorText:      key.errorText,
 			Classification: classifyError(key.errorText),
 			Count:          acc.count,

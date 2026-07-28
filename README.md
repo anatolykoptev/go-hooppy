@@ -216,7 +216,7 @@ It walks the full notification log, filters to error rows whose `operation_date`
 
 A row whose `operation_date` fails to parse is reported in `unparseable_rows` — never silently dropped, since dropping a row hides exactly the failure the command exists to surface.
 
-**Exit code:** `--exit-code` (default `true`) — exit 1 if any error falls inside the window, 0 otherwise. This lets `doctor` run in cron or as a pre-flight before a bulk import. Pass `--exit-code=false` to get the report without the non-zero exit.
+**Exit code:** `--exit-code` (default `true`) — exit 1 if any error signal is present: grouped errors inside the window, unparseable-date rows (a vendor date-format drift puts every error row here), or a truncated walk (`walk_incomplete`). Exit 0 otherwise. This lets `doctor` run in cron or as a pre-flight before a bulk import. Pass `--exit-code=false` to get the report without the non-zero exit.
 
 ## MCP server setup
 
