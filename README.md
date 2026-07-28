@@ -140,8 +140,32 @@ hooppy posts delete 533241
 hooppy files upload-media ./photo.jpg
 
 # List projects and schedules
-hooppy projects
-hooppy schedules
+hooppy projects list
+hooppy schedules list
+
+# Create / delete projects (undocumented)
+hooppy projects create --name "My Project" --page 2355344
+hooppy projects delete 21778
+
+# Create / delete schedules (undocumented)
+hooppy schedules create --name "Daily 09:00"
+hooppy schedules delete 55608
+
+# Update an existing post (undocumented)
+hooppy posts update 533241 --text "Updated text" --to 822454
+
+# Disconnect a page (undocumented)
+hooppy pages disconnect 99999
+
+# User profile / watermarks / proxies / notifications (undocumented)
+hooppy user
+hooppy watermarks list
+hooppy watermarks create --name "WM1" --file /path/to/wm.png --opacity 50
+hooppy watermarks delete 3324
+hooppy proxies list
+hooppy proxies create --ip 1.2.3.4 --port 8080 --login user --password pass
+hooppy proxies delete 8335
+hooppy notifications
 
 # Print MCP setup instructions
 hooppy mcp-config
