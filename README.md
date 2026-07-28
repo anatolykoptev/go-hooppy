@@ -187,7 +187,7 @@ hooppy search parse --source-resource-id <id> --account-id <id>  # start scrapin
 hooppy search stop                             # stop in-progress scraping
 hooppy search copy --post-id <id> --to <page-id>  # copy scraped post to your page
 hooppy search rewrite --post-id <id> --text "..." --to <page-id>  # rewrite with custom text
-hooppy search rewrite --post-id <id> --text "..." --to <page-id> --keep-photos --source-resource-id <id>  # rewrite + keep photos
+hooppy search rewrite --post-id <id> --text "..." --to <page-id> --keep-photos  # rewrite + keep photos
 
 # Print MCP setup instructions
 hooppy mcp-config

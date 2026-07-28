@@ -34,6 +34,7 @@ const (
 	pathPostsSearchParseStart = "/posts-search/parsing/start"
 	pathPostsSearchParseStop  = "/posts-search/parsing"
 	pathPostsRewrite          = "/posts/rewrite"
+	pathPostsSearchEdit       = "/posts-search/%d/edit"
 )
 
 // DefaultBaseURL is the production Hooppy API base URL.

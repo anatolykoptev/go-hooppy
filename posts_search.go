@@ -2,6 +2,7 @@ package hooppy
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"strconv"
 )
@@ -118,13 +119,61 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 	return &resp, nil
 }
 
+// GetSearchPostEdit returns a scraped post's data in a format suitable for
+// re-publishing. The response includes texts and attachments (photos with
+// their URLs and metadata) that can be passed directly to RewriteSearchPost
+// or POST /posts with as_copy=1.
+//
+// This is the correct way to copy photos from a scraped post: the edit
+// endpoint returns photo objects with internal Hooppy IDs and source URLs
+// that the server can process. Scraped VK photo IDs (owner_id + photo id)
+// do NOT work — only the edit endpoint's attachment data does.
+//
+// UNDOCUMENTED: GET /posts-search/{id}/edit is not in the public OpenAPI spec.
+func (c *Client) GetSearchPostEdit(ctx context.Context, searchPostID int) (*SearchPostEditResponse, error) {
+	var resp SearchPostEditResponse
+	path := fmt.Sprintf(pathPostsSearchEdit, searchPostID)
+	params := url.Values{}
+	params.Set("as_copy", "1")
+	if err := c.doGET(ctx, path, params, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// SearchPostPhotos extracts photo data from a SearchPostEditResponse's
+// attachments and returns them as a single Attachment of type "photos"
+// suitable for passing in CopySearchPostPayload.Attachments.
+//
+// The edit endpoint returns attachments as [{type: "photo", data: {...}}, ...].
+// The POST /posts endpoint expects [{type: "photos", data: [{...}, ...]}].
+// This helper does the transformation.
+func SearchPostPhotos(edit *SearchPostEditResponse) *Attachment {
+	var photos []interface{}
+	for _, att := range edit.Attachments {
+		if att.Type == "photo" || att.Type == "video" {
+			photos = append(photos, att.Data)
+		}
+	}
+	if len(photos) == 0 {
+		return nil
+	}
+	return &Attachment{
+		Type: "photos",
+		Data: photos,
+	}
+}
+
 // RewriteSearchPost rewrites a scraped post (from GET /posts-search) and
 // publishes it to the user's own pages. Pass custom text in payload.Texts to
-// override the original. To keep the original photos, download them from the
-// scraped post's photos[].url, upload via UploadMedia, and pass the resulting
-// media IDs in payload.Attachments.
+// override the original. To keep the original photos, call GetSearchPostEdit
+// first, use SearchPostPhotos to extract them, and pass the result in
+// payload.Attachments.
 //
-// UNDOCUMENTED: PUT /posts/rewrite with search_post_id is not in the public OpenAPI spec.
+// Uses POST /posts with as_copy=1 (same as the Hooppy UI). The search_post_id
+// is passed in the request so the server knows the source.
+//
+// UNDOCUMENTED: POST /posts with as_copy=1 + search_post_id is not in the public OpenAPI spec.
 func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
 	if payload.Texts == nil {
 		payload.Texts = []PostText{}
@@ -138,8 +187,32 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	if payload.SchedulesIDs == nil {
 		payload.SchedulesIDs = []int{}
 	}
+	// POST /posts with as_copy=1 — same format the UI uses.
+	body := struct {
+		AsCopy               int              `json:"as_copy"`
+		PublicationWhenType  int              `json:"publication_when_type"`
+		PublicationHowType   int              `json:"publication_how_type"`
+		PublicationWhereType int              `json:"publication_where_type"`
+		SelectedPagesIDs     []int            `json:"selected_pages_ids"`
+		SchedulesIDs         []int            `json:"schedules_ids"`
+		PublicationDate      *PublicationDate `json:"publication_date,omitempty"`
+		Texts                []PostText       `json:"texts"`
+		Attachments          []Attachment     `json:"attachments"`
+		IDs                  string           `json:"ids"`
+	}{
+		AsCopy:               1,
+		PublicationWhenType:  payload.PublicationWhenType,
+		PublicationHowType:   payload.PublicationHowType,
+		PublicationWhereType: 1,
+		SelectedPagesIDs:     payload.SelectedPagesIDs,
+		SchedulesIDs:         payload.SchedulesIDs,
+		PublicationDate:      payload.PublicationDate,
+		Texts:                payload.Texts,
+		Attachments:          payload.Attachments,
+		IDs:                  strconv.Itoa(payload.SearchPostID),
+	}
 	var resp PostIDResponse
-	if err := c.doPUT(ctx, pathPostsRewrite, payload, &resp); err != nil {
+	if err := c.doPOST(ctx, pathPosts, body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -149,8 +222,8 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 //
 // DEPRECATED: scraped photo IDs (VK owner_id + photo id) cannot be attached
 // to your own post — VK doesn't allow cross-group photo references. Use
-// UploadMedia to download and re-upload photos, then pass those media IDs
-// in attachments instead. This helper is kept for reference only.
+// GetSearchPostEdit + SearchPostPhotos instead to get working attachment data.
+// This helper is kept for reference only.
 func ScrapedPhotoAttachment(photos []SearchPostPhoto) Attachment {
 	items := make([]map[string]interface{}, 0, len(photos))
 	for _, ph := range photos {

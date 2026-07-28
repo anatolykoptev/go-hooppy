@@ -701,15 +701,14 @@ type ParsingStartResponse struct {
 }
 
 // CopySearchPostPayload copies or rewrites a scraped post (from GET /posts-search)
-// to the user's own pages. Used by both CopySearchPost (PUT /posts/copy) and
-// RewriteSearchPost (PUT /posts/rewrite).
+// to the user's own pages. Used by CopySearchPost (PUT /posts/copy) and
+// RewriteSearchPost (POST /posts with as_copy=1).
 //
-// Photo handling: scraped photo IDs (VK owner_id + photo id) CANNOT be used
-// directly — VK doesn't allow cross-group photo references. To include photos,
-// download them from the scraped post's photos[].url, upload via UploadMedia,
-// and pass the resulting media IDs in Attachments.
+// Photo handling: to include photos when rewriting, call GetSearchPostEdit
+// to get the scraped post's attachments, extract photo data, and pass them
+// in Attachments as [{type: "photos", data: [photo objects]}].
 //
-// UNDOCUMENTED: PUT /posts/copy and PUT /posts/rewrite with search_post_id
+// UNDOCUMENTED: PUT /posts/copy and POST /posts with as_copy=1 + search_post_id
 // are not in the public OpenAPI spec.
 type CopySearchPostPayload struct {
 	SearchPostID        int              `json:"search_post_id"`             // ID from GET /posts-search (REQUIRED)
@@ -719,5 +718,24 @@ type CopySearchPostPayload struct {
 	SchedulesIDs        []int            `json:"schedules_ids"`              // for when_type=3
 	PublicationDate     *PublicationDate `json:"publication_date,omitempty"` // for when_type=2
 	Texts               []PostText       `json:"texts"`                      // custom text to override original
-	Attachments         []Attachment     `json:"attachments"`                // photos (scraped IDs or uploaded media IDs)
+	Attachments         []Attachment     `json:"attachments"`                // photos from GetSearchPostEdit
+}
+
+// SearchPostEditResponse is returned by GET /posts-search/{id}/edit?as_copy=1.
+// It contains the scraped post's texts and attachments in a format suitable
+// for re-publishing via POST /posts with as_copy=1.
+//
+// The Attachments field contains objects with Type ("photo", "video", etc.)
+// and Data (the photo/video metadata: id, url, source_id).
+//
+// UNDOCUMENTED: GET /posts-search/{id}/edit is not in the public OpenAPI spec.
+type SearchPostEditResponse struct {
+	ID                   string           `json:"id"`
+	PublicationWhenType  int              `json:"publication_when_type"`
+	PublicationHowType   int              `json:"publication_how_type"`
+	PublicationWhereType int              `json:"publication_where_type"`
+	PublicationDate      *PublicationDate `json:"publication_date"`
+	CreatedBy            int              `json:"created_by"`
+	Texts                []PostText       `json:"texts"`
+	Attachments          []Attachment     `json:"attachments"`
 }

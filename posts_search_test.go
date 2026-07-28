@@ -277,8 +277,8 @@ func TestCopySearchPost_Scheduled(t *testing.T) {
 func TestRewriteSearchPost(t *testing.T) {
 	var capturedBody map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut || r.URL.Path != "/posts/rewrite" {
-			t.Errorf("PUT /posts/rewrite, got %s %s", r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/posts" {
+			t.Errorf("POST /posts, got %s %s", r.Method, r.URL.Path)
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &capturedBody)
@@ -300,8 +300,11 @@ func TestRewriteSearchPost(t *testing.T) {
 	if resp.ID != 6001 {
 		t.Errorf("ID = %d, want 6001", resp.ID)
 	}
-	if capturedBody["search_post_id"].(float64) != 2001 {
-		t.Errorf("search_post_id = %v, want 2001", capturedBody["search_post_id"])
+	if capturedBody["as_copy"].(float64) != 1 {
+		t.Errorf("as_copy = %v, want 1", capturedBody["as_copy"])
+	}
+	if capturedBody["ids"] != "2001" {
+		t.Errorf("ids = %v, want '2001'", capturedBody["ids"])
 	}
 	texts, ok := capturedBody["texts"].([]interface{})
 	if !ok || len(texts) != 1 {
@@ -315,8 +318,8 @@ func TestRewriteSearchPost(t *testing.T) {
 
 func TestRewriteSearchPost_Scheduled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/posts/rewrite" {
-			t.Errorf("path = %s, want /posts/rewrite", r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/posts" {
+			t.Errorf("POST /posts, got %s %s", r.Method, r.URL.Path)
 		}
 		w.Write([]byte(`{"id":6002}`))
 	}))
@@ -340,6 +343,68 @@ func TestRewriteSearchPost_Scheduled(t *testing.T) {
 	}
 	if resp.ID != 6002 {
 		t.Errorf("ID = %d, want 6002", resp.ID)
+	}
+}
+
+func TestGetSearchPostEdit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/posts-search/6453701/edit" {
+			t.Errorf("path = %s, want /posts-search/6453701/edit", r.URL.Path)
+		}
+		if r.URL.Query().Get("as_copy") != "1" {
+			t.Errorf("as_copy = %q, want '1'", r.URL.Query().Get("as_copy"))
+		}
+		w.Write([]byte(`{
+			"id": "6453701",
+			"publication_when_type": 1,
+			"publication_how_type": 1,
+			"publication_where_type": 1,
+			"created_by": 7,
+			"texts": [{"text": "Original text", "source_id": 0}],
+			"attachments": [
+				{"id": 13803886, "result_id": 6453701, "type": "photo", "data": {"id": "abc123", "url": "https://example.com/photo.jpg", "type": "photo", "source_id": 1}}
+			]
+		}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	edit, err := c.GetSearchPostEdit(context.Background(), 6453701)
+	if err != nil {
+		t.Fatalf("GetSearchPostEdit: %v", err)
+	}
+	if edit.ID != "6453701" {
+		t.Errorf("ID = %q, want '6453701'", edit.ID)
+	}
+	if len(edit.Attachments) != 1 {
+		t.Fatalf("Attachments = %d, want 1", len(edit.Attachments))
+	}
+	if edit.Attachments[0].Type != "photo" {
+		t.Errorf("Attachments[0].Type = %q, want 'photo'", edit.Attachments[0].Type)
+	}
+}
+
+func TestSearchPostPhotos(t *testing.T) {
+	edit := &SearchPostEditResponse{
+		Attachments: []Attachment{
+			{Type: "photo", Data: map[string]interface{}{"id": "photo1", "url": "https://example.com/1.jpg"}},
+			{Type: "video", Data: map[string]interface{}{"id": "video1", "url": "https://example.com/1.mp4"}},
+			{Type: "link", Data: "https://example.com"},
+		},
+	}
+	att := SearchPostPhotos(edit)
+	if att == nil {
+		t.Fatal("SearchPostPhotos returned nil")
+	}
+	if att.Type != "photos" {
+		t.Errorf("Type = %q, want 'photos'", att.Type)
+	}
+	photos, ok := att.Data.([]interface{})
+	if !ok {
+		t.Fatalf("Data = %T, want []interface{}", att.Data)
+	}
+	if len(photos) != 2 {
+		t.Errorf("len(photos) = %d, want 2 (photo + video, not link)", len(photos))
 	}
 }
 
