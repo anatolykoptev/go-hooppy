@@ -143,12 +143,14 @@ hooppy files upload-media ./photo.jpg
 hooppy projects list
 hooppy schedules list
 
-# Create / delete projects (undocumented)
+# Create / update / delete projects (undocumented)
 hooppy projects create --name "My Project" --page 2355344
+hooppy projects update 21778 --name "Renamed Project"
 hooppy projects delete 21778
 
-# Create / delete schedules (undocumented)
+# Create / update / delete schedules (undocumented)
 hooppy schedules create --name "Daily 09:00"
+hooppy schedules update 55608 --name "Renamed" --state 0
 hooppy schedules delete 55608
 
 # Update an existing post (undocumented)
@@ -223,6 +225,24 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 | `hooppy_upload_document` | Upload a document file |
 | `hooppy_list_projects` | List post projects |
 | `hooppy_list_schedules` | List publication schedules |
+| `hooppy_create_project` | Create a post project |
+| `hooppy_update_project` | Update a project name |
+| `hooppy_delete_project` | Delete a project |
+| `hooppy_create_schedule` | Create a publication schedule |
+| `hooppy_update_schedule` | Update a publication schedule |
+| `hooppy_delete_schedule` | Delete a publication schedule |
+| `hooppy_update_post` | Update an existing post |
+| `hooppy_get_user` | Get current user profile |
+| `hooppy_list_watermarks` | List watermarks |
+| `hooppy_create_watermark` | Create a watermark |
+| `hooppy_update_watermark` | Update a watermark |
+| `hooppy_delete_watermark` | Delete a watermark |
+| `hooppy_list_proxies` | List proxy servers |
+| `hooppy_create_proxy` | Create a proxy server |
+| `hooppy_update_proxy` | Update a proxy server |
+| `hooppy_delete_proxy` | Delete a proxy server |
+| `hooppy_list_notifications` | List publication notifications |
+| `hooppy_disconnect_page` | Disconnect a social media page |
 
 ## Social network source IDs
 

@@ -45,14 +45,23 @@ func registerTools(server *mcp.Server) {
 	registerListSchedules(server)
 	// Undocumented endpoints (not in OpenAPI spec v0.1.0)
 	registerCreateSchedule(server)
+	registerUpdateSchedule(server)
 	registerDeleteSchedule(server)
 	registerDeleteProject(server)
 	registerCreateProject(server)
+	registerUpdateProject(server)
 	registerGetUser(server)
 	registerListWatermarks(server)
+	registerCreateWatermark(server)
+	registerUpdateWatermark(server)
+	registerDeleteWatermark(server)
 	registerListProxies(server)
+	registerCreateProxy(server)
+	registerUpdateProxy(server)
+	registerDeleteProxy(server)
 	registerListNotifications(server)
 	registerDisconnectPage(server)
+	registerUpdatePost(server)
 }
 
 // --- helpers ---
@@ -624,6 +633,283 @@ func registerDisconnectPage(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			resp, err := c.DisconnectPage(ctx, in.ID)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- update_project (undocumented) ---
+
+type updateProjectInput struct {
+	ID   int    `json:"id" jsonschema:"Project ID to update."`
+	Name string `json:"name" jsonschema:"New project name."`
+}
+
+func registerUpdateProject(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_update_project",
+			Description: "Update a project name on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in updateProjectInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.UpdateProject(ctx, in.ID, in.Name)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- update_schedule (undocumented) ---
+
+type updateScheduleInput struct {
+	ID    int    `json:"id" jsonschema:"Schedule ID to update."`
+	Name  string `json:"name" jsonschema:"Schedule name."`
+	State int    `json:"state,omitempty" jsonschema:"State: 1=active (default), 0=paused."`
+}
+
+func registerUpdateSchedule(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_update_schedule",
+			Description: "Update a publication schedule on Hooppy by ID. Uses default settings for unset fields. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in updateScheduleInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			payload := hooppy.NewSchedulePayload(in.Name)
+			if in.State != 0 {
+				payload.State = in.State
+			}
+			resp, err := c.UpdateSchedule(ctx, in.ID, payload)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- update_post (undocumented) ---
+
+type updatePostInput struct {
+	ID      int    `json:"id" jsonschema:"Post ID to update."`
+	Text    string `json:"text" jsonschema:"Updated post text."`
+	PageIDs []int  `json:"page_ids" jsonschema:"Page IDs to publish to."`
+}
+
+func registerUpdatePost(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_update_post",
+			Description: "Update an existing post on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in updatePostInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.UpdatePost(ctx, in.ID, hooppy.PostPublishNowPayload{
+				PublicationWhenType: 1,
+				PublicationHowType:  1,
+				SelectedPagesIDs:    in.PageIDs,
+				Texts:               []hooppy.PostText{{Text: in.Text, SourceID: 0}},
+				Attachments:         []hooppy.Attachment{},
+			})
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- create_watermark (undocumented) ---
+
+type createWatermarkInput struct {
+	Name     string `json:"name" jsonschema:"Watermark name."`
+	File     string `json:"file,omitempty" jsonschema:"File path or identifier."`
+	Space    int    `json:"space,omitempty" jsonschema:"Spacing."`
+	Position int    `json:"position,omitempty" jsonschema:"Position."`
+	Opacity  int    `json:"opacity,omitempty" jsonschema:"Opacity (0-100)."`
+	Size     int    `json:"size,omitempty" jsonschema:"Size."`
+}
+
+func registerCreateWatermark(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_create_watermark",
+			Description: "Create a watermark on Hooppy. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in createWatermarkInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.CreateWatermark(ctx, hooppy.WatermarkPayload{
+				Name: in.Name, File: in.File, Space: in.Space, Position: in.Position, Opacity: in.Opacity, Size: in.Size,
+			})
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- update_watermark (undocumented) ---
+
+type updateWatermarkInput struct {
+	ID       int    `json:"id" jsonschema:"Watermark ID to update."`
+	Name     string `json:"name,omitempty" jsonschema:"Watermark name."`
+	File     string `json:"file,omitempty" jsonschema:"File path or identifier."`
+	Space    int    `json:"space,omitempty" jsonschema:"Spacing."`
+	Position int    `json:"position,omitempty" jsonschema:"Position."`
+	Opacity  int    `json:"opacity,omitempty" jsonschema:"Opacity (0-100)."`
+	Size     int    `json:"size,omitempty" jsonschema:"Size."`
+}
+
+func registerUpdateWatermark(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_update_watermark",
+			Description: "Update a watermark on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in updateWatermarkInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.UpdateWatermark(ctx, in.ID, hooppy.WatermarkPayload{
+				Name: in.Name, File: in.File, Space: in.Space, Position: in.Position, Opacity: in.Opacity, Size: in.Size,
+			})
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- delete_watermark (undocumented) ---
+
+type deleteWatermarkInput struct {
+	ID int `json:"id" jsonschema:"Watermark ID to delete."`
+}
+
+func registerDeleteWatermark(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_delete_watermark",
+			Description: "Delete a watermark on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in deleteWatermarkInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.DeleteWatermark(ctx, in.ID)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- create_proxy (undocumented) ---
+
+type createProxyInput struct {
+	Name     string `json:"name,omitempty" jsonschema:"Proxy name."`
+	IP       string `json:"ip" jsonschema:"Proxy IP address."`
+	Port     string `json:"port" jsonschema:"Proxy port."`
+	Login    string `json:"login,omitempty" jsonschema:"Proxy login."`
+	Password string `json:"password,omitempty" jsonschema:"Proxy password."`
+}
+
+func registerCreateProxy(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_create_proxy",
+			Description: "Create a proxy server on Hooppy. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in createProxyInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.CreateProxy(ctx, hooppy.ProxyPayload{
+				Name: in.Name, IP: in.IP, Port: in.Port, Login: in.Login, Password: in.Password,
+			})
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- update_proxy (undocumented) ---
+
+type updateProxyInput struct {
+	ID       int    `json:"id" jsonschema:"Proxy ID to update."`
+	Name     string `json:"name,omitempty" jsonschema:"Proxy name."`
+	IP       string `json:"ip,omitempty" jsonschema:"Proxy IP address."`
+	Port     string `json:"port,omitempty" jsonschema:"Proxy port."`
+	Login    string `json:"login,omitempty" jsonschema:"Proxy login."`
+	Password string `json:"password,omitempty" jsonschema:"Proxy password."`
+}
+
+func registerUpdateProxy(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_update_proxy",
+			Description: "Update a proxy server on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in updateProxyInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.UpdateProxy(ctx, in.ID, hooppy.ProxyPayload{
+				Name: in.Name, IP: in.IP, Port: in.Port, Login: in.Login, Password: in.Password,
+			})
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- delete_proxy (undocumented) ---
+
+type deleteProxyInput struct {
+	ID int `json:"id" jsonschema:"Proxy ID to delete."`
+}
+
+func registerDeleteProxy(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_delete_proxy",
+			Description: "Delete a proxy server on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in deleteProxyInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.DeleteProxy(ctx, in.ID)
 			if err != nil {
 				return errResult(err.Error())
 			}
