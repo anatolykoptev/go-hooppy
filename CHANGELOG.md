@@ -8,8 +8,15 @@
 * **Retry for transient failures (429/5xx)**: opt-in retry for GET and DELETE requests via `Config.RetryOptions` (uses `go-kit/retry`). POST and streaming uploads NEVER retry (non-idempotent). Context is the sole deadline authority. `MaxElapsedTime` defaults to 30s. `APIError.RetryAfter` parsed from the `Retry-After` header (RFC 7231: seconds + HTTP-date).
 * **HTTP client configurability**: `Config.HTTPClient` lets callers inject a pre-configured `*http.Client` (custom transport, pool sizing, TLS, proxies). Follows the go-kit `WithHTTPClient` pattern.
 * **Schedule CRUD (UNDOCUMENTED)**: `CreateSchedule`, `UpdateSchedule`, `DeleteSchedule` via POST/PUT/DELETE `/posts/schedules[/{id}]`. Discovered via API probing — not in OpenAPI spec v0.1.0. `SchedulePayload` with 34 required fields; `NewSchedulePayload(name)` provides sensible defaults.
-* **Project delete/update (UNDOCUMENTED)**: `DeleteProject`, `UpdateProject` via DELETE/PUT `/posts/projects/{id}`. Not in OpenAPI spec v0.1.0.
-* **MCP tools**: `hooppy_create_schedule`, `hooppy_delete_schedule`, `hooppy_delete_project` (3 new tools, total 13).
+* **Project CRUD (UNDOCUMENTED)**: `CreateProject`, `UpdateProject`, `DeleteProject` via POST/PUT/DELETE `/posts/projects[/{id}]`. `ProjectPayload` with 56 required fields; `NewProjectPayload(name, pageID)` provides sensible defaults.
+* **Watermarks CRUD (UNDOCUMENTED)**: `ListWatermarks`, `CreateWatermark`, `UpdateWatermark`, `DeleteWatermark` via GET/POST/PUT/DELETE `/watermarks[/{id}]`. `WatermarkPayload` with 6 fields (name, file, space, position, opacity, size).
+* **Proxies CRUD (UNDOCUMENTED)**: `ListProxies`, `CreateProxy`, `UpdateProxy`, `DeleteProxy` via GET/POST/PUT/DELETE `/proxies[/{id}]`. `ProxyPayload` with 5 fields (name, ip, port, login, password).
+* **User profile (UNDOCUMENTED)**: `GetUser` via GET `/users/me`. Sensitive fields (api_token, ord, passwords) intentionally excluded from the `User` struct.
+* **Notifications (UNDOCUMENTED)**: `ListNotifications` via GET `/notifications`.
+* **Post update (UNDOCUMENTED)**: `UpdatePost` via PUT `/posts/{id}`. Accepts the same payload types as `CreatePost`.
+* **Page disconnect (UNDOCUMENTED)**: `DisconnectPage` via DELETE `/accounts/pages/{id}`. Idempotent.
+* **Cross-posting (UNDOCUMENTED)**: 15 methods for alternative post creation modes via PUT `/posts/{mode}`: `SearchPosts`, `CopyPost`, `SourcesPost`, `ImportPost`, `CrossPost`, `RewritePost`, `TranslatePost`, `QueuePost`, `DraftPost`, `TemplatePost`, `RSSPost`, `FeedPost`, `TagPost`, `WatermarkPost`, `BatchPost`. All accept the same payload as `CreatePost` and return `{"id":...}`.
+* **MCP tools**: 6 new tools (total 19): `hooppy_create_project`, `hooppy_get_user`, `hooppy_list_watermarks`, `hooppy_list_proxies`, `hooppy_list_notifications`, `hooppy_disconnect_page`.
 
 ### Changed
 

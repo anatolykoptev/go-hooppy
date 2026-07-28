@@ -123,6 +123,236 @@ type DeleteResponse struct {
 	Success bool `json:"success"`
 }
 
+// User is the current authenticated user. The API returns many fields;
+// only the most useful ones are modelled. Sensitive fields (api_token,
+// ord, passwords) are intentionally excluded.
+type User struct {
+	ID                int    `json:"id"`
+	Email             string `json:"email"`
+	EmailVerifiedDate string `json:"email_verified_date,omitempty"`
+	RegistrationDate  string `json:"registration_date,omitempty"`
+	RegistrationLang  string `json:"registration_lang,omitempty"`
+	PlanType          int    `json:"plan_type,omitempty"`
+	TimezoneID        int    `json:"timezone_id,omitempty"`
+	IsDeleted         int    `json:"is_deleted,omitempty"`
+}
+
+// UserResponse wraps GET /users/me.
+type UserResponse struct {
+	User User `json:"user"`
+}
+
+// Watermark is an image watermark configuration.
+type Watermark struct {
+	ID       int    `json:"id"`
+	UserID   int    `json:"user_id,omitempty"`
+	Name     string `json:"name"`
+	File     string `json:"file"`
+	Space    int    `json:"space,omitempty"`
+	Position int    `json:"position,omitempty"`
+	Opacity  int    `json:"opacity,omitempty"`
+	Size     int    `json:"size,omitempty"`
+}
+
+// WatermarkPayload is the request body for POST/PUT /watermarks.
+//
+// UNDOCUMENTED: not in the public OpenAPI spec (v0.1.0).
+type WatermarkPayload struct {
+	Name     string `json:"name"`
+	File     string `json:"file"` // file path or ""
+	Space    int    `json:"space"`
+	Position int    `json:"position"`
+	Opacity  int    `json:"opacity"`
+	Size     int    `json:"size"`
+}
+
+// WatermarksResponse wraps GET /watermarks and POST/PUT/DELETE /watermarks[/{id}].
+type WatermarksResponse struct {
+	List      []Watermark `json:"list"`
+	TotalRows int         `json:"total_rows"`
+	IsHasMore bool        `json:"is_has_more"`
+	RowsLimit int         `json:"rows_limit"`
+}
+
+// WatermarkResponse wraps POST/PUT/DELETE /watermarks[/{id}].
+type WatermarkResponse struct {
+	ID         int         `json:"id,omitempty"`
+	Success    bool        `json:"success"`
+	Watermarks []Watermark `json:"watermarks"`
+}
+
+// Proxy is a proxy server configuration.
+type Proxy struct {
+	ID       int    `json:"id"`
+	UserID   int    `json:"user_id,omitempty"`
+	Name     string `json:"name"`
+	IP       string `json:"ip"`
+	Port     string `json:"port"`
+	Login    string `json:"login"`
+	Password string `json:"password"`
+}
+
+// ProxyPayload is the request body for POST/PUT /proxies[/{id}].
+//
+// UNDOCUMENTED: not in the public OpenAPI spec (v0.1.0).
+type ProxyPayload struct {
+	Name     string `json:"name"`
+	IP       string `json:"ip"`
+	Port     string `json:"port"`
+	Login    string `json:"login"`
+	Password string `json:"password"`
+}
+
+// ProxiesResponse wraps GET /proxies.
+type ProxiesResponse struct {
+	List      []Proxy `json:"list"`
+	TotalRows int     `json:"total_rows"`
+	IsHasMore bool    `json:"is_has_more"`
+	RowsLimit int     `json:"rows_limit"`
+}
+
+// ProxyResponse wraps POST/PUT/DELETE /proxies[/{id}].
+type ProxyResponse struct {
+	ID      int     `json:"id,omitempty"`
+	Success bool    `json:"success"`
+	Proxies []Proxy `json:"proxies"`
+}
+
+// Notification is a publication status notification.
+type Notification struct {
+	ID            int    `json:"id"`
+	UserID        int    `json:"user_id,omitempty"`
+	ObjectID      int    `json:"object_id,omitempty"`
+	ObjectType    int    `json:"object_type,omitempty"`
+	SourceID      int    `json:"source_id,omitempty"`
+	PageID        int    `json:"page_id,omitempty"`
+	IsError       int    `json:"is_error,omitempty"`
+	OperationDate string `json:"operation_date,omitempty"`
+	TimeInWork    string `json:"time_in_work,omitempty"`
+	Data          string `json:"data,omitempty"`
+	IsViewed      int    `json:"is_viewed,omitempty"`
+}
+
+// NotificationsResponse wraps GET /notifications.
+type NotificationsResponse struct {
+	List      []Notification `json:"list"`
+	TotalRows int            `json:"total_rows"`
+	IsHasMore bool           `json:"is_has_more"`
+	RowsLimit int            `json:"rows_limit"`
+}
+
+// ProjectPayload is the request body for POST /posts/projects (create).
+// The Hooppy API requires ALL fields to be present (discovered via
+// iterative 500-error probing). Use NewProjectPayload(name, pageID) to
+// get a payload with sensible defaults.
+//
+// UNDOCUMENTED: not in the public OpenAPI spec (v0.1.0).
+type ProjectPayload struct {
+	Name                        string `json:"name"`
+	PublicationWhereType        int    `json:"publication_where_type"`
+	SelectedPagesIDs            []int  `json:"selected_pages_ids"`
+	WatermarkID                 int    `json:"watermark_id"`
+	UTMTags                     string `json:"utm_tags"`
+	IsUniqueContent             int    `json:"is_unique_content"`
+	IsCommentsDisabled          int    `json:"is_comments_disabled"`
+	PublishAsStory              int    `json:"publish_as_story"`
+	PublishAsStorySourceIDs     int    `json:"publish_as_story_source_ids"`
+	PublishAsReels              int    `json:"publish_as_reels"`
+	PublishAsClips              int    `json:"publish_as_clips"`
+	PublishAsShorts             int    `json:"publish_as_shorts"`
+	PublishAsArticle            int    `json:"publish_as_article"`
+	PublishAsArticleByLink      int    `json:"publish_as_article_by_link"`
+	PublishInChannel            int    `json:"publish_in_channel"`
+	ShareStoriesToFeed          int    `json:"share_stories_to_feed"`
+	ShareStoriesToFeedSourceIDs int    `json:"share_stories_to_feed_source_ids"`
+	ShareReelsToFeed            int    `json:"share_reels_to_feed"`
+	ShareClipsToFeed            int    `json:"share_clips_to_feed"`
+	ShareClipsToFeedWithText    int    `json:"share_clips_to_feed_with_text"`
+	ShareClipsToFeedIfNoVideo   int    `json:"share_clips_to_feed_if_no_video"`
+	ShareChannelToFeed          int    `json:"share_channel_to_feed"`
+	ExpandClipsTitle            int    `json:"expand_clips_title"`
+	PublishAsUser               int    `json:"publish_as_user"`
+	AddLinkToUser               int    `json:"add_link_to_user"`
+	MessageToCommunity          int    `json:"message_to_community"`
+	MessageToChannel            int    `json:"message_to_channel"`
+	DownloadVKVideos            int    `json:"download_vk_videos"`
+	SaveVKVideosNames           int    `json:"save_vk_videos_names"`
+	PlanByNetwork               int    `json:"plan_by_network"`
+	PublishAsCarousel           int    `json:"publish_as_carousel"`
+	PublishOnlyInVideos         int    `json:"publish_only_in_videos"`
+	NotPublishInVideos          int    `json:"not_publish_in_videos"`
+	RepeatVideo                 int    `json:"repeat_video"`
+	ParseLinks                  int    `json:"parse_links"`
+	PublishByAccount            int    `json:"publish_by_account"`
+	PublishByAccountSourceIDs   int    `json:"publish_by_account_source_ids"`
+	PrivacyLevel                int    `json:"privacy_level"`
+	YouTubeCategory             int    `json:"youtube_category"`
+	DonutPaidDuration           int    `json:"donut_paid_duration"`
+	DeletePostsDay              int    `json:"delete_posts_day"`
+	DeletePostsHour             int    `json:"delete_posts_hour"`
+	PostsCaption                int    `json:"posts_caption"`
+	PostsCaptionPositionType    int    `json:"posts_caption_position_type"`
+	PostsCaptionSpaceType       int    `json:"posts_caption_space_type"`
+	PhotosCaption               int    `json:"photos_caption"`
+	TGButtons                   int    `json:"tg_buttons"`
+	VideosTitle                 int    `json:"videos_title"`
+	PostsComment                int    `json:"posts_comment"`
+	PublishCommentByAccount     int    `json:"publish_comment_by_account"`
+	PostsHashtags               int    `json:"posts_hashtags"`
+	PostsLinks                  int    `json:"posts_links"`
+	PostsRewrite                int    `json:"posts_rewrite"`
+	PostsLocation               int    `json:"posts_location"`
+	PostsLocationVK             int    `json:"posts_location_vk"`
+	PostsPhoto                  int    `json:"posts_photo"`
+	PostsPhotoAlways            int    `json:"posts_photo_always"`
+}
+
+// NewProjectPayload returns a ProjectPayload with sensible defaults:
+// all flags off (0), publication_where_type=pages. Override fields
+// as needed before calling CreateProject.
+func NewProjectPayload(name string, pageID int) ProjectPayload {
+	return ProjectPayload{
+		Name:                 name,
+		PublicationWhereType: 1,
+		SelectedPagesIDs:     []int{pageID},
+	}
+}
+
+// ProjectResponse wraps POST /posts/projects.
+type ProjectResponse struct {
+	ID       int       `json:"id"`
+	Projects []Project `json:"projects"`
+}
+
+// CrossPostMode identifies a cross-posting endpoint (PUT /posts/{mode}).
+// All modes accept the same payload as POST /posts and return {"id":...}.
+//
+// UNDOCUMENTED: these endpoints are not in the public OpenAPI spec (v0.1.0).
+type CrossPostMode string
+
+const (
+	CrossPostModeSearch     CrossPostMode = "search"
+	CrossPostModeCopy       CrossPostMode = "copy"
+	CrossPostModeSources    CrossPostMode = "sources"
+	CrossPostModeImport     CrossPostMode = "import"
+	CrossPostModeCrossPost  CrossPostMode = "crosspost"
+	CrossPostModeRewrite    CrossPostMode = "rewrite"
+	CrossPostModeTranslate  CrossPostMode = "translate"
+	CrossPostModeQueue      CrossPostMode = "queue"
+	CrossPostModeDrafts     CrossPostMode = "drafts"
+	CrossPostModeTemplates  CrossPostMode = "templates"
+	CrossPostModeRSS        CrossPostMode = "rss"
+	CrossPostModeFeeds      CrossPostMode = "feeds"
+	CrossPostModeTags       CrossPostMode = "tags"
+	CrossPostModeWatermarks CrossPostMode = "watermarks"
+	CrossPostModeBatch      CrossPostMode = "batch"
+)
+
+// PostIDResponse is returned by PUT /posts/{mode} cross-posting endpoints.
+type PostIDResponse struct {
+	ID int `json:"id"`
+}
+
 // Post is a minimal post representation. The live API returns many more
 // fields depending on context; callers needing them should decode the raw
 // response body directly.

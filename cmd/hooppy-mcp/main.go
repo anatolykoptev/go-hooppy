@@ -47,6 +47,12 @@ func registerTools(server *mcp.Server) {
 	registerCreateSchedule(server)
 	registerDeleteSchedule(server)
 	registerDeleteProject(server)
+	registerCreateProject(server)
+	registerGetUser(server)
+	registerListWatermarks(server)
+	registerListProxies(server)
+	registerListNotifications(server)
+	registerDisconnectPage(server)
 }
 
 // --- helpers ---
@@ -469,6 +475,155 @@ func registerDeleteProject(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			resp, err := c.DeleteProject(ctx, in.ID)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- create_project (undocumented) ---
+
+type createProjectInput struct {
+	Name   string `json:"name" jsonschema:"Project name."`
+	PageID int    `json:"page_id" jsonschema:"Page ID to associate with the project."`
+}
+
+func registerCreateProject(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_create_project",
+			Description: "Create a post project on Hooppy. Uses default settings. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in createProjectInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.CreateProject(ctx, hooppy.NewProjectPayload(in.Name, in.PageID))
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- get_user (undocumented) ---
+
+type getUserInput struct{}
+
+func registerGetUser(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_get_user",
+			Description: "Get the current authenticated user's profile. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ getUserInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.GetUser(ctx)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- list_watermarks (undocumented) ---
+
+type listWatermarksInput struct{}
+
+func registerListWatermarks(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_list_watermarks",
+			Description: "List watermarks on Hooppy. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ listWatermarksInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.ListWatermarks(ctx, 0)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- list_proxies (undocumented) ---
+
+type listProxiesInput struct{}
+
+func registerListProxies(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_list_proxies",
+			Description: "List proxy servers on Hooppy. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ listProxiesInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.ListProxies(ctx)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- list_notifications (undocumented) ---
+
+type listNotificationsInput struct{}
+
+func registerListNotifications(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_list_notifications",
+			Description: "List publication status notifications on Hooppy. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ listNotificationsInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.ListNotifications(ctx, 0)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- disconnect_page (undocumented) ---
+
+type disconnectPageInput struct {
+	ID int `json:"id" jsonschema:"Page ID to disconnect."`
+}
+
+func registerDisconnectPage(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_disconnect_page",
+			Description: "Disconnect a social media page (group) by ID. Idempotent. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in disconnectPageInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.DisconnectPage(ctx, in.ID)
 			if err != nil {
 				return errResult(err.Error())
 			}

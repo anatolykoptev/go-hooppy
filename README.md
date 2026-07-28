@@ -222,11 +222,41 @@ The following endpoints are NOT in the public OpenAPI spec (v0.1.0) but were dis
 
 | Method | Endpoint | Go method | Notes |
 |---|---|---|---|
-| `POST` | `/posts/schedules` | `CreateSchedule` | 34 required fields; use `NewSchedulePayload(name)` for defaults |
-| `PUT` | `/posts/schedules/{id}` | `UpdateSchedule` | Same 34 fields as create |
+| `GET` | `/users/me` | `GetUser` | Current user profile (sensitive fields excluded) |
+| `GET` | `/watermarks` | `ListWatermarks` | Paginated |
+| `POST` | `/watermarks` | `CreateWatermark` | 6 fields: name, file, space, position, opacity, size |
+| `PUT` | `/watermarks/{id}` | `UpdateWatermark` | Same 6 fields |
+| `DELETE` | `/watermarks/{id}` | `DeleteWatermark` | Returns `{"success":true}` |
+| `GET` | `/proxies` | `ListProxies` | All proxies |
+| `POST` | `/proxies` | `CreateProxy` | 5 fields: name, ip, port, login, password |
+| `PUT` | `/proxies/{id}` | `UpdateProxy` | Same 5 fields |
+| `DELETE` | `/proxies/{id}` | `DeleteProxy` | Returns `{"success":true}` |
+| `GET` | `/notifications` | `ListNotifications` | Publication status notifications |
+| `POST` | `/posts/schedules` | `CreateSchedule` | 34 required fields; use `NewSchedulePayload(name)` |
+| `PUT` | `/posts/schedules/{id}` | `UpdateSchedule` | Same 34 fields |
 | `DELETE` | `/posts/schedules/{id}` | `DeleteSchedule` | Returns `{"success":true,"schedules":[...]}` |
+| `POST` | `/posts/projects` | `CreateProject` | 56 required fields; use `NewProjectPayload(name, pageID)` |
 | `PUT` | `/posts/projects/{id}` | `UpdateProject` | Body: `{"name":"..."}` |
 | `DELETE` | `/posts/projects/{id}` | `DeleteProject` | Returns `{"success":true}` |
+| `PUT` | `/posts/{id}` | `UpdatePost` | Same payload as `CreatePost` |
+| `DELETE` | `/accounts/pages/{id}` | `DisconnectPage` | Idempotent |
+| `PUT` | `/posts/search` | `SearchPosts` | Cross-posting mode |
+| `PUT` | `/posts/copy` | `CopyPost` | Cross-posting mode |
+| `PUT` | `/posts/sources` | `SourcesPost` | Cross-posting mode |
+| `PUT` | `/posts/import` | `ImportPost` | Cross-posting mode |
+| `PUT` | `/posts/crosspost` | `CrossPost` | Cross-posting mode |
+| `PUT` | `/posts/rewrite` | `RewritePost` | Cross-posting mode |
+| `PUT` | `/posts/translate` | `TranslatePost` | Cross-posting mode |
+| `PUT` | `/posts/queue` | `QueuePost` | Cross-posting mode |
+| `PUT` | `/posts/drafts` | `DraftPost` | Cross-posting mode |
+| `PUT` | `/posts/templates` | `TemplatePost` | Cross-posting mode |
+| `PUT` | `/posts/rss` | `RSSPost` | Cross-posting mode |
+| `PUT` | `/posts/feeds` | `FeedPost` | Cross-posting mode |
+| `PUT` | `/posts/tags` | `TagPost` | Cross-posting mode |
+| `PUT` | `/posts/watermarks` | `WatermarkPost` | Cross-posting mode |
+| `PUT` | `/posts/batch` | `BatchPost` | Cross-posting mode |
+
+All cross-posting modes (PUT /posts/{mode}) accept the same payload as `CreatePost` and return `{"id":...}`.
 
 ```go
 // Create a schedule with defaults
@@ -234,6 +264,20 @@ payload := hooppy.NewSchedulePayload("My Daily Schedule")
 payload.PublishAsStory = 1   // enable stories
 payload.IsCommentsDisabled = 1
 resp, err := client.CreateSchedule(context.Background(), payload)
+
+// Create a project
+payload := hooppy.NewProjectPayload("My Project", pageID)
+resp, err := client.CreateProject(context.Background(), payload)
+
+// Cross-post via search mode
+postPayload := hooppy.PostPublishNowPayload{
+    PublicationWhenType: 1,
+    PublicationHowType:  1,
+    SelectedPagesIDs:    []int{pageID},
+    Texts:               []hooppy.PostText{{Text: "hello", SourceID: 0}},
+    Attachments:         []hooppy.Attachment{},
+}
+resp, err := client.SearchPosts(context.Background(), postPayload)
 ```
 
 ## License

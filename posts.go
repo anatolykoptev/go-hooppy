@@ -69,6 +69,19 @@ func (c *Client) CreatePost(ctx context.Context, payload interface{}) (*CreatePo
 	return &resp, nil
 }
 
+// UpdatePost updates an existing post via PUT /posts/{id}. The payload must
+// be one of the PostPublish*Payload types (same as CreatePost).
+//
+// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
+// Discovered via API probing — may change without notice.
+func (c *Client) UpdatePost(ctx context.Context, id int, payload interface{}) (*DeletePostResponse, error) {
+	var resp DeletePostResponse
+	if err := c.doPUT(ctx, fmt.Sprintf(pathPostUpdate, id), payload, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // DeletePost removes a single post by ID.
 func (c *Client) DeletePost(ctx context.Context, id int) (*DeletePostResponse, error) {
 	var resp DeletePostResponse

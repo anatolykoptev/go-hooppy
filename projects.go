@@ -32,6 +32,20 @@ func (c *Client) UpdateProject(ctx context.Context, id int, name string) (*Delet
 	return &resp, nil
 }
 
+// CreateProject creates a new project via POST /posts/projects.
+// Use NewProjectPayload(name, pageID) to get a payload with sensible
+// defaults, then override fields as needed.
+//
+// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
+// Discovered via API probing — may change without notice.
+func (c *Client) CreateProject(ctx context.Context, payload ProjectPayload) (*ProjectResponse, error) {
+	var resp ProjectResponse
+	if err := c.doPOST(ctx, pathProjects, payload, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // DeleteProject deletes a project via DELETE /posts/projects/{id}.
 //
 // UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
