@@ -208,24 +208,55 @@ func registerPosts(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// posts update (undocumented)
-	updateCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
-		Name:  "update",
-		Short: "Update an existing post by ID (undocumented endpoint)",
+	// posts edit — view a post's full editable state
+	editPostCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
+		Name:  "edit",
+		Short: "View a post's full editable state (texts, attachments, schedule)",
 	})
-	var updText, updPageIDs string
-	updateCmd.Flags().StringVar(&updText, "text", "", "post text (required)")
-	updateCmd.Flags().StringVar(&updPageIDs, "to", "", "comma-separated page IDs (required)")
-	_ = updateCmd.MarkFlagRequired("text")
-	_ = updateCmd.MarkFlagRequired("to")
-	updateCmd.Run = func(_ *cobra.Command, args []string) {
+	editPostCmd.Run = func(_ *cobra.Command, args []string) {
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy posts update <id> --text=... --to=...")
+			fmt.Fprintln(os.Stderr, "usage: hooppy posts edit <id>")
 			os.Exit(1)
 		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
+		edit, err := c.GetPostEdit(context.Background(), id)
+		die(err)
+		printJSON(edit)
+	}
+
+	// posts update (undocumented) — two modes: text-only (preserve schedule+attachments) or full
+	updateCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
+		Name:  "update",
+		Short: "Update an existing post by ID (undocumented endpoint)",
+	})
+	var updText, updPageIDs string
+	var updTextOnly bool
+	updateCmd.Flags().StringVar(&updText, "text", "", "new post text (required)")
+	updateCmd.Flags().StringVar(&updPageIDs, "to", "", "comma-separated page IDs (for publish-now mode)")
+	updateCmd.Flags().BoolVar(&updTextOnly, "text-only", false, "change only the text, preserve schedule + attachments")
+	_ = updateCmd.MarkFlagRequired("text")
+	updateCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy posts update <id> --text=... [--text-only | --to=...]")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		if updTextOnly {
+			// Safe mode: fetch current state, swap text, preserve everything else
+			resp, err := c.UpdatePostText(context.Background(), id, updText)
+			die(err)
+			printJSON(resp)
+			return
+		}
+		if updPageIDs == "" {
+			fmt.Fprintln(os.Stderr, "error: --to is required unless --text-only is set")
+			os.Exit(1)
+		}
+		// Legacy mode: publish now with new text (drops schedule)
 		ids := parseIntList(updPageIDs)
 		resp, err := c.UpdatePost(context.Background(), id, hooppy.PostPublishNowPayload{
 			PublicationWhenType: 1,

@@ -82,6 +82,77 @@ func (c *Client) UpdatePost(ctx context.Context, id int, payload interface{}) (*
 	return &resp, nil
 }
 
+// PostEditResponse is the full editable state of a user's own post, returned
+// by GET /posts/{id}/edit. It mirrors SearchPostEditResponse but adds
+// ScheduleID (needed for PUT /posts/{id} updates, which use schedule_id
+// singular — not schedules_ids plural like the create/import endpoints).
+//
+// UNDOCUMENTED: GET /posts/{id}/edit is not in the public OpenAPI spec.
+type PostEditResponse struct {
+	ID                   int              `json:"id"`
+	PublicationWhenType  int              `json:"publication_when_type"`
+	PublicationHowType   int              `json:"publication_how_type"`
+	PublicationWhereType int              `json:"publication_where_type"`
+	PublicationDate      *PublicationDate `json:"publication_date"`
+	CreatedBy            int              `json:"created_by"`
+	Texts                []PostText       `json:"texts"`
+	Attachments          []Attachment     `json:"attachments"`
+	ScheduleID           int              `json:"schedule_id"`
+	ProjectID            int              `json:"project_id"`
+}
+
+// GetPostEdit returns a user's own post in editable format — the full state
+// needed to send back via PUT /posts/{id} (UpdatePost). Unlike
+// GetSearchPostEdit (which is for scraped posts), this returns schedule_id
+// and project_id for the existing post.
+//
+// UNDOCUMENTED: GET /posts/{id}/edit is not in the public OpenAPI spec.
+func (c *Client) GetPostEdit(ctx context.Context, postID int) (*PostEditResponse, error) {
+	var resp PostEditResponse
+	if err := c.doGET(ctx, fmt.Sprintf(pathPostEdit, postID), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// UpdatePostText is a high-level helper that changes ONLY the text of an
+// existing post while preserving its schedule, attachments, and publication
+// settings. It fetches the current post state via GetPostEdit, swaps the
+// text, and sends the full payload back via PUT /posts/{id}.
+//
+// This is the correct way to edit a scheduled post's text — the low-level
+// UpdatePost requires the full payload (schedule_id singular, attachments
+// grouped as {type: "photos"}, etc.) or the server returns 500.
+func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string) (*DeletePostResponse, error) {
+	edit, err := c.GetPostEdit(ctx, postID)
+	if err != nil {
+		return nil, err
+	}
+	attachments := SearchPostEditAttachments(edit.Attachments)
+	payload := struct {
+		AsCopy               int              `json:"as_copy"`
+		PublicationWhenType  int              `json:"publication_when_type"`
+		PublicationHowType   int              `json:"publication_how_type"`
+		PublicationWhereType int              `json:"publication_where_type"`
+		PublicationDate      *PublicationDate `json:"publication_date,omitempty"`
+		Texts                []PostText       `json:"texts"`
+		Attachments          []Attachment     `json:"attachments"`
+		SelectedPagesIDs     []int            `json:"selected_pages_ids"`
+		ScheduleID           int              `json:"schedule_id,omitempty"`
+	}{
+		AsCopy:               0,
+		PublicationWhenType:  edit.PublicationWhenType,
+		PublicationHowType:   edit.PublicationHowType,
+		PublicationWhereType: edit.PublicationWhereType,
+		PublicationDate:      edit.PublicationDate,
+		Texts:                []PostText{{Text: newText, SourceID: 0}},
+		Attachments:          attachments,
+		SelectedPagesIDs:     []int{},
+		ScheduleID:           edit.ScheduleID,
+	}
+	return c.UpdatePost(ctx, postID, payload)
+}
+
 // DeletePost removes a single post by ID.
 func (c *Client) DeletePost(ctx context.Context, id int) (*DeletePostResponse, error) {
 	var resp DeletePostResponse
