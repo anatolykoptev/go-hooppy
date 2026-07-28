@@ -1150,7 +1150,7 @@ func registerDoctor(root *cobra.Command) {
 	})
 	var sinceDays int
 	var exitCode bool
-	cmd.Flags().IntVar(&sinceDays, "since", 7, "only report errors whose operation_date falls within the last N days")
+	cmd.Flags().IntVar(&sinceDays, "since", 7, "only report errors whose operation_date falls within the last N days. NOTE: the window is computed in the HOST's local timezone (time.Now), but the vendor renders operation_date in the ACCOUNT's timezone (a user setting on hooppy.ru, not exposed by the API). If the two differ, the window boundary can be off by the offset between them — a row the account considers inside the window may be excluded, or vice versa, by up to that offset.")
 	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error falls inside the --since window, 0 otherwise (for cron / pre-flight)")
 	cmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()

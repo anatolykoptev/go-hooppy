@@ -27,8 +27,16 @@ const (
 // here. Match order matters: the first matching class wins, so more
 // specific classes must precede less specific ones.
 //
-// UNDOCUMENTED: these strings are not in the public OpenAPI spec. They were
-// inferred from the vendor's error messages and may change without notice.
+// MEASURED from the live notification log (not the OpenAPI spec, which does
+// not document these strings). The Russian credential message varies in the
+// middle by network name ("аккаунта Одноклассники", "аккаунта Twitter",
+// "канала Дзен") while "Устарел ключ доступа" and "Обновите подключение"
+// are invariant — the needles key on those invariant fragments, never on
+// the network name, so a newly-connected network cannot reopen this bug.
+// The two English credential messages are structurally unrelated to each
+// other and get their own needles. The vendor appends a call-site in
+// parentheses ("(getAccessToken)", "(uploadPhoto)", "(storeAlbum)") — the
+// needles deliberately exclude it, so it never participates in matching.
 var errorClassTable = []struct {
 	class   string
 	needles []string
@@ -36,25 +44,16 @@ var errorClassTable = []struct {
 	{
 		class: classExpiredCredential,
 		needles: []string{
-			"необходимо переподключить", // RU: "you need to reconnect"
-			"токен истёк",               // RU: "token expired"
-			"токен истек",               // RU: "token expired" (ё-free)
-			"reconnect the account",
-			"access token has expired",
-			"token expired",
-			"обновите доступ", // RU: "update access"
+			"устарел ключ доступа",               // RU invariant: "access key is outdated"
+			"обновите подключение",               // RU invariant: "update the connection"
+			"missing valid authorization header", // EN: Facebook/Instagram auth header
+			"error validating access token",      // EN: Facebook session invalidated
 		},
 	},
 	{
 		class: classMissingMedia,
 		needles: []string{
-			"требуется изображение", // RU: "image required"
-			"необходимо прикрепить", // RU: "need to attach"
-			"требуется медиа",       // RU: "media required"
-			"image is required",
-			"media is required",
-			"requires an image",
-			"no media attached",
+			"нет контента для публикации", // RU: "no content to publish"
 		},
 	},
 	{
@@ -73,6 +72,41 @@ var errorClassTable = []struct {
 			"503 service unavailable",
 		},
 	},
+}
+
+// networkNameTable maps a notification row's source_id to the network name
+// rendered in the doctor report's "network" field. MEASURED from the social
+// page links on a live Hooppy account — the vendor may add ids without
+// notice. An id absent from this table renders as "unknown", which is the
+// honest answer for an id the account exposes no page link for (e.g.
+// source_id 18 on the measured account). Two distinct ids (7 and 10) both
+// resolve to "instagram" — recorded as measured, not assumed wrong.
+//
+// This is deliberately separate from the library-wide SourceID map in
+// sources.go (which is inferred from the public hooppy.ru/en page and has
+// different provenance). The doctor reports on a specific account's
+// notifications, and the measured page-link mapping is the ground truth for
+// that account's network names.
+var networkNameTable = map[int]string{
+	1:  "vk",
+	2:  "odnoklassniki",
+	3:  "facebook",
+	4:  "twitter",
+	6:  "pinterest",
+	7:  "instagram",
+	9:  "telegram",
+	10: "instagram",
+	13: "dzen",
+}
+
+// networkName returns the network name for a source_id, or "unknown" for an
+// id absent from networkNameTable. The "unknown" answer is intentional —
+// see the networkNameTable caveat.
+func networkName(sourceID int) string {
+	if name, ok := networkNameTable[sourceID]; ok {
+		return name
+	}
+	return "unknown"
 }
 
 // classifyError maps a vendor error string to a classification bucket.
@@ -100,6 +134,17 @@ const operationDateLayout = "02.01.2006, 15:04"
 // the string does not match the expected format. Callers MUST report
 // unparseable rows rather than silently dropping them — dropping a row
 // hides exactly the failure doctor exists to surface.
+//
+// TIMEZONE ASSUMPTION: the vendor renders operation_date in the ACCOUNT's
+// timezone (a user setting on hooppy.ru), but this function parses it in
+// time.Local — the timezone of the host running `doctor`. The --since
+// window comparison in RunDoctor also uses a local time.Now(). If the
+// account's timezone differs from the host's, the window boundary can be
+// off by the offset between them: a row the account considers "inside the
+// last 7 days" may be excluded (or included) by up to that offset. There is
+// no conversion here because the account timezone is not exposed by the
+// API; the host timezone is the only one available. See the --since flag
+// help text for the user-facing statement of this assumption.
 func parseOperationDate(s string) (time.Time, error) {
 	return time.ParseInLocation(operationDateLayout, s, time.Local)
 }
@@ -156,6 +201,12 @@ type DoctorReport struct {
 //
 // A row whose operation_date fails to parse is reported in
 // UnparseableRows — never silently dropped.
+//
+// TIMEZONE ASSUMPTION: the --since window is computed against time.Now()
+// in the host's local timezone, while the vendor renders operation_date in
+// the account's timezone (a user setting on hooppy.ru, not exposed by the
+// API). If the two timezones differ, the window boundary can be off by the
+// offset between them. See parseOperationDate and the --since flag help.
 func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, error) {
 	if sinceDays < 0 {
 		sinceDays = 0
@@ -246,7 +297,7 @@ func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, e
 			PageID:         key.pageID,
 			PageName:       pageByName[key.pageID],
 			SourceID:       acc.sourceID,
-			Network:        SourceID(acc.sourceID).String(),
+			Network:        networkName(acc.sourceID),
 			ErrorText:      key.errorText,
 			Classification: classifyError(key.errorText),
 			Count:          acc.count,

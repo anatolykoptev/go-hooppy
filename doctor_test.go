@@ -37,17 +37,19 @@ func stubDoctorServer(t *testing.T, notificationsBody, pagesBody string) *httpte
 
 // TestRunDoctor_GroupsAndClassification verifies that doctor walks
 // notifications, resolves page names via ListAllPages, groups by
-// (page_id, error message), and classifies each group. Without the
+// (page_id, error message), and classifies each group. The error strings
+// and network names below are the MEASURED vendor strings (see
+// errorClassTable and networkNameTable in doctor.go). Without the
 // classification table the class field would be "unknown" for every row;
 // without the page-name join PageName would be empty.
 func TestRunDoctor_GroupsAndClassification(t *testing.T) {
 	now := time.Now()
 	recent := vendorDate(now.Add(-2 * 24 * time.Hour))
 	notifications := `{"list":[
-		{"id":1,"is_error":1,"page_id":100,"source_id":1,"operation_date":"` + recent + `","data":"Необходимо переподключить аккаунт"},
-		{"id":2,"is_error":1,"page_id":100,"source_id":1,"operation_date":"` + recent + `","data":"Необходимо переподключить аккаунт"},
-		{"id":3,"is_error":1,"page_id":200,"source_id":6,"operation_date":"` + recent + `","data":"Требуется изображение для публикации"},
-		{"id":4,"is_error":1,"page_id":300,"source_id":3,"operation_date":"` + recent + `","data":"Internal server error 500 от социальной сети"}
+		{"id":1,"is_error":1,"page_id":100,"source_id":1,"operation_date":"` + recent + `","data":"Устарел ключ доступа. Обновите подключение аккаунта Одноклассники в разделе \"Мои аккаунты\"."},
+		{"id":2,"is_error":1,"page_id":100,"source_id":1,"operation_date":"` + recent + `","data":"Устарел ключ доступа. Обновите подключение аккаунта Одноклассники в разделе \"Мои аккаунты\"."},
+		{"id":3,"is_error":1,"page_id":200,"source_id":6,"operation_date":"` + recent + `","data":"Нет контента для публикации. Скорее всего ожидается наличие фото или видео, но их нет."},
+		{"id":4,"is_error":1,"page_id":300,"source_id":3,"operation_date":"` + recent + `","data":"502, Bad Gateway (storePhoto)"}
 	],"total_rows":4,"is_has_more":false,"rows_limit":12}`
 	pages := `{"list":[
 		{"id":100,"source_id":1,"social_page_name":"VK Main Page"},
@@ -83,8 +85,8 @@ func TestRunDoctor_GroupsAndClassification(t *testing.T) {
 	if g100.PageName != "VK Main Page" {
 		t.Errorf("page 100 name = %q, want VK Main Page", g100.PageName)
 	}
-	if g100.Network != "vkontakte" {
-		t.Errorf("page 100 network = %q, want vkontakte", g100.Network)
+	if g100.Network != "vk" {
+		t.Errorf("page 100 network = %q, want vk", g100.Network)
 	}
 
 	// Page 200: missing media.
@@ -252,28 +254,93 @@ func TestRunDoctor_NonErrorRowsExcluded(t *testing.T) {
 	}
 }
 
-// TestClassifyError verifies the classification table maps known vendor
-// substrings to the right bucket and falls back to "unknown" for anything
-// unmatched, carrying the raw string in the group (not forcing it into a
-// known bucket).
-func TestClassifyError(t *testing.T) {
+// TestClassifyError_MeasuredVendorStrings is the regression gate for the
+// whole classification feature. It runs the EXACT vendor strings measured
+// from the live notification log through classifyError and asserts the
+// expected class for each. It also includes a string that belongs in none
+// of the known buckets, asserting "unknown" with the raw text preserved
+// verbatim in the group (the caller, RunDoctor, sets ErrorText = n.Data
+// unchanged; classifyError never mutates its input and never forces an
+// unmatched string into a known bucket).
+//
+// Without this test the classification table silently rots: a vendor
+// rewording that breaks a needle would go unnoticed until someone runs
+// doctor against the live log again.
+func TestClassifyError_MeasuredVendorStrings(t *testing.T) {
 	cases := []struct {
+		name string
 		data string
 		want string
 	}{
-		{"Необходимо переподключить аккаунт", "expired_credential"},
-		{"Токен истёк, обновите доступ", "expired_credential"},
-		{"Please reconnect the account to continue", "expired_credential"},
-		{"Требуется изображение для публикации", "missing_media"},
-		{"Image is required for this network", "missing_media"},
-		{"Internal server error 500 от социальной сети", "upstream_error"},
-		{"503 Service Unavailable", "upstream_error"},
-		{"Some completely unknown error message", "unknown"},
+		// expired_credential — the four Russian variants vary by network
+		// name in the middle; the needles key on the invariant fragments
+		// ("Устарел ключ доступа", "Обновите подключение"), so all four
+		// must classify the same regardless of the network named.
+		{"ru_ok", `Устарел ключ доступа. Обновите подключение аккаунта Одноклассники в разделе "Мои аккаунты".`, "expired_credential"},
+		{"ru_twitter", `Устарел ключ доступа. Обновите подключение аккаунта Twitter в разделе "Мои аккаунты".`, "expired_credential"},
+		{"ru_pinterest", `Устарел ключ доступа. Обновите подключение аккаунта Pinterest в разделе "Мои аккаунты".`, "expired_credential"},
+		{"ru_dzen", `Устарел ключ доступа. Обновите подключение канала Дзен в разделе "Мои аккаунты".`, "expired_credential"},
+		// The two English credential messages are structurally unrelated
+		// to each other and carry a call-site suffix in parentheses — the
+		// needles exclude the suffix, so it must not participate in
+		// matching.
+		{"en_missing_auth_header", "Missing valid authorization header (getAccessToken)", "expired_credential"},
+		{"en_session_invalidated", "Error validating access token: The session has been invalidated because the user changed their password or Facebook has changed the session for security reasons.(uploadPhoto)", "expired_credential"},
+		// missing_media — single measured Russian message.
+		{"ru_no_content", "Нет контента для публикации. Скорее всего ожидается наличие фото или видео, но их нет.", "missing_media"},
+		// upstream_error — already correct, must not regress.
+		{"en_502_storeAlbum", "502, Bad Gateway (storeAlbum)", "upstream_error"},
+		{"en_502_storePhoto", "502, Bad Gateway (storePhoto)", "upstream_error"},
+		// unknown — belongs in none of the buckets; raw text preserved.
+		{"unknown_vendor_message", "Какое-то совершенно новое сообщение об ошибке от вендора", "unknown"},
 	}
 	for _, tc := range cases {
-		got := classifyError(tc.data)
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyError(tc.data)
+			if got != tc.want {
+				t.Errorf("classifyError(%q) = %q, want %q", tc.data, got, tc.want)
+			}
+			// The raw input must be preserved verbatim — classifyError
+			// must not mutate its input, and an unmatched string must
+			// never be forced into a known bucket. RunDoctor sets
+			// ErrorText = n.Data unchanged, so the group carries the raw
+			// vendor string for the operator to read.
+			if got == "unknown" {
+				group := DoctorGroup{ErrorText: tc.data, Classification: got}
+				if group.ErrorText != tc.data {
+					t.Errorf("unknown case raw text not preserved: got %q, want %q", group.ErrorText, tc.data)
+				}
+			}
+		})
+	}
+}
+
+// TestNetworkName_MeasuredSourceIDs is the regression gate for the network
+// field. It asserts each measured source_id resolves to the right network
+// name, that two distinct ids (7 and 10) both resolve to "instagram" as
+// measured, and that an id absent from the table (18 — exists on the
+// measured account but exposes no page link) renders "unknown".
+func TestNetworkName_MeasuredSourceIDs(t *testing.T) {
+	cases := []struct {
+		sourceID int
+		want     string
+	}{
+		{1, "vk"},
+		{2, "odnoklassniki"},
+		{3, "facebook"},
+		{4, "twitter"},
+		{6, "pinterest"},
+		{7, "instagram"},
+		{9, "telegram"},
+		{10, "instagram"}, // two distinct ids both resolve to instagram — measured
+		{13, "dzen"},
+		{18, "unknown"}, // exists on the account, no page link — honest unknown
+		{999, "unknown"},
+	}
+	for _, tc := range cases {
+		got := networkName(tc.sourceID)
 		if got != tc.want {
-			t.Errorf("classifyError(%q) = %q, want %q", tc.data, got, tc.want)
+			t.Errorf("networkName(%d) = %q, want %q", tc.sourceID, got, tc.want)
 		}
 	}
 }
