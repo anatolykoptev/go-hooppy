@@ -699,3 +699,18 @@ type ParsingStartPayload struct {
 type ParsingStartResponse struct {
 	Success bool `json:"success"`
 }
+
+// CopySearchPostPayload copies a scraped post (from GET /posts-search) to the
+// user's own pages. The server auto-fills text and attachments from the
+// scraped post identified by SearchPostID — no need to pass texts/attachments.
+//
+// UNDOCUMENTED: PUT /posts/copy with search_post_id is not in the public OpenAPI spec.
+type CopySearchPostPayload struct {
+	SearchPostID        int          `json:"search_post_id"`        // ID from GET /posts-search (REQUIRED)
+	PublicationWhenType int          `json:"publication_when_type"` // 1=now, 2=at specific time, 3=by schedule
+	PublicationHowType  int          `json:"publication_how_type"`  // 1
+	SelectedPagesIDs    []int        `json:"selected_pages_ids"`    // for when_type=1 or 2
+	SchedulesIDs        []int        `json:"schedules_ids"`         // for when_type=3
+	Texts               []PostText   `json:"texts"`                 // auto-filled by server when search_post_id is set
+	Attachments         []Attachment `json:"attachments"`           // auto-filled by server when search_post_id is set
+}

@@ -800,6 +800,41 @@ func registerSearch(root *cobra.Command) {
 		die(err)
 		fmt.Println(`{"success":true}`)
 	}
+
+	// search copy
+	copyCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
+		Name:  "copy",
+		Short: "Copy a scraped post to your own pages (auto-fills text + photos from the scraped post)",
+	})
+	var copyPostID int
+	var copyPages string
+	var copyWhenType, copyHowType int
+	var copySchedules string
+	copyCmd.Flags().IntVar(&copyPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED)")
+	copyCmd.Flags().StringVar(&copyPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
+	copyCmd.Flags().IntVar(&copyWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
+	copyCmd.Flags().IntVar(&copyHowType, "how-type", 1, "publication how type (1=default)")
+	copyCmd.Flags().StringVar(&copySchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
+	copyCmd.Run = func(_ *cobra.Command, _ []string) {
+		if copyPostID == 0 {
+			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
+			os.Exit(1)
+		}
+		c := mustClient()
+		payload := hooppy.CopySearchPostPayload{
+			SearchPostID:        copyPostID,
+			PublicationWhenType: copyWhenType,
+			PublicationHowType:  copyHowType,
+		}
+		if copyWhenType == 3 {
+			payload.SchedulesIDs = parseIntList(copySchedules)
+		} else {
+			payload.SelectedPagesIDs = parseIntList(copyPages)
+		}
+		resp, err := c.CopySearchPost(context.Background(), payload)
+		die(err)
+		printJSON(resp)
+	}
 }
 
 func parseIntList(s string) []int {

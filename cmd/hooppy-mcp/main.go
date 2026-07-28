@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/anatolykoptev/go-hooppy"
 	mcpserver "github.com/anatolykoptev/go-mcpserver"
@@ -68,6 +70,7 @@ func registerTools(server *mcp.Server) {
 	registerGetParsingForm(server)
 	registerStartParsing(server)
 	registerStopParsing(server)
+	registerCopySearchPost(server)
 }
 
 // --- helpers ---
@@ -91,6 +94,26 @@ func errResult(msg string) (*mcp.CallToolResult, error) {
 		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		IsError: true,
 	}, nil
+}
+
+func parseIntListStr(s string) []int {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	var ids []int
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			continue
+		}
+		ids = append(ids, n)
+	}
+	return ids
 }
 
 // --- list_accounts ---
@@ -1069,6 +1092,46 @@ func registerStopParsing(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			return jsonResult(map[string]bool{"success": true})
+		},
+	)
+}
+
+// --- copy_search_post ---
+
+type copySearchPostInput struct {
+	SearchPostID        int    `json:"search_post_id" jsonschema:"ID of the scraped post (from list_search_posts). REQUIRED."`
+	PublicationWhenType int    `json:"publication_when_type" jsonschema:"1=publish now, 2=at specific time, 3=by schedule."`
+	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default)."`
+	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
+	SchedulesIDs        string `json:"schedules_ids,omitempty" jsonschema:"Comma-separated schedule IDs (for when_type 3). Use list_schedules to get IDs."`
+}
+
+func registerCopySearchPost(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_copy_search_post",
+			Description: "Copy a scraped post (from list_search_posts) to your own pages. The server auto-fills text and photos from the scraped post — just provide the scraped post ID and where to publish. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in copySearchPostInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			payload := hooppy.CopySearchPostPayload{
+				SearchPostID:        in.SearchPostID,
+				PublicationWhenType: in.PublicationWhenType,
+				PublicationHowType:  in.PublicationHowType,
+			}
+			if in.PublicationWhenType == 3 {
+				payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
+			} else {
+				payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
+			}
+			resp, err := c.CopySearchPost(ctx, payload)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
 		},
 	)
 }

@@ -87,3 +87,33 @@ func (c *Client) StartParsing(ctx context.Context, payload ParsingStartPayload) 
 func (c *Client) StopParsing(ctx context.Context) error {
 	return c.doDELETE(ctx, pathPostsSearchParseStop, nil)
 }
+
+// CopySearchPost copies a scraped post (from GET /posts-search) to the user's
+// own pages. The server auto-fills text and attachments from the scraped post
+// identified by payload.SearchPostID — no need to pass texts/attachments.
+//
+// This is the simplest way to re-publish a scraped post: just provide the
+// scraped post ID and where to publish it (page IDs for immediate/scheduled,
+// or schedule IDs for by-schedule mode).
+//
+// UNDOCUMENTED: PUT /posts/copy with search_post_id is not in the public OpenAPI spec.
+func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
+	// Server expects arrays, not null — initialize nil slices to empty.
+	if payload.Texts == nil {
+		payload.Texts = []PostText{}
+	}
+	if payload.Attachments == nil {
+		payload.Attachments = []Attachment{}
+	}
+	if payload.SelectedPagesIDs == nil {
+		payload.SelectedPagesIDs = []int{}
+	}
+	if payload.SchedulesIDs == nil {
+		payload.SchedulesIDs = []int{}
+	}
+	var resp PostIDResponse
+	if err := c.doPUT(ctx, pathPostsCopy, payload, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}

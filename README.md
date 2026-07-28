@@ -185,6 +185,7 @@ hooppy search posts --source-resource-id 578 --text "Петербург" --date-
 hooppy search status                           # check if parsing is in progress
 hooppy search parse --source-resource-id 578 --account-id 94294  # start scraping
 hooppy search stop                             # stop in-progress scraping
+hooppy search copy --post-id 6453701 --to 2355344  # copy scraped post to your page
 
 # Print MCP setup instructions
 hooppy mcp-config
@@ -256,6 +257,7 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 | `hooppy_parsing_status` | Check scraping status + available parsers (UNDOCUMENTED) |
 | `hooppy_start_parsing` | Start scraping posts from an external source (UNDOCUMENTED) |
 | `hooppy_stop_parsing` | Stop in-progress scraping job (UNDOCUMENTED) |
+| `hooppy_copy_search_post` | Copy a scraped post to your own pages (UNDOCUMENTED) |
 
 ## Social network source IDs
 

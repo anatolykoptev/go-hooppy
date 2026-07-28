@@ -170,3 +170,36 @@ func TestStopParsing(t *testing.T) {
 		t.Fatalf("StopParsing: %v", err)
 	}
 }
+
+func TestCopySearchPost(t *testing.T) {
+	var capturedBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/posts/copy" {
+			t.Errorf("PUT /posts/copy, got %s %s", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Write([]byte(`{"id":92760716}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        6457842,
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{2355344},
+	})
+	if err != nil {
+		t.Fatalf("CopySearchPost: %v", err)
+	}
+	if resp.ID != 92760716 {
+		t.Errorf("ID = %d, want 92760716", resp.ID)
+	}
+	if capturedBody["search_post_id"].(float64) != 6457842 {
+		t.Errorf("search_post_id = %v, want 6457842", capturedBody["search_post_id"])
+	}
+	if capturedBody["publication_when_type"].(float64) != 1 {
+		t.Errorf("publication_when_type = %v, want 1", capturedBody["publication_when_type"])
+	}
+}
