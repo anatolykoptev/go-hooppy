@@ -1,0 +1,93 @@
+package hooppy
+
+import (
+	"context"
+	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
+)
+
+// ListPostsFilter narrows the GET /posts query.
+type ListPostsFilter struct {
+	IsPublished     *bool  // nil = no filter; true = published; false = unpublished
+	PublicationDate string // dd.mm.yyyy
+	SourceID        int
+	AccountID       int
+	PageID          int
+	ScheduleID      int
+	ProjectID       int
+	Page            int
+}
+
+// ListPosts returns posts matching the given filter.
+func (c *Client) ListPosts(ctx context.Context, f ListPostsFilter) (*PostsResponse, error) {
+	params := url.Values{}
+	if f.IsPublished != nil {
+		val := 0
+		if *f.IsPublished {
+			val = 1
+		}
+		params.Set("is_published", strconv.Itoa(val))
+	}
+	if f.PublicationDate != "" {
+		params.Set("publication_date", f.PublicationDate)
+	}
+	if f.SourceID > 0 {
+		params.Set("source_id", strconv.Itoa(f.SourceID))
+	}
+	if f.AccountID > 0 {
+		params.Set("account_id", strconv.Itoa(f.AccountID))
+	}
+	if f.PageID > 0 {
+		params.Set("page_id", strconv.Itoa(f.PageID))
+	}
+	if f.ScheduleID > 0 {
+		params.Set("schedule_id", strconv.Itoa(f.ScheduleID))
+	}
+	if f.ProjectID > 0 {
+		params.Set("project_id", strconv.Itoa(f.ProjectID))
+	}
+	if f.Page > 0 {
+		params.Set("page", strconv.Itoa(f.Page))
+	}
+	var resp PostsResponse
+	if err := c.doGET(ctx, pathPosts, params, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// CreatePost creates a post with the given payload. The payload must be one
+// of PostPublishNowPayload, PostPublishAtPayload, PostPublishBySchedulePayload,
+// or PostPublishByProjectPayload.
+func (c *Client) CreatePost(ctx context.Context, payload interface{}) (*CreatePostResponse, error) {
+	var resp CreatePostResponse
+	if err := c.doPOST(ctx, pathPosts, payload, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// DeletePost removes a single post by ID.
+func (c *Client) DeletePost(ctx context.Context, id int) (*DeletePostResponse, error) {
+	var resp DeletePostResponse
+	if err := c.doDELETE(ctx, fmt.Sprintf(pathPostDelete, id), &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// BatchDeletePosts removes multiple posts by ID. IDs are joined with commas.
+func (c *Client) BatchDeletePosts(ctx context.Context, ids []int) (*DeletePostResponse, error) {
+	strs := make([]string, len(ids))
+	for i, id := range ids {
+		strs[i] = strconv.Itoa(id)
+	}
+	body := BatchDeletePostsRequest{IDs: strings.Join(strs, ",")}
+	var resp DeletePostResponse
+	if err := c.doPOST(ctx, pathPostsBatchDelete, body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}

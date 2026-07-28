@@ -1,0 +1,919 @@
+openapi: 3.0.0
+
+info:
+  title: Hooppy API
+  description: Описание методов Hooppy.ru для создания и публикации постов в социальные сети.
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+  version: 0.1.0
+  contact:
+    name: Andrey Okhotin
+    url: https://hooppy.ru
+    email: me@icanary.ru
+servers:
+  - url: https://api.hooppy.ru/api
+
+tags:
+  - name: Аккаунты
+    description: "Методы для работы с аккаунтами соц. сетей"
+  - name: Группы
+    description: "Методы для работы с группами аккаунтов соц. сетей"
+  - name: Проекты
+    description: "Методы для работы с проектами"
+  - name: Расписания
+    description: "Методы для работы с расписаниями"
+  - name: Файлы
+    description: "Методы для загрузки файлов для постов"
+  - name: Посты
+    description: "Методы для создания и публикации постов"
+
+paths:
+
+  /accounts:
+    get:
+      summary: Получение списка подключенных аккаунтов соц сетей
+      description: Метод предназначен для получения списка всех подключенных аккаунтов соц сетей пользователя.
+      operationId: getAccounts
+      tags:
+        - Аккаунты
+      parameters:
+        - name: source_id
+          in: query
+          description: Фильтр по типу соц сети
+          required: false
+          schema:
+            type: integer
+          example: 1
+        - name: page
+          in: query
+          description: Пагинация
+          required: false
+          schema:
+            type: integer
+          example: 1
+      responses:
+        '200':
+          description: Список аккаунтов
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountsResponse"
+
+  /accounts/pages:
+    get:
+      summary: Получение списка подключенных групп соц сетей
+      description: Метод предназначен для получения списка всех подключенных групп для аккаунтов соц сетей пользователя.
+      operationId: getPages
+      tags:
+        - Группы
+      parameters:
+        - name: source_id
+          in: query
+          description: Фильтр по типу соц сети
+          required: false
+          schema:
+            type: integer
+          example: 1
+        - name: account_id
+          in: query
+          description: Фильтр по аккаунту соц сети
+          required: false
+          schema:
+            type: integer
+          example: 33125
+        - name: page
+          in: query
+          description: Пагинация
+          required: false
+          schema:
+            type: integer
+          example: 1
+      responses:
+        '200':
+          description: Список групп
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PagesResponse"
+
+  /posts/projects:
+    get:
+      summary: Получение списка проектов
+      description: Метод предназначен для получения списка всех проектов пользователя.
+      operationId: getProjects
+      tags:
+        - Проекты
+      parameters:
+        - name: page
+          in: query
+          description: Пагинация
+          required: false
+          schema:
+            type: integer
+          example: 1
+      responses:
+        '200':
+          description: Список проектов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectsResponse'
+
+  /posts/schedules:
+    get:
+      summary: Получение списка расписаний
+      description: Метод предназначен для получения списка всех расписаний пользователя.
+      operationId: getSchedules
+      tags:
+        - Расписания
+      parameters:
+        - name: page
+          in: query
+          description: Пагинация
+          required: false
+          schema:
+            type: integer
+          example: 1
+      responses:
+        '200':
+          description: Список проектов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchedulesResponse'
+
+  /files/media/upload:
+    post:
+      summary: Загрузка фото или видео
+      description: Метод предназначен для загрузки фото или видео к постам.
+      operationId: uploadMedia
+      tags:
+        - Файлы
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Фото или видео файл для загрузки
+                file_id:
+                  type: string
+                  description: Уникальный идентификатор файла
+                  format: uuid
+      responses:
+        '200':
+          description: Успешная загрузка фото или видео
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadMediaResponse"
+
+  /files/documents/upload:
+    post:
+      summary: Загрузка документа
+      description: Метод предназначен для загрузки документов к постам (текстовые файлы, pdf, архивы, аудио и другое).
+      operationId: uploadDocument
+      tags:
+        - Файлы
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Файл документа для загрузки
+                file_id:
+                  type: string
+                  description: Уникальный идентификатор файла
+                  format: uuid
+      responses:
+        '200':
+          description: Успешная загрузка документа
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadDocumentResponse"
+
+  /posts:
+    get:
+      summary: Получение списка постов
+      description: Метод предназначен для получения списка всех постов пользователя.
+      operationId: getPosts
+      tags:
+        - Посты
+      parameters:
+        - name: is_published
+          in: query
+          description: Фильтр по статусу (0 - еще не опубликованы, 1 - уже опубликованы)
+          required: false
+          schema:
+            type: integer
+          example: 0
+        - name: publication_date
+          in: query
+          description: Фильтр по дате публикации (в формате дд.мм.гггг)
+          required: false
+          schema:
+            type: string
+          example: 21.06.2026
+        - name: source_id
+          in: query
+          description: Фильтр по типу соц сети
+          required: false
+          schema:
+            type: integer
+          example: 1
+        - name: account_id
+          in: query
+          description: Фильтр по аккаунту соц сети
+          required: false
+          schema:
+            type: integer
+          example: 33125
+        - name: page_id
+          in: query
+          description: Фильтр по группе в соц сети
+          required: false
+          schema:
+            type: integer
+          example: 44567
+        - name: schedule_id
+          in: query
+          description: Фильтр по расписанию
+          required: false
+          schema:
+            type: integer
+          example: 14278
+        - name: project_id
+          in: query
+          description: Фильтр по проекту
+          required: false
+          schema:
+            type: integer
+          example: 92384
+        - name: page
+          in: query
+          description: Пагинация
+          required: false
+          schema:
+            type: integer
+          example: 1
+      responses:
+        '200':
+          description: Список постов. Помимо свойства `id` посты будут содержать множество других данных, в зависимости от контекста
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostsResponse"
+    post:
+      summary: Создание поста
+      description: Метод предназначен для создания и публикации постов в соц сети пользователя. Данный пример описывает создание и `немедленную публикацию` поста. Если вы хотите указать `конкретную дату` публикации, добавить пост в `проект` или `расписание`, то посмотрите описание соответствующей схемы в блоке "`Schemas`" внизу страницы. Если вы хотите задать дополнительные настройки для поста (например публиковать в клипы, истории или иные), то посмотрите описание схемы для настроек поста в блоке "`Schemas`" внизу страницы.
+      operationId: createPost
+      tags:
+        - Посты
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/PostPublishNowPayload"
+                - $ref: "#/components/schemas/PostPublishAtPayload"
+                - $ref: '#/components/schemas/PostPublishBySchedulePayload'
+                - $ref: '#/components/schemas/PostPublishByProjectPayload'
+      responses:
+        '200':
+          description: Успешное создание поста
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                    example: 123
+                required:
+                  - id
+  /posts/{id}:
+    delete:
+      summary: Удаление поста
+      description: Метод предназначен для удаления поста с Hooppy.
+      operationId: deletePost
+      tags:
+        - Посты
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Идентификатор поста
+          example: 533241
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Успешное удаление поста
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+  /posts/batch/delete:
+    post:
+      summary: Удаление нескольких постов сразу
+      description: Метод предназначен для удаления сразу нескольких постов с Hooppy. Идентификаторы постов в виде строки, через запятую и без пробелов.
+      operationId: deletePosts
+      tags:
+        - Посты
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - ids
+              properties:
+                ids:
+                  type: string
+                  example: "89850984,89849811"
+      responses:
+        '200':
+          description: Успешное удаление постов
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+
+security:
+  - bearerAuth: []
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+
+    Account:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int32
+          example: 34512
+        source_id:
+          description: Тип соц сети
+          type: integer
+          format: int32
+          example: 1
+        social_account_id:
+          description: Идентификатор аккаунта в соц сети
+          type: integer
+          format: int32
+          example: 78443621
+        social_account_name:
+          description: Название аккаунта
+          type: string
+          example: Андрей Охотин
+        social_account_photo:
+          description: Аватар аккаунта
+          type: string
+          example: https://sun9-38.vkuserphoto.ru/s/v1/ig2/stsYCyva8fzXmAPYXpicyX3hoxEFGkdJuzyqzUDXRS2j0KqfTMwseqY5xfQhvHJibQSjwooR_S18aaldNOdcOVmZ.jpg?quality=95&as=32x32,48x48,72x72,108x108,160x160,240x240,360x360,480x480,540x540,640x640,720x720,736x736&from=bu&u=2-3VdJWesYOXh1W5jw5IbEzsBsWiMVMBZ184I2kYh3k&cs=736x0
+
+    Page:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int32
+          example: 34512
+        source_id:
+          description: Тип соц сети
+          type: integer
+          format: int32
+          example: 1
+        account_id:
+          description: Внутренний идентификатор родительского аккаунта соц сети в Hooppy
+          type: integer
+          format: int32
+          example: 78453
+        social_page_id:
+          description: Идентификатор группы в соц сети
+          type: integer
+          format: int32
+          example: 78443621
+        social_page_name:
+          description: Название группы
+          type: string
+          example: Группа ВК про котиков
+        social_page_photo:
+          description: Аватар группы
+          type: string
+          example: https://sun9-38.vkuserphoto.ru/s/v1/ig2/stsYCyva8fzXmAPYXpicyX3hoxEFGkdJuzyqzUDXRS2j0KqfTMwseqY5xfQhvHJibQSjwooR_S18aaldNOdcOVmZ.jpg?quality=95&as=32x32,48x48,72x72,108x108,160x160,240x240,360x360,480x480,540x540,640x640,720x720,736x736&from=bu&u=2-3VdJWesYOXh1W5jw5IbEzsBsWiMVMBZ184I2kYh3k&cs=736x0
+
+    Project:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int32
+          example: 34512
+        name:
+          description: Название проекта
+          type: string
+          example: Вкусная выпечка для ВК и Инсты
+
+    Schedule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int32
+          example: 34512
+        name:
+          description: Название расписания
+          type: string
+          example: Полезные советы для ВК и Max
+
+    Post:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int32
+          example: 123
+
+    Photo:
+      type: object
+      properties:
+        id:
+          type: string
+          example: qb0ips21yr_6f1sy4sflx
+        type:
+          type: string
+          example: photo
+        name:
+          type: string
+          example: qb0ips21yr_6f1sy4sflx.jpg
+        text:
+          description: Описание для фото
+          type: string
+        folder:
+          type: string
+          example: 2026-06-21
+        file_path:
+          type: string
+          example: posts/photos/2026-06-21/
+        updated_date:
+          type: string
+          example: 1782006477
+
+    Video:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 00vnvxngov_1js8iskpwh
+        type:
+          type: string
+          example: video
+        name:
+          type: string
+          example: 00vnvxngov_1js8iskpwh.mp4
+        title:
+          description: Заголовок для видео
+          type: string
+        description:
+          description: Описание для видео
+          type: string
+        folder:
+          type: string
+          example: 2026-06-21
+        file_path:
+          type: string
+          example: posts/videos/2026-06-21/
+        file_thumbnail_path:
+          type: string
+          example: posts/videos_thumbnails/2026-06-21/
+        seconds:
+          type: integer
+          example: 60
+
+    Document:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 2d51u5fwil_z2ima94y5t
+        name:
+          type: string
+          example: 2d51u5fwil_z2ima94y5t.pdf
+        folder:
+          type: string
+          example: 2026-06-21
+        file_path:
+          type: string
+          example: posts/documents/2026-06-21/
+        size:
+          type: integer
+          example: 275045
+
+    Settings:
+      type: object
+      properties:
+        delete_post_day:
+          type: integer
+          example: 2
+          description: Число дней после публикации для удаления поста
+        delete_post_hour:
+          type: integer
+          example: 10
+          description: Число часов после публикации для удаления поста
+        disable_comments:
+          type: boolean
+          example: false
+          description: Отключение/включение комментариев к посту
+        download_vk_video:
+          type: boolean
+          example: true
+          description: Надо ли скачивать видео, если оно было взято из ВК
+        message_to_channel:
+          type: boolean
+          example: false
+          description: Для добавления кнопки "Больше постов — в канале" к посту или клипу ВК
+        message_to_community:
+          type: boolean
+          example: false
+          description: Для добавления кнопки "Написать сообществу" к посту
+        not_publish_in_videos:
+          type: boolean
+          example: false
+          description: Не публиковать видео в ВК Видео
+        publish_only_in_videos:
+          type: boolean
+          example: false
+          description: Публиковать только в раздел ВК Видео
+        pin_post:
+          type: boolean
+          example: false
+          description: Закрепить пост
+        plan_by_network:
+          type: boolean
+          example: false
+          description: Отправить пост в отложку ВК
+        publish_as_carousel:
+          type: boolean
+          example: false
+          description: Публиковать пост ВК в виде карусели
+        publish_as_clips:
+          type: boolean
+          example: false
+          description: Публиковать в ВК Клипы
+        share_clips_to_feed:
+          type: boolean
+          example: false
+          description: Публиковать в ВК Клипы и на стену
+        share_clips_to_feed_with_text:
+          type: boolean
+          example: false
+          description: Публиковать в ВК Клипы и на стену с текстом
+        share_clips_to_feed_if_no_video:
+          type: boolean
+          example: false
+          description: Публиковать на стену, если пост не содержит видео для клипа
+        publish_as_shorts:
+          type: boolean
+          example: false
+          description: Публиковать в Ютуб Шортс
+        publish_as_story:
+          type: boolean
+          example: false
+          description: Публиковать в истории
+        share_stories_to_feed:
+          type: boolean
+          example: false
+          description: Публиковать в истории и на стену
+        publish_in_channel:
+          type: boolean
+          example: false
+          description: Публиковать в канал ВК
+        share_channel_to_feed:
+          type: boolean
+          example: false
+          description: Публиковать в канал ВК и на стену
+        repeat_type:
+          type: integer
+          example: 2
+          description: 0 - если повтор поста не нужен. Иначе - число дней, через которые будет совершаться повтор
+        random_content:
+          type: boolean
+          example: false
+          description: Если пост на повторе, то каждый раз будет браться случайное фото или видео из поста
+        publish_by_account:
+          type: boolean
+          example: false
+          description: Для публикации в канал Телеграм от имени аккаунта, а не бота
+
+    PostPublishNowPayload:
+      type: object
+      properties:
+        publication_when_type:
+          description: Публиковать сейчас (1), в указанное время (2) или по расписанию (3)
+          type: integer
+          format: int32
+          example: 1
+        publication_how_type:
+          description: Ручное указание соц сетей (1) или через проект (2)
+          type: integer
+          format: int32
+          example: 1
+        selected_pages_ids:
+          description: Идентификаторы групп соц сетей, в которые нужно опубликовать пост. Значения берутся из поля `id` ответа метода GET /accounts/pages.
+          type: array
+          items:
+            type: integer
+          example: [822454, 22543, 312]
+        texts:
+          type: array
+          items:
+            $ref: "#/components/schemas/PostTextPayload"
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/AttachmentsItem"
+
+    PostPublishAtPayload:
+      type: object
+      properties:
+        publication_when_type:
+          description: Публиковать сейчас (1), в указанное время (2) или по расписанию (3)
+          type: integer
+          format: int32
+          example: 2
+        publication_how_type:
+          description: Ручное указание соц сетей (1) или через проект (2)
+          type: integer
+          format: int32
+          example: 1
+        publication_date:
+          description: Дата и время публикации
+          type: object
+          properties:
+            date:
+              description: Дата публикации (в формате дд.мм.гггг)
+              type: string
+              example: 25.06.2026
+            hours:
+              description: Конкретный час дня (в формате ХХ)
+              type: string
+              example: 07
+            minutes:
+              description: Минуты (в формате ХХ)
+              type: string
+              example: 30
+        selected_pages_ids:
+          description: Идентификаторы групп соц сетей, в которые нужно опубликовать пост. Значения берутся из поля `id` ответа метода GET /accounts/pages.
+          type: array
+          items:
+            type: integer
+          example: [822454, 22543, 312]
+        texts:
+          type: array
+          items:
+            $ref: "#/components/schemas/PostTextPayload"
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/AttachmentsItem"
+
+    PostPublishBySchedulePayload:
+      type: object
+      properties:
+        publication_when_type:
+          description: Публиковать сейчас (1), в указанное время (2) или по расписанию (3)
+          type: integer
+          format: int32
+          example: 3
+        publication_how_type:
+          description: Для расписаний этот параметр игнорируется
+          type: integer
+          format: int32
+          example: 1
+        schedules_ids:
+          type: array
+          description: Идентификаторы расписаний
+          items:
+            type: integer
+          example:
+            - 101820
+        texts:
+          type: array
+          items:
+            $ref: "#/components/schemas/PostTextPayload"
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/AttachmentsItem"
+
+    PostPublishByProjectPayload:
+      type: object
+      properties:
+        publication_when_type:
+          description: Публиковать сейчас (1), в указанное время (2) или по расписанию (3)
+          type: integer
+          format: int32
+          example: 3
+        publication_how_type:
+          description: Для расписаний этот параметр игнорируется
+          type: integer
+          format: int32
+          example: 1
+        project_id:
+          description: Идентификатор проекта
+          type: integer
+          example: 101820
+        texts:
+          type: array
+          items:
+            $ref: "#/components/schemas/PostTextPayload"
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/AttachmentsItem"
+
+    PostTextPayload:
+      type: object
+      properties:
+        text:
+          type: string
+          example: Привет, я текст поста!
+        source_id:
+          description: Соц сеть, для которой предназначен этот текст. 0 - общий текст для всех соц сетей
+          type: integer
+          example: 0
+
+    MediaAttachment:
+      type: object
+      required:
+        - type
+        - data
+      properties:
+        type:
+          type: string
+          enum: [photos]
+        data:
+          type: array
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/Photo"
+              - $ref: "#/components/schemas/Video"
+
+    DocumentsAttachment:
+      type: object
+      required:
+        - type
+        - data
+      properties:
+        type:
+          type: string
+          enum: [documents]
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Document"
+
+    SettingsAttachment:
+      type: object
+      required:
+        - type
+        - data
+      properties:
+        type:
+          type: string
+          enum: [settings]
+        data:
+          $ref: "#/components/schemas/Settings"
+
+    AttachmentsItem:
+      oneOf:
+        - $ref: "#/components/schemas/MediaAttachment"
+        - $ref: "#/components/schemas/DocumentsAttachment"
+        - $ref: "#/components/schemas/SettingsAttachment"
+
+    AccountsResponse:
+      type: object
+      properties:
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/Account"
+        total_rows:
+          type: integer
+          default: 1
+        is_has_more:
+          type: boolean
+          default: false
+        rows_limit:
+          type: integer
+          default: 20
+
+    PagesResponse:
+      type: object
+      properties:
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/Page"
+        total_rows:
+          type: integer
+          default: 1
+        is_has_more:
+          type: boolean
+          default: false
+        rows_limit:
+          type: integer
+          default: 20
+
+    ProjectsResponse:
+      type: object
+      properties:
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        total_rows:
+          type: integer
+          default: 1
+        is_has_more:
+          type: boolean
+          default: false
+        rows_limit:
+          type: integer
+          default: 20
+
+    SchedulesResponse:
+      type: object
+      properties:
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/Schedule"
+        total_rows:
+          type: integer
+          default: 1
+        is_has_more:
+          type: boolean
+          default: false
+        rows_limit:
+          type: integer
+          default: 20
+
+    PostsResponse:
+      type: object
+      properties:
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/Post"
+        total_rows:
+          type: integer
+          default: 1
+        is_has_more:
+          type: boolean
+          default: false
+        rows_limit:
+          type: integer
+          default: 20
+
+    UploadMediaResponse:
+      type: object
+      properties:
+        photo:
+          oneOf:
+            - $ref: "#/components/schemas/Photo"
+            - $ref: "#/components/schemas/Video"
+
+    UploadDocumentResponse:
+      type: object
+      properties:
+        document:
+          $ref: "#/components/schemas/Document"
