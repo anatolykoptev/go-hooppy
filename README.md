@@ -186,6 +186,8 @@ hooppy search status                           # check if parsing is in progress
 hooppy search parse --source-resource-id <id> --account-id <id>  # start scraping
 hooppy search stop                             # stop in-progress scraping
 hooppy search copy --post-id <id> --to <page-id>  # copy scraped post to your page
+hooppy search rewrite --post-id <id> --text "..." --to <page-id>  # rewrite with custom text
+hooppy search rewrite --post-id <id> --text "..." --to <page-id> --keep-photos --source-resource-id <id>  # rewrite + keep photos
 
 # Print MCP setup instructions
 hooppy mcp-config
@@ -258,6 +260,7 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 | `hooppy_start_parsing` | Start scraping posts from an external source (UNDOCUMENTED) |
 | `hooppy_stop_parsing` | Stop in-progress scraping job (UNDOCUMENTED) |
 | `hooppy_copy_search_post` | Copy a scraped post to your own pages (UNDOCUMENTED) |
+| `hooppy_rewrite_search_post` | Rewrite a scraped post with custom text (UNDOCUMENTED) |
 
 ## Social network source IDs
 

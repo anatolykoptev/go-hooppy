@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -851,6 +853,116 @@ func registerSearch(root *cobra.Command) {
 		die(err)
 		printJSON(resp)
 	}
+
+	// search rewrite
+	rewriteCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
+		Name:  "rewrite",
+		Short: "Rewrite a scraped post with custom text and publish to your pages",
+	})
+	var rwPostID, rwSourceResID int
+	var rwText, rwPages, rwSchedules string
+	var rwWhenType, rwHowType int
+	var rwDate, rwHours, rwMinutes string
+	var rwKeepPhotos bool
+	rewriteCmd.Flags().IntVar(&rwPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED)")
+	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (REQUIRED)")
+	rewriteCmd.Flags().StringVar(&rwPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
+	rewriteCmd.Flags().IntVar(&rwWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
+	rewriteCmd.Flags().IntVar(&rwHowType, "how-type", 1, "publication how type (1=default)")
+	rewriteCmd.Flags().StringVar(&rwSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
+	rewriteCmd.Flags().StringVar(&rwDate, "date", "", "publication date dd.mm.yyyy (for when-type 2)")
+	rewriteCmd.Flags().StringVar(&rwHours, "hours", "", "publication hours HH (for when-type 2)")
+	rewriteCmd.Flags().StringVar(&rwMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
+	rewriteCmd.Flags().BoolVar(&rwKeepPhotos, "keep-photos", false, "copy photos from the scraped post (requires --source-resource-id; immediate publish only)")
+	rewriteCmd.Flags().IntVar(&rwSourceResID, "source-resource-id", 0, "source resource ID (required with --keep-photos to find the scraped post)")
+	rewriteCmd.Run = func(_ *cobra.Command, _ []string) {
+		if rwPostID == 0 {
+			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
+			os.Exit(1)
+		}
+		if rwText == "" {
+			fmt.Fprintln(os.Stderr, "error: --text is required")
+			os.Exit(1)
+		}
+		if rwWhenType == 2 && (rwDate == "" || rwHours == "" || rwMinutes == "") {
+			fmt.Fprintln(os.Stderr, "error: --date, --hours, --minutes are required for --when-type 2")
+			os.Exit(1)
+		}
+		if rwKeepPhotos && rwSourceResID == 0 {
+			fmt.Fprintln(os.Stderr, "error: --source-resource-id is required with --keep-photos")
+			os.Exit(1)
+		}
+		if rwKeepPhotos && rwWhenType == 2 {
+			fmt.Fprintln(os.Stderr, "warning: --keep-photos may not work with --when-type 2 (scheduled). Upload photos manually instead.")
+		}
+		c := mustClient()
+		payload := hooppy.CopySearchPostPayload{
+			SearchPostID:        rwPostID,
+			PublicationWhenType: rwWhenType,
+			PublicationHowType:  rwHowType,
+			Texts:               []hooppy.PostText{{Text: rwText, SourceID: 0}},
+		}
+		switch rwWhenType {
+		case 3:
+			payload.SchedulesIDs = parseIntList(rwSchedules)
+		case 2:
+			payload.SelectedPagesIDs = parseIntList(rwPages)
+			payload.PublicationDate = &hooppy.PublicationDate{
+				Date:    rwDate,
+				Hours:   rwHours,
+				Minutes: rwMinutes,
+			}
+		default:
+			payload.SelectedPagesIDs = parseIntList(rwPages)
+		}
+		if rwKeepPhotos {
+			posts, err := c.ListSearchPosts(context.Background(), hooppy.SearchPostsFilter{
+				SourceResourceID: rwSourceResID,
+			})
+			die(err)
+			var found *hooppy.SearchPost
+			for i := range posts.List {
+				if posts.List[i].ID == rwPostID {
+					found = &posts.List[i]
+					break
+				}
+			}
+			if found == nil {
+				fmt.Fprintf(os.Stderr, "error: scraped post #%d not found in source %d\n", rwPostID, rwSourceResID)
+				os.Exit(1)
+			}
+			if len(found.Photos) > 0 {
+				// Download each photo, upload via UploadMedia, collect media IDs.
+				// Scraped VK photo IDs can't be used directly — VK doesn't allow
+				// attaching photos from another group to your own post.
+				items := make([]map[string]interface{}, 0, len(found.Photos))
+				for i, ph := range found.Photos {
+					tmpPath := fmt.Sprintf("/tmp/hooppy_photo_%d_%d.jpg", rwPostID, i)
+					if err := downloadPhoto(ph.URL, tmpPath); err != nil {
+						fmt.Fprintf(os.Stderr, "error: download photo %d: %v\n", i, err)
+						os.Exit(1)
+					}
+					media, err := c.UploadMedia(context.Background(), tmpPath, "")
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "error: upload photo %d: %v\n", i, err)
+						os.Exit(1)
+					}
+					items = append(items, map[string]interface{}{
+						"id":   media.Photo.ID,
+						"type": "photo",
+					})
+					os.Remove(tmpPath)
+				}
+				payload.Attachments = []hooppy.Attachment{{
+					Type: "photos",
+					Data: items,
+				}}
+			}
+		}
+		resp, err := c.RewriteSearchPost(context.Background(), payload)
+		die(err)
+		printJSON(resp)
+	}
 }
 
 func parseIntList(s string) []int {
@@ -869,4 +981,22 @@ func parseIntList(s string) []int {
 		ids = append(ids, n)
 	}
 	return ids
+}
+
+func downloadPhoto(url, dest string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, resp.Body)
+	return err
 }

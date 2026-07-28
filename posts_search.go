@@ -117,3 +117,51 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 	}
 	return &resp, nil
 }
+
+// RewriteSearchPost rewrites a scraped post (from GET /posts-search) and
+// publishes it to the user's own pages. Pass custom text in payload.Texts to
+// override the original. To keep the original photos, download them from the
+// scraped post's photos[].url, upload via UploadMedia, and pass the resulting
+// media IDs in payload.Attachments.
+//
+// UNDOCUMENTED: PUT /posts/rewrite with search_post_id is not in the public OpenAPI spec.
+func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
+	if payload.Texts == nil {
+		payload.Texts = []PostText{}
+	}
+	if payload.Attachments == nil {
+		payload.Attachments = []Attachment{}
+	}
+	if payload.SelectedPagesIDs == nil {
+		payload.SelectedPagesIDs = []int{}
+	}
+	if payload.SchedulesIDs == nil {
+		payload.SchedulesIDs = []int{}
+	}
+	var resp PostIDResponse
+	if err := c.doPUT(ctx, pathPostsRewrite, payload, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ScrapedPhotoAttachment builds an Attachment from scraped post photos.
+//
+// DEPRECATED: scraped photo IDs (VK owner_id + photo id) cannot be attached
+// to your own post — VK doesn't allow cross-group photo references. Use
+// UploadMedia to download and re-upload photos, then pass those media IDs
+// in attachments instead. This helper is kept for reference only.
+func ScrapedPhotoAttachment(photos []SearchPostPhoto) Attachment {
+	items := make([]map[string]interface{}, 0, len(photos))
+	for _, ph := range photos {
+		items = append(items, map[string]interface{}{
+			"id":       strconv.Itoa(ph.ID),
+			"owner_id": ph.OwnerID,
+			"type":     "photo",
+		})
+	}
+	return Attachment{
+		Type: "photos",
+		Data: items,
+	}
+}
