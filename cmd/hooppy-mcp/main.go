@@ -209,7 +209,7 @@ func registerListPosts(server *mcp.Server) {
 				if err != nil {
 					return errResult(err.Error())
 				}
-				env, err := hooppy.NewAllListEnvelope(all, len(all), total)
+				env, err := hooppy.NewAllListEnvelope(all, total, func(p hooppy.Post) int { return p.ID })
 				if err != nil {
 					return errResult(err.Error())
 				}
@@ -442,7 +442,7 @@ func registerListProjects(server *mcp.Server) {
 				if err != nil {
 					return errResult(err.Error())
 				}
-				env, err := hooppy.NewAllListEnvelope(all, len(all), total)
+				env, err := hooppy.NewAllListEnvelope(all, total, func(p hooppy.Project) int { return p.ID })
 				if err != nil {
 					return errResult(err.Error())
 				}
@@ -480,7 +480,7 @@ func registerListSchedules(server *mcp.Server) {
 				if err != nil {
 					return errResult(err.Error())
 				}
-				env, err := hooppy.NewAllListEnvelope(all, len(all), total)
+				env, err := hooppy.NewAllListEnvelope(all, total, func(s hooppy.Schedule) int { return s.ID })
 				if err != nil {
 					return errResult(err.Error())
 				}

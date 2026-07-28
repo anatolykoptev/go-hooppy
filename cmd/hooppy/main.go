@@ -346,7 +346,7 @@ func registerProjects(root *cobra.Command) {
 		if projAll {
 			all, total, err := c.ListAllProjectsWithTotal(context.Background())
 			die(err)
-			env, err := hooppy.NewAllListEnvelope(all, len(all), total)
+			env, err := hooppy.NewAllListEnvelope(all, total, func(p hooppy.Project) int { return p.ID })
 			die(err)
 			printJSON(env)
 			return
@@ -436,7 +436,7 @@ func registerSchedules(root *cobra.Command) {
 		if schedAll {
 			all, total, err := c.ListAllSchedulesWithTotal(context.Background())
 			die(err)
-			env, err := hooppy.NewAllListEnvelope(all, len(all), total)
+			env, err := hooppy.NewAllListEnvelope(all, total, func(s hooppy.Schedule) int { return s.ID })
 			die(err)
 			printJSON(env)
 			return

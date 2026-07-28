@@ -431,10 +431,11 @@ func TestListAllSchedules_SanityCap(t *testing.T) {
 // TestListAllSchedules_TruncatedWalkErrors verifies that when the server
 // clears is_has_more early while total_rows still exceeds the rows served,
 // the walk returns the short list + the server's totalRows with err == nil,
-// and allListEnvelope catches the mismatch and errors — instead of letting a
-// truncated walk pass as complete with total_rows substituted by len(list).
+// and NewAllListEnvelope catches the mismatch and errors — instead of
+// letting a truncated walk pass as complete with total_rows substituted by
+// len(list).
 //
-// Without the envelope mismatch check: allListEnvelope returns
+// Without the envelope mismatch check: NewAllListEnvelope returns
 // {list: short, total_rows: len(short), is_has_more: false} with err == nil,
 // and a truncated walk is indistinguishable from a complete one.
 func TestListAllSchedules_TruncatedWalkErrors(t *testing.T) {
@@ -456,8 +457,25 @@ func TestListAllSchedules_TruncatedWalkErrors(t *testing.T) {
 	if total != 5 {
 		t.Fatalf("totalRows = %d, want 5 (server's last-seen total_rows)", total)
 	}
-	// The envelope is the fail-loud gate: len(all)=2 != totalRows=5 -> error.
-	if _, err := NewAllListEnvelope(all, len(all), total); err == nil {
-		t.Fatal("allListEnvelope must error when len(list) != totalRows (truncated walk), got nil")
+	// The envelope is the fail-loud gate: unique ids {1,2}=2 != totalRows=5 -> error.
+	if _, err := NewAllListEnvelope(all, total, func(s Schedule) int { return s.ID }); err == nil {
+		t.Fatal("NewAllListEnvelope must error when unique id count != totalRows (truncated walk), got nil")
+	}
+}
+
+// TestNewAllListEnvelope_DuplicateIDErrors verifies that counting UNIQUE
+// ids (rather than raw length) catches a duplicate row served across two
+// pages that masks a missing row. A raw-length check would pass here
+// (len == total_rows), but the unique-id count does not.
+//
+// Without the unique-id check (revert to raw len): len(list)=3 ==
+// totalRows=3 passes and err is nil — the duplicate masks the missing row.
+func TestNewAllListEnvelope_DuplicateIDErrors(t *testing.T) {
+	// Three entries, but id 2 is duplicated — raw len=3, unique=2.
+	// total_rows=3 matches the raw length, so a raw-length check passes.
+	list := []Post{{ID: 1}, {ID: 2}, {ID: 2}}
+	_, err := NewAllListEnvelope(list, 3, func(p Post) int { return p.ID })
+	if err == nil {
+		t.Fatal("expected error for duplicate id with total_rows matching raw length, got nil — unique-id check must catch the duplicate that a raw-length check misses")
 	}
 }

@@ -65,15 +65,18 @@ func (c *Client) ListPosts(ctx context.Context, f ListPostsFilter) (*PostsRespon
 // 1-indexed rationale and the sanity cap.
 //
 // ListAllPosts drops the server's last-seen total_rows. Callers that need
-// it (to detect a truncated walk) should use ListAllPostsWithTotal and
-// allListEnvelope.
+// it (to detect one specific truncation failure — see NewAllListEnvelope
+// for what it does and does not catch) should use ListAllPostsWithTotal
+// and NewAllListEnvelope.
 func (c *Client) ListAllPosts(ctx context.Context, f ListPostsFilter) ([]Post, error) {
 	all, _, err := c.ListAllPostsWithTotal(ctx, f)
 	return all, err
 }
 
 // ListAllPostsWithTotal is ListAllPosts but also returns the server's
-// last-seen total_rows. See projects.ListAllSchedulesWithTotal.
+// last-seen total_rows. The pair (list, totalRows) is meant to be passed
+// to NewAllListEnvelope. See projects.ListAllSchedulesWithTotal and
+// NewAllListEnvelope for what the envelope catches and what it does not.
 func (c *Client) ListAllPostsWithTotal(ctx context.Context, f ListPostsFilter) ([]Post, int, error) {
 	var all []Post
 	var totalRows int
@@ -123,6 +126,12 @@ func (c *Client) UpdatePost(ctx context.Context, id int, payload interface{}) (*
 // ScheduleID (needed for PUT /posts/{id} updates, which use schedule_id
 // singular — not schedules_ids plural like the create/import endpoints).
 //
+// Measured limitation: GET /posts/{id}/edit returns a SINGLE schedule_id
+// (an int, not an array). A post that belongs to several schedules cannot
+// round-trip all of its schedule associations through this endpoint — only
+// one survives the full-state PUT. This is a property of the edit endpoint,
+// not a client-side choice.
+//
 // Page targets are returned as objects keyed by social network source ID,
 // NOT as the flat selected_pages_ids array used by the create/publish-now
 // endpoints:
@@ -162,9 +171,20 @@ func (c *Client) GetPostEdit(ctx context.Context, postID int) (*PostEditResponse
 	return &resp, nil
 }
 
-// scheduleDrivenWhereType is the publication_where_type value verified as
-// safe for UpdatePostText: page targets come from the schedule, so
-// selected_pages_by_source_ids is empty and sending it back is harmless.
+// scheduleDrivenWhereType is the publication_where_type value measured on
+// the live account as schedule-driven: every scheduled post carries
+// publication_where_type=1 with an EMPTY selected_pages_by_source_ids, and
+// the page list those posts report is the SCHEDULE's page list (when a page
+// is removed from the schedule, every pending post belonging to it loses
+// that page too, in one step, with no write to any post). A post already
+// published keeps its original page list — a frozen snapshot, unaffected by
+// the schedule changing afterwards.
+//
+// This is the ONLY publication_where_type value verified as safe for
+// UpdatePostText to send back with an empty selected_pages_by_source_ids.
+// The Nuxt web bundle labels this value "Страницы" (Pages) in the
+// schedule form; on a post it means page targets come from the schedule,
+// not from the post's own selection.
 const scheduleDrivenWhereType = 1
 
 // UpdatePostText is a high-level helper that changes ONLY the text of an
@@ -175,14 +195,26 @@ const scheduleDrivenWhereType = 1
 // PUT /posts/{id}.
 //
 // Verified publication_where_type values:
-//   - 1 (schedule-driven): page targets come from the schedule, so
-//     selected_pages_by_source_ids is empty and sending it back is harmless.
+//   - 1 (schedule-driven, measured): page targets come from the schedule,
+//     so selected_pages_by_source_ids is empty and sending it back is
+//     harmless. This is NOT a guess or one of two plausible readings — it
+//     is the only behaviour observed on the live account (see
+//     scheduleDrivenWhereType).
 //
 // All other publication_where_type values are rejected with an error when
 // no page selection can be recovered from the edit response (fail-closed:
 // refusing to publish to nothing rather than silently clearing page
 // targets). When a non-empty page selection IS recovered, it is sent back
 // verbatim.
+//
+// Schedule guard: a schedule-driven post (publication_when_type=3, by
+// schedule) MUST carry a non-zero schedule_id recovered from the edit
+// response. When schedule_id is 0 the helper refuses to issue any request
+// — mirroring the create-path guard in ImportSearchPost/CopySearchPost/
+// RewriteSearchPost that refuses when_type=3 with an empty schedules_ids.
+// The schedule_id field is sent WITHOUT omitempty so a zero is transmitted
+// explicitly rather than silently dropped (which would leave the server
+// with a by-schedule post targeted at no schedule).
 //
 // Attachments: GET /posts/{id}/edit returns the SAME singular vocabulary
 // the scraped-post edit endpoint does — measured across 11 real own-posts
@@ -233,6 +265,17 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 			postID, edit.PublicationWhereType, scheduleDrivenWhereType)
 	}
 
+	// Fail closed: a schedule-driven post (when_type=3, by schedule) with a
+	// zero schedule_id would be published to no schedule — the same
+	// publish-to-nothing hole the create-path guard prevents. The edit
+	// endpoint returns a single schedule_id (not an array); when it is 0
+	// the association cannot be recovered, so refuse before issuing any
+	// request.
+	if edit.PublicationWhenType == 3 && edit.ScheduleID == 0 {
+		return nil, fmt.Errorf("hooppy: UpdatePostText post %d: publication_when_type=3 (by schedule) but the edit response carried schedule_id=0 — cannot recover the schedule association, refusing to send a request that would target no schedule",
+			postID)
+	}
+
 	attachments := SearchPostEditAttachments(edit.Attachments)
 	payload := struct {
 		AsCopy                   int              `json:"as_copy"`
@@ -243,7 +286,7 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 		Texts                    []PostText       `json:"texts"`
 		Attachments              []Attachment     `json:"attachments"`
 		SelectedPagesBySourceIDs map[int][]int    `json:"selected_pages_by_source_ids"`
-		ScheduleID               int              `json:"schedule_id,omitempty"`
+		ScheduleID               int              `json:"schedule_id"`
 		ProjectID                int              `json:"project_id,omitempty"`
 	}{
 		AsCopy:                   0,

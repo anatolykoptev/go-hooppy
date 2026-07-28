@@ -607,3 +607,274 @@ func TestUpdatePostText_PreservesProjectID(t *testing.T) {
 		t.Errorf("PUT body schedule_id = %v, want 7", body["schedule_id"])
 	}
 }
+
+// TestUpdatePostText_ScheduleDriven_ZeroScheduleID_RefusesRequest verifies
+// that a schedule-driven post (publication_when_type=3) whose edit response
+// carries schedule_id=0 is refused BEFORE any PUT is issued — mirroring the
+// create-path guard that refuses when_type=3 with an empty schedules_ids.
+//
+// Without the guard: the PUT body is sent with schedule_id omitted
+// (omitempty elides the zero), so the server receives a by-schedule post
+// targeted at no schedule — the publish-to-nothing hole.
+func TestUpdatePostText_ScheduleDriven_ZeroScheduleID_RefusesRequest(t *testing.T) {
+	var putCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			// Schedule-driven post (where_type=1, when_type=3) but the edit
+			// response carries schedule_id=0 — the association was lost.
+			w.Write([]byte(`{
+				"id":88,
+				"publication_when_type":3,
+				"publication_how_type":1,
+				"publication_where_type":1,
+				"created_by":1,
+				"texts":[{"text":"old","source_id":0}],
+				"attachments":[],
+				"selected_pages_by_source_ids":{},
+				"schedule_id":0,
+				"project_id":0
+			}`))
+		case http.MethodPut:
+			putCalled = true
+			w.Write([]byte(`{"success":true}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.UpdatePostText(context.Background(), 88, "new text")
+	if err == nil {
+		t.Fatal("expected fail-closed error for when_type=3 with schedule_id=0, got nil")
+	}
+	if putCalled {
+		t.Fatal("PUT was issued despite zero schedule_id — must refuse to send a request that targets no schedule")
+	}
+	if !contains(err.Error(), "88") {
+		t.Errorf("error must name the post ID (88), got: %v", err)
+	}
+}
+
+// TestUpdatePostText_ScheduleID_NoOmitempty verifies that the schedule_id
+// field is serialized even when its value is ZERO — confirming the json tag
+// has no omitempty. This is the falsifying case for the omitempty revert:
+// a post where the schedule guard does NOT fire (publication_when_type != 3)
+// but schedule_id IS zero. With omitempty the key vanishes from the PUT
+// body; without it the key is present with value 0.
+//
+// Asserts on the DECODED body (json.Unmarshal into map[string]any) and
+// checks KEY PRESENCE — "schedule_id":0 and an absent key differ only by
+// presence, so a substring check on the raw bytes would not catch it.
+//
+// With omitempty restored (the revert): the key is absent from the decoded
+// body and this test fails — the server receives a by-schedule post with
+// no schedule field at all.
+func TestUpdatePostText_ScheduleID_NoOmitempty(t *testing.T) {
+	var putBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			// when_type=1 (publish now, NOT by schedule) so the schedule
+			// guard does not fire; where_type=1 (schedule-driven) so the
+			// where_type guard does not fire with an empty selection.
+			// schedule_id=0 — the zero that omitempty would silently drop.
+			w.Write([]byte(`{
+				"id":42,
+				"publication_when_type":1,
+				"publication_how_type":1,
+				"publication_where_type":1,
+				"created_by":1,
+				"texts":[{"text":"old","source_id":0}],
+				"attachments":[],
+				"selected_pages_by_source_ids":{},
+				"schedule_id":0,
+				"project_id":0
+			}`))
+		case http.MethodPut:
+			putBody, _ = io.ReadAll(r.Body)
+			w.Write([]byte(`{"success":true}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	if _, err := c.UpdatePostText(context.Background(), 42, "new text"); err != nil {
+		t.Fatalf("UpdatePostText: %v", err)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(putBody, &body); err != nil {
+		t.Fatalf("unmarshal PUT body: %v", err)
+	}
+	// The key must be PRESENT in the decoded body — with omitempty a zero
+	// value is elided entirely and the key vanishes. Check presence, not
+	// the value (0 vs absent differs only by key existence).
+	if _, ok := body["schedule_id"]; !ok {
+		t.Errorf("PUT body is missing the schedule_id key — omitempty elided the zero value; the field must be serialized even when 0 so the server sees an explicit schedule_id")
+	}
+}
+
+// TestListAllPosts_TwoPages verifies the --all walk starts at page 1 (not 0),
+// accumulates both pages, and produces no duplicate IDs. Without the fix
+// (walk starting at page 0) the first page is fetched twice because page=0
+// and page=1 are byte-identical on the server, yielding duplicates and a
+// length that exceeds total_rows.
+func TestListAllPosts_TwoPages(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("page"))
+		switch r.URL.Query().Get("page") {
+		case "2":
+			w.Write([]byte(`{"list":[{"id":3}],"total_rows":3,"is_has_more":false,"rows_limit":20}`))
+		default: // page 1 (and the buggy page 0 which omits the param)
+			w.Write([]byte(`{"list":[{"id":1},{"id":2}],"total_rows":3,"is_has_more":true,"rows_limit":20}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	all, err := c.ListAllPosts(context.Background(), ListPostsFilter{})
+	if err != nil {
+		t.Fatalf("ListAllPosts: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("len(all) = %d, want 3 (server total_rows)", len(all))
+	}
+	seen := map[int]bool{}
+	for _, p := range all {
+		if seen[p.ID] {
+			t.Errorf("duplicate post ID %d in accumulated result", p.ID)
+		}
+		seen[p.ID] = true
+	}
+	if len(pages) != 2 {
+		t.Fatalf("handler received %d requests, want 2 (pages=%v)", len(pages), pages)
+	}
+	if pages[0] != "1" {
+		t.Errorf("first request page = %q, want \"1\"", pages[0])
+	}
+	if pages[1] != "2" {
+		t.Errorf("second request page = %q, want \"2\"", pages[1])
+	}
+}
+
+// TestListAllPosts_SanityCap verifies the walk returns an error instead of
+// looping forever when is_has_more never goes false.
+func TestListAllPosts_SanityCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"list":[{"id":1}],"total_rows":1000000,"is_has_more":true,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListAllPosts(context.Background(), ListPostsFilter{})
+	if err == nil {
+		t.Fatal("expected error when is_has_more never goes false, got nil")
+	}
+	if !contains(err.Error(), "exceeded") {
+		t.Errorf("expected cap error mentioning 'exceeded', got: %v", err)
+	}
+}
+
+// TestListAllPosts_DistinctPageParams is the RED-on-revert test: consecutive
+// requests in the walk must emit DISTINCT page= values. If the walk start
+// index goes back to 0 (the off-by-one this PR exists to fix), page 0 and
+// page 1 both hit server page 1, the distinctness assertion fails.
+func TestListAllPosts_DistinctPageParams(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("page"))
+		switch r.URL.Query().Get("page") {
+		case "3":
+			w.Write([]byte(`{"list":[{"id":5}],"total_rows":5,"is_has_more":false,"rows_limit":20}`))
+		case "2":
+			w.Write([]byte(`{"list":[{"id":3},{"id":4}],"total_rows":5,"is_has_more":true,"rows_limit":20}`))
+		default: // page 1 (and the buggy page 0 which omits the param)
+			w.Write([]byte(`{"list":[{"id":1},{"id":2}],"total_rows":5,"is_has_more":true,"rows_limit":20}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	if _, err := c.ListAllPosts(context.Background(), ListPostsFilter{}); err != nil {
+		t.Fatalf("ListAllPosts: %v", err)
+	}
+	if len(pages) != 3 {
+		t.Fatalf("handler received %d requests, want 3 (pages=%v)", len(pages), pages)
+	}
+	// Distinctness: every page= value must be distinct — a walk starting at
+	// page 0 fetches page 1 twice (page=0 and page=1 both hit server page 1).
+	seen := map[string]bool{}
+	for _, p := range pages {
+		if seen[p] {
+			t.Errorf("page param %q emitted twice — double-fetch (walk start index reverted to 0?)", p)
+		}
+		seen[p] = true
+	}
+	// First request must be page=1, not page="" (the buggy page 0).
+	if pages[0] != "1" {
+		t.Errorf("first request page = %q, want \"1\" (walk must start at page 1, not 0)", pages[0])
+	}
+}
+
+// TestListAllPosts_FilterPreservedAcrossPages verifies that EVERY non-page
+// field of ListPostsFilter survives on EVERY request in the walk — a filter
+// carrying a schedule id must send that schedule id on page 2 and page 3,
+// not just page 1. Asserts on each captured request, not only the first.
+//
+// Without filter preservation (e.g. if the walk mutated the filter struct
+// and zeroed non-page fields between iterations): page 2+ would fetch
+// unfiltered rows, silently mixing in posts from other schedules.
+func TestListAllPosts_FilterPreservedAcrossPages(t *testing.T) {
+	type captured struct {
+		page       string
+		scheduleID string
+		projectID  string
+		sourceID   string
+	}
+	var capturedReqs []captured
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		capturedReqs = append(capturedReqs, captured{
+			page:       q.Get("page"),
+			scheduleID: q.Get("schedule_id"),
+			projectID:  q.Get("project_id"),
+			sourceID:   q.Get("source_id"),
+		})
+		switch q.Get("page") {
+		case "3":
+			w.Write([]byte(`{"list":[{"id":5}],"total_rows":5,"is_has_more":false,"rows_limit":20}`))
+		case "2":
+			w.Write([]byte(`{"list":[{"id":3},{"id":4}],"total_rows":5,"is_has_more":true,"rows_limit":20}`))
+		default:
+			w.Write([]byte(`{"list":[{"id":1},{"id":2}],"total_rows":5,"is_has_more":true,"rows_limit":20}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	pub := true
+	_, err := c.ListAllPosts(context.Background(), ListPostsFilter{
+		IsPublished: &pub,
+		ScheduleID:  777,
+		ProjectID:   42,
+		SourceID:    6,
+	})
+	if err != nil {
+		t.Fatalf("ListAllPosts: %v", err)
+	}
+	if len(capturedReqs) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(capturedReqs))
+	}
+	// Assert on EACH request — not only the first.
+	for i, req := range capturedReqs {
+		if req.scheduleID != "777" {
+			t.Errorf("request %d: schedule_id = %q, want \"777\" (filter must survive on every page)", i, req.scheduleID)
+		}
+		if req.projectID != "42" {
+			t.Errorf("request %d: project_id = %q, want \"42\" (filter must survive on every page)", i, req.projectID)
+		}
+		if req.sourceID != "6" {
+			t.Errorf("request %d: source_id = %q, want \"6\" (filter must survive on every page)", i, req.sourceID)
+		}
+	}
+}

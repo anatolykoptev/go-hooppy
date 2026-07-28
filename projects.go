@@ -89,8 +89,9 @@ const maxListAllPages = 1000
 // instead of looping forever or silently truncating.
 //
 // ListAllSchedules drops the server's last-seen total_rows. Callers that
-// need it (to detect a truncated walk) should use ListAllSchedulesWithTotal
-// and allListEnvelope.
+// need it (to detect one specific truncation failure — see
+// NewAllListEnvelope for what it does and does not catch) should use
+// ListAllSchedulesWithTotal and NewAllListEnvelope.
 func (c *Client) ListAllSchedules(ctx context.Context) ([]Schedule, error) {
 	all, _, err := c.ListAllSchedulesWithTotal(ctx)
 	return all, err
@@ -98,9 +99,10 @@ func (c *Client) ListAllSchedules(ctx context.Context) ([]Schedule, error) {
 
 // ListAllSchedulesWithTotal is ListAllSchedules but also returns the
 // server's last-seen total_rows. The pair (list, totalRows) is meant to be
-// passed to allListEnvelope, which fails loud when len(list) != totalRows
-// (a server that cleared is_has_more early served a truncated list —
-// indistinguishable from a complete one without the comparison).
+// passed to NewAllListEnvelope, which fails loud when the count of unique
+// ids does not match total_rows — a server that cleared is_has_more early
+// served a truncated list. See NewAllListEnvelope for the specific failure
+// this catches and the ones it does not.
 func (c *Client) ListAllSchedulesWithTotal(ctx context.Context) ([]Schedule, int, error) {
 	var all []Schedule
 	var totalRows int
@@ -126,7 +128,8 @@ func (c *Client) ListAllSchedulesWithTotal(ctx context.Context) ([]Schedule, int
 // sanity cap.
 //
 // ListAllProjects drops the server's last-seen total_rows. Callers that
-// need it should use ListAllProjectsWithTotal and allListEnvelope.
+// need it should use ListAllProjectsWithTotal and NewAllListEnvelope (see
+// NewAllListEnvelope for what the envelope catches and what it does not).
 func (c *Client) ListAllProjects(ctx context.Context) ([]Project, error) {
 	all, _, err := c.ListAllProjectsWithTotal(ctx)
 	return all, err
@@ -164,20 +167,39 @@ type AllListEnvelope struct {
 	IsHasMore bool        `json:"is_has_more"`
 }
 
-// NewAllListEnvelope builds the AllListEnvelope for an --all walk and is the
-// single fail-loud gate for a truncated walk. It passes the server's
-// last-seen totalRows through (NOT listLen) and errors when listLen !=
-// totalRows — a server that cleared is_has_more early serves a short list
-// while its total_rows still exceeds the rows served, and without this
-// check the truncation is indistinguishable from a complete walk. This is
-// consistent with the fail-loud choice already made for maxListAllPages.
+// NewAllListEnvelope builds the AllListEnvelope for an --all walk and is a
+// fail-loud gate for ONE specific truncation failure: the server cleared
+// is_has_more early while its total_rows still exceeded the rows served.
+// It passes the server's last-seen totalRows through (NOT len(list)) and
+// errors when the count of UNIQUE ids in list does not equal totalRows.
 //
-// listLen is taken explicitly (rather than reflected out of list) so the
-// caller hands in the same len it accumulated, making the contract obvious
-// at the call site.
-func NewAllListEnvelope(list interface{}, listLen, totalRows int) (AllListEnvelope, error) {
-	if listLen != totalRows {
-		return AllListEnvelope{}, fmt.Errorf("hooppy: --all walk returned %d rows but the server's total_rows=%d — the walk was truncated (is_has_more cleared early); refusing to report a short list as complete", listLen, totalRows)
+// What this DOES catch:
+//   - is_has_more cleared early with a stale total_rows that does not match
+//     the unique rows served.
+//   - A duplicate row served across two pages that masks a missing row when
+//     total_rows was adjusted down to match the raw length: e.g. page 1
+//     serves [1,2], page 2 serves [2,3] (row 2 duplicated, row 4 missing),
+//     total_rows=4, raw len=4 — a raw-length check passes, but unique ids
+//     {1,2,3}=3 != 4, so the envelope errors.
+//
+// What this DOES NOT catch:
+//   - A walk that is missing rows but whose total_rows was also adjusted
+//     down to match the (short) unique set it served. With offset
+//     pagination, a row deleted mid-walk shifts everything after it down by
+//     one; the missing row is never served, total_rows drops by one to
+//     match, and unique_count == total_rows passes while the list is short
+//     by one item. This check is NOT a proof that the walk was complete.
+//
+// idFunc extracts the unique identity of each element. It MUST be non-nil;
+// the unique-count is meaningless without it. This is consistent with the
+// fail-loud choice already made for maxListAllPages.
+func NewAllListEnvelope[T any](list []T, totalRows int, idFunc func(T) int) (AllListEnvelope, error) {
+	unique := make(map[int]struct{}, len(list))
+	for _, item := range list {
+		unique[idFunc(item)] = struct{}{}
+	}
+	if len(unique) != totalRows {
+		return AllListEnvelope{}, fmt.Errorf("hooppy: --all walk returned %d unique rows but the server's total_rows=%d — the walk was truncated (is_has_more cleared early with a stale total_rows, or a duplicate row masked a missing one); refusing to report a short list as complete", len(unique), totalRows)
 	}
 	return AllListEnvelope{List: list, TotalRows: totalRows, IsHasMore: false}, nil
 }
