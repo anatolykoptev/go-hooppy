@@ -188,6 +188,7 @@ hooppy search stop                             # stop in-progress scraping
 hooppy search copy --post-id <id> --to <page-id>  # copy scraped post to your page
 hooppy search rewrite --post-id <id> --text "..." --to <page-id>  # rewrite with custom text (attachments preserved)
 hooppy search rewrite --post-id <id> --text "..." --to <page-id> --no-attachments  # rewrite, strip attachments
+hooppy search import --post-id <id> --schedules <sched-id>  # batch-copy via PUT /posts/import (server downloads photos async, preserves videos)
 
 # Print MCP setup instructions
 hooppy mcp-config
