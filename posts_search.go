@@ -145,6 +145,11 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 	if payload.SchedulesIDs == nil {
 		payload.SchedulesIDs = []int{}
 	}
+	// Fail closed: a schedule-driven copy (when_type=3) targeted at an empty
+	// schedules list publishes to nothing. Refuse before issuing any request.
+	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
+		return nil, fmt.Errorf("hooppy: CopySearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
+	}
 	var resp PostIDResponse
 	if err := c.doPUT(ctx, pathPostsCopy, payload, &resp); err != nil {
 		return nil, err
@@ -286,6 +291,12 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	if payload.SchedulesIDs == nil {
 		payload.SchedulesIDs = []int{}
 	}
+	// Fail closed: a schedule-driven rewrite (when_type=3) targeted at an
+	// empty schedules list publishes to nothing. Refuse before issuing any
+	// request.
+	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
+		return nil, fmt.Errorf("hooppy: RewriteSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
+	}
 	// POST /posts with as_copy=1 — same format the UI uses.
 	body := struct {
 		AsCopy               int              `json:"as_copy"`
@@ -336,4 +347,98 @@ func ScrapedPhotoAttachment(photos []SearchPostPhoto) Attachment {
 		Type: "photos",
 		Data: items,
 	}
+}
+
+// SearchPostEditAttachments builds the attachments array from a scraped post's
+// edit response, matching the Hooppy UI's behavior:
+//   - Photo AND video attachments are grouped into a single {type: "photos"}
+//     attachment (the UI puts both into v.photos; the server stores VK video
+//     references as-is and downloads photos with `url` async).
+//   - Other attachment types (link, poll, repost, etc.) are passed through
+//     as individual {type: <type>, data: <data>} entries.
+//
+// This is the correct way to preserve ALL attachments when copying a scraped
+// post — the server's async download (is_attachments_in_process) only triggers
+// for photos with a `url` or `message_id` field inside a {type: "photos"}
+// attachment; videos and other types are stored directly.
+func SearchPostEditAttachments(editAttachments []Attachment) []Attachment {
+	var photosAndVideos []interface{}
+	var others []Attachment
+	for _, att := range editAttachments {
+		if att.Type == "photo" || att.Type == "video" {
+			photosAndVideos = append(photosAndVideos, att.Data)
+		} else {
+			others = append(others, att)
+		}
+	}
+	var result []Attachment
+	if len(photosAndVideos) > 0 {
+		result = append(result, Attachment{Type: "photos", Data: photosAndVideos})
+	}
+	result = append(result, others...)
+	return result
+}
+
+// ImportSearchPost copies a scraped post via PUT /posts/import. Unlike
+// RewriteSearchPost (POST /posts with as_copy=1), the import endpoint
+// accepts comma-separated search post IDs in its ids field and can copy
+// multiple posts in one request. This wrapper sends a SINGLE id:
+// payload.SearchPostID is serialized (via strconv.Itoa) as the sole entry
+// in ids. A batch (multi-id) form is scoped to issue #54 and is not
+// implemented here.
+//
+// The server downloads photos async (is_attachments_in_process=1 → 0) when
+// attachments contain photo objects with a `url` field. Videos are stored as
+// VK video references (no download needed). Text must be passed explicitly —
+// the server does NOT auto-copy text from the original post.
+//
+// UNDOCUMENTED: PUT /posts/import is not in the public OpenAPI spec.
+func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
+	if payload.Texts == nil {
+		payload.Texts = []PostText{}
+	}
+	if payload.Attachments == nil {
+		payload.Attachments = []Attachment{}
+	}
+	if payload.SelectedPagesIDs == nil {
+		payload.SelectedPagesIDs = []int{}
+	}
+	if payload.SchedulesIDs == nil {
+		payload.SchedulesIDs = []int{}
+	}
+	// Fail closed: a schedule-driven import (when_type=3) targeted at an
+	// empty schedules list publishes to nothing. Refuse before issuing any
+	// request — the CLI `search import` command defaults to when_type=3
+	// with an empty --schedules, which is exactly this trap.
+	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
+		return nil, fmt.Errorf("hooppy: ImportSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
+	}
+	body := struct {
+		AsCopy               int              `json:"as_copy"`
+		PublicationWhenType  int              `json:"publication_when_type"`
+		PublicationHowType   int              `json:"publication_how_type"`
+		PublicationWhereType int              `json:"publication_where_type"`
+		SelectedPagesIDs     []int            `json:"selected_pages_ids"`
+		SchedulesIDs         []int            `json:"schedules_ids"`
+		PublicationDate      *PublicationDate `json:"publication_date,omitempty"`
+		Texts                []PostText       `json:"texts"`
+		Attachments          []Attachment     `json:"attachments"`
+		IDs                  string           `json:"ids"`
+	}{
+		AsCopy:               1,
+		PublicationWhenType:  payload.PublicationWhenType,
+		PublicationHowType:   payload.PublicationHowType,
+		PublicationWhereType: 1,
+		SelectedPagesIDs:     payload.SelectedPagesIDs,
+		SchedulesIDs:         payload.SchedulesIDs,
+		PublicationDate:      payload.PublicationDate,
+		Texts:                payload.Texts,
+		Attachments:          payload.Attachments,
+		IDs:                  strconv.Itoa(payload.SearchPostID),
+	}
+	var resp PostIDResponse
+	if err := c.doPUT(ctx, pathPostsImport, body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }

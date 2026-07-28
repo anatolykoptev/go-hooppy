@@ -140,18 +140,29 @@ func registerPosts(root *cobra.Command) {
 		Name:  "list",
 		Short: "List posts",
 	})
-	var unpublished bool
+	var published, unpublished bool
 	var pubDate string
-	var pageID, sourceID, projectID int
+	var pageID, sourceID, projectID, scheduleID, accountID, pageNum int
+	listCmd.Flags().BoolVar(&published, "published", false, "show only published posts")
 	listCmd.Flags().BoolVar(&unpublished, "unpublished", false, "show only unpublished posts")
 	listCmd.Flags().StringVar(&pubDate, "date", "", "filter by publication date (dd.mm.yyyy)")
 	listCmd.Flags().IntVar(&pageID, "page-id", 0, "filter by page ID")
 	listCmd.Flags().IntVar(&sourceID, "source-id", 0, "filter by source ID (social network)")
 	listCmd.Flags().IntVar(&projectID, "project-id", 0, "filter by project ID")
+	listCmd.Flags().IntVar(&scheduleID, "schedule-id", 0, "filter by schedule ID")
+	listCmd.Flags().IntVar(&accountID, "account-id", 0, "filter by account ID")
+	listCmd.Flags().IntVar(&pageNum, "page", 0, "page number, 1-indexed (0 or omit = first page)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
+		if published && unpublished {
+			fmt.Fprintln(os.Stderr, "error: --published and --unpublished are mutually exclusive")
+			os.Exit(1)
+		}
 		c := mustClient()
 		var isPub *bool
-		if unpublished {
+		if published {
+			t := true
+			isPub = &t
+		} else if unpublished {
 			f := false
 			isPub = &f
 		}
@@ -161,6 +172,9 @@ func registerPosts(root *cobra.Command) {
 			PageID:          pageID,
 			SourceID:        sourceID,
 			ProjectID:       projectID,
+			ScheduleID:      scheduleID,
+			AccountID:       accountID,
+			Page:            pageNum,
 		})
 		die(err)
 		printJSON(resp)
@@ -208,24 +222,55 @@ func registerPosts(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// posts update (undocumented)
-	updateCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
-		Name:  "update",
-		Short: "Update an existing post by ID (undocumented endpoint)",
+	// posts edit — view a post's full editable state
+	editPostCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
+		Name:  "edit",
+		Short: "View a post's full editable state (texts, attachments, schedule)",
 	})
-	var updText, updPageIDs string
-	updateCmd.Flags().StringVar(&updText, "text", "", "post text (required)")
-	updateCmd.Flags().StringVar(&updPageIDs, "to", "", "comma-separated page IDs (required)")
-	_ = updateCmd.MarkFlagRequired("text")
-	_ = updateCmd.MarkFlagRequired("to")
-	updateCmd.Run = func(_ *cobra.Command, args []string) {
+	editPostCmd.Run = func(_ *cobra.Command, args []string) {
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy posts update <id> --text=... --to=...")
+			fmt.Fprintln(os.Stderr, "usage: hooppy posts edit <id>")
 			os.Exit(1)
 		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
+		edit, err := c.GetPostEdit(context.Background(), id)
+		die(err)
+		printJSON(edit)
+	}
+
+	// posts update (undocumented) — two modes: text-only (preserve schedule+attachments) or full
+	updateCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
+		Name:  "update",
+		Short: "Update an existing post by ID (undocumented endpoint)",
+	})
+	var updText, updPageIDs string
+	var updTextOnly bool
+	updateCmd.Flags().StringVar(&updText, "text", "", "new post text (required)")
+	updateCmd.Flags().StringVar(&updPageIDs, "to", "", "comma-separated page IDs (for publish-now mode)")
+	updateCmd.Flags().BoolVar(&updTextOnly, "text-only", false, "change only the text, preserve schedule + attachments")
+	_ = updateCmd.MarkFlagRequired("text")
+	updateCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy posts update <id> --text=... [--text-only | --to=...]")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		if updTextOnly {
+			// Safe mode: fetch current state, swap text, preserve everything else
+			resp, err := c.UpdatePostText(context.Background(), id, updText)
+			die(err)
+			printJSON(resp)
+			return
+		}
+		if updPageIDs == "" {
+			fmt.Fprintln(os.Stderr, "error: --to is required unless --text-only is set")
+			os.Exit(1)
+		}
+		// Legacy mode: publish now with new text (drops schedule)
 		ids := parseIntList(updPageIDs)
 		resp, err := c.UpdatePost(context.Background(), id, hooppy.PostPublishNowPayload{
 			PublicationWhenType: 1,
@@ -292,9 +337,21 @@ func registerProjects(root *cobra.Command) {
 		Name:  "list",
 		Short: "List post projects",
 	})
+	var projPage int
+	var projAll bool
+	listCmd.Flags().IntVar(&projPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
+	listCmd.Flags().BoolVar(&projAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListProjects(context.Background(), 0)
+		if projAll {
+			all, total, err := c.ListAllProjectsWithTotal(context.Background())
+			die(err)
+			env, err := hooppy.NewAllListEnvelope(all, total, func(p hooppy.Project) int { return p.ID })
+			die(err)
+			printJSON(env)
+			return
+		}
+		resp, err := c.ListProjects(context.Background(), projPage)
 		die(err)
 		printJSON(resp)
 	}
@@ -370,9 +427,21 @@ func registerSchedules(root *cobra.Command) {
 		Name:  "list",
 		Short: "List publication schedules",
 	})
+	var schedPage int
+	var schedAll bool
+	listCmd.Flags().IntVar(&schedPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
+	listCmd.Flags().BoolVar(&schedAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListSchedules(context.Background(), 0)
+		if schedAll {
+			all, total, err := c.ListAllSchedulesWithTotal(context.Background())
+			die(err)
+			env, err := hooppy.NewAllListEnvelope(all, total, func(s hooppy.Schedule) int { return s.ID })
+			die(err)
+			printJSON(env)
+			return
+		}
+		resp, err := c.ListSchedules(context.Background(), schedPage)
 		die(err)
 		printJSON(resp)
 	}
@@ -851,6 +920,10 @@ func registerSearch(root *cobra.Command) {
 			fmt.Fprintln(os.Stderr, "error: --date, --hours, --minutes are required for --when-type 2")
 			os.Exit(1)
 		}
+		if copyWhenType == 3 && len(parseIntList(copySchedules)) == 0 {
+			fmt.Fprintln(os.Stderr, "error: --schedules is required for --when-type 3 (by schedule) — a schedule-driven copy targeted at no schedule publishes to nothing")
+			os.Exit(1)
+		}
 		c := mustClient()
 		payload := hooppy.CopySearchPostPayload{
 			SearchPostID:        copyPostID,
@@ -906,6 +979,10 @@ func registerSearch(root *cobra.Command) {
 		}
 		if rwWhenType == 2 && (rwDate == "" || rwHours == "" || rwMinutes == "") {
 			fmt.Fprintln(os.Stderr, "error: --date, --hours, --minutes are required for --when-type 2")
+			os.Exit(1)
+		}
+		if rwWhenType == 3 && len(parseIntList(rwSchedules)) == 0 {
+			fmt.Fprintln(os.Stderr, "error: --schedules is required for --when-type 3 (by schedule) — a schedule-driven rewrite targeted at no schedule publishes to nothing")
 			os.Exit(1)
 		}
 		c := mustClient()
@@ -972,6 +1049,56 @@ func registerSearch(root *cobra.Command) {
 			}
 		}
 		resp, err := c.RewriteSearchPost(context.Background(), payload)
+		die(err)
+		printJSON(resp)
+	}
+
+	// search import — copy one scraped post via PUT /posts/import with full text + attachments
+	importCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
+		Name:  "import",
+		Short: "Copy a scraped post with full text + photos/videos via PUT /posts/import (server downloads photos async)",
+	})
+	var impPostID int
+	var impSchedules string
+	var impWhenType, impHowType int
+	var impNoAttachments bool
+	importCmd.Flags().IntVar(&impPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED)")
+	importCmd.Flags().IntVar(&impWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule")
+	importCmd.Flags().IntVar(&impHowType, "how-type", 2, "publication how type (2=by schedule pages)")
+	importCmd.Flags().StringVar(&impSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
+	importCmd.Flags().BoolVar(&impNoAttachments, "no-attachments", false, "strip all attachments (photos, videos, links, etc.)")
+	importCmd.Run = func(_ *cobra.Command, _ []string) {
+		if impPostID == 0 {
+			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
+			os.Exit(1)
+		}
+		if impWhenType == 3 && len(parseIntList(impSchedules)) == 0 {
+			fmt.Fprintln(os.Stderr, "error: --schedules is required for --when-type 3 (by schedule) — a schedule-driven import targeted at no schedule publishes to nothing")
+			os.Exit(1)
+		}
+		c := mustClient()
+		// Get edit data for text + attachments
+		edit, err := c.GetSearchPostEdit(context.Background(), impPostID)
+		die(err)
+		// Extract original text
+		text := ""
+		if len(edit.Texts) > 0 {
+			text = edit.Texts[0].Text
+		}
+		// Build attachments — photos AND videos grouped into {type: "photos"} (UI behavior)
+		var attachments []hooppy.Attachment
+		if !impNoAttachments {
+			attachments = hooppy.SearchPostEditAttachments(edit.Attachments)
+		}
+		payload := hooppy.CopySearchPostPayload{
+			SearchPostID:        impPostID,
+			PublicationWhenType: impWhenType,
+			PublicationHowType:  impHowType,
+			SchedulesIDs:        parseIntList(impSchedules),
+			Texts:               []hooppy.PostText{{Text: text, SourceID: 0}},
+			Attachments:         attachments,
+		}
+		resp, err := c.ImportSearchPost(context.Background(), payload)
 		die(err)
 		printJSON(resp)
 	}
