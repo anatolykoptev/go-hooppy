@@ -721,8 +721,9 @@ func registerSearch(root *cobra.Command) {
 		Name:  "posts",
 		Short: "List scraped posts from external pages",
 	})
-	var sText, sDateFrom, sDateTo string
-	var sSourceType, sSourceID, sSourceResourceID, sOwnerID, sPage int
+	var sText, sDateFrom, sDateTo, sSortBy, sSortDir, sContentTypes, sContentTypesExclude string
+	var sSourceType, sSourceID, sSourceResourceID, sOwnerID, sPage, sMinLikes, sMinViews, sMinComments, sMinReposts, sPhotosAmount int
+	var sMinInvolvement float64
 	postsCmd.Flags().StringVar(&sText, "text", "", "search by text")
 	postsCmd.Flags().StringVar(&sDateFrom, "date-from", "", "filter by date from (dd.mm.yyyy)")
 	postsCmd.Flags().StringVar(&sDateTo, "date-to", "", "filter by date to (dd.mm.yyyy)")
@@ -731,17 +732,37 @@ func registerSearch(root *cobra.Command) {
 	postsCmd.Flags().IntVar(&sSourceResourceID, "source-resource-id", 0, "source resource ID (see 'search sources')")
 	postsCmd.Flags().IntVar(&sOwnerID, "owner-id", 0, "page ID within source")
 	postsCmd.Flags().IntVar(&sPage, "page", 0, "pagination page number")
+	postsCmd.Flags().StringVar(&sSortBy, "sort-by", "", "sort field: publication_date, likes, reposts, comments, views, involvement")
+	postsCmd.Flags().StringVar(&sSortDir, "sort-dir", "desc", "sort direction: desc (default) or asc")
+	postsCmd.Flags().IntVar(&sMinLikes, "min-likes", 0, "minimum likes")
+	postsCmd.Flags().IntVar(&sMinViews, "min-views", 0, "minimum views")
+	postsCmd.Flags().IntVar(&sMinComments, "min-comments", 0, "minimum comments")
+	postsCmd.Flags().IntVar(&sMinReposts, "min-reposts", 0, "minimum reposts")
+	postsCmd.Flags().Float64Var(&sMinInvolvement, "min-involvement", 0, "minimum involvement (e.g. 10.5)")
+	postsCmd.Flags().IntVar(&sPhotosAmount, "photos-amount", 0, "exact photo count")
+	postsCmd.Flags().StringVar(&sContentTypes, "content-types", "", "comma-separated content types to include: photos, videos, audios, documents, links")
+	postsCmd.Flags().StringVar(&sContentTypesExclude, "content-types-exclude", "", "comma-separated content types to exclude")
 	postsCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.ListSearchPosts(context.Background(), hooppy.SearchPostsFilter{
-			Text:             sText,
-			DateFrom:         sDateFrom,
-			DateTo:           sDateTo,
-			SourceType:       sSourceType,
-			SourceID:         sSourceID,
-			SourceResourceID: sSourceResourceID,
-			OwnerID:          sOwnerID,
-			Page:             sPage,
+			Text:                sText,
+			DateFrom:            sDateFrom,
+			DateTo:              sDateTo,
+			SourceType:          sSourceType,
+			SourceID:            sSourceID,
+			SourceResourceID:    sSourceResourceID,
+			OwnerID:             sOwnerID,
+			Page:                sPage,
+			SortBy:              sSortBy,
+			SortDirection:       sSortDir,
+			MinLikes:            sMinLikes,
+			MinViews:            sMinViews,
+			MinComments:         sMinComments,
+			MinReposts:          sMinReposts,
+			MinInvolvement:      sMinInvolvement,
+			PhotosAmount:        sPhotosAmount,
+			ContentTypes:        sContentTypes,
+			ContentTypesExclude: sContentTypesExclude,
 		})
 		die(err)
 		printJSON(resp)

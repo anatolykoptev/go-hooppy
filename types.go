@@ -685,6 +685,19 @@ type SearchPostsFilter struct {
 	SourceResourceID int    // source resource ID (from ListSourceResources)
 	OwnerID          int    // page ID within source
 	Page             int
+	// Sorting (empirically verified).
+	SortBy        string // publication_date, likes, reposts, comments, views, involvement
+	SortDirection string // desc (default) or asc
+	// Metric filters (empirically verified).
+	MinLikes       int
+	MinViews       int
+	MinComments    int
+	MinReposts     int
+	MinInvolvement float64
+	// Content filters (empirically verified).
+	PhotosAmount        int    // exact photo count
+	ContentTypes        string // comma-separated: photos, videos, audios, documents, links (AND filter)
+	ContentTypesExclude string // comma-separated — exclude posts with these types
 }
 
 // SourceResource is a configured source of posts to scrape (a group of social media pages).

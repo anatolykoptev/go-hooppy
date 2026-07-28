@@ -38,6 +38,39 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	if f.Page > 0 {
 		params.Set("page", strconv.Itoa(f.Page))
 	}
+	// Sorting
+	if f.SortBy != "" {
+		params.Set("sort_by", f.SortBy)
+	}
+	if f.SortDirection != "" {
+		params.Set("sort_direction", f.SortDirection)
+	}
+	// Metric filters
+	if f.MinLikes > 0 {
+		params.Set("min_likes", strconv.Itoa(f.MinLikes))
+	}
+	if f.MinViews > 0 {
+		params.Set("min_views", strconv.Itoa(f.MinViews))
+	}
+	if f.MinComments > 0 {
+		params.Set("min_comments", strconv.Itoa(f.MinComments))
+	}
+	if f.MinReposts > 0 {
+		params.Set("min_reposts", strconv.Itoa(f.MinReposts))
+	}
+	if f.MinInvolvement > 0 {
+		params.Set("min_involvement", strconv.FormatFloat(f.MinInvolvement, 'f', -1, 64))
+	}
+	// Content filters
+	if f.PhotosAmount > 0 {
+		params.Set("photos_amount", strconv.Itoa(f.PhotosAmount))
+	}
+	if f.ContentTypes != "" {
+		params.Set("content_types", f.ContentTypes)
+	}
+	if f.ContentTypesExclude != "" {
+		params.Set("content_types_exclude", f.ContentTypesExclude)
+	}
 	var resp SearchPostsResponse
 	if err := c.doGET(ctx, pathPostsSearchIndex, params, &resp); err != nil {
 		return nil, err

@@ -954,21 +954,31 @@ func registerDeleteProxy(server *mcp.Server) {
 // --- list_search_posts ---
 
 type listSearchPostsInput struct {
-	Text             string `json:"text,omitempty" jsonschema:"Search by text content."`
-	DateFrom         string `json:"date_from,omitempty" jsonschema:"Filter by date from (dd.mm.yyyy)."`
-	DateTo           string `json:"date_to,omitempty" jsonschema:"Filter by date to (dd.mm.yyyy)."`
-	SourceType       int    `json:"source_type,omitempty" jsonschema:"Source type: 1=social, 2=RSS. 0=no filter."`
-	SourceID         int    `json:"source_id,omitempty" jsonschema:"Social network ID (1=VK, 7=Instagram, etc.). 0=no filter."`
-	SourceResourceID int    `json:"source_resource_id,omitempty" jsonschema:"Source resource ID (from list_source_resources). 0=no filter."`
-	OwnerID          int    `json:"owner_id,omitempty" jsonschema:"Page ID within source. 0=no filter."`
-	Page             int    `json:"page,omitempty" jsonschema:"Pagination page number."`
+	Text                string  `json:"text,omitempty" jsonschema:"Search by text content."`
+	DateFrom            string  `json:"date_from,omitempty" jsonschema:"Filter by date from (dd.mm.yyyy)."`
+	DateTo              string  `json:"date_to,omitempty" jsonschema:"Filter by date to (dd.mm.yyyy)."`
+	SourceType          int     `json:"source_type,omitempty" jsonschema:"Source type: 1=social, 2=RSS. 0=no filter."`
+	SourceID            int     `json:"source_id,omitempty" jsonschema:"Social network ID (1=VK, 7=Instagram, etc.). 0=no filter."`
+	SourceResourceID    int     `json:"source_resource_id,omitempty" jsonschema:"Source resource ID (from list_source_resources). 0=no filter."`
+	OwnerID             int     `json:"owner_id,omitempty" jsonschema:"Page ID within source. 0=no filter."`
+	Page                int     `json:"page,omitempty" jsonschema:"Pagination page number."`
+	SortBy              string  `json:"sort_by,omitempty" jsonschema:"Sort field: publication_date, likes, reposts, comments, views, involvement."`
+	SortDirection       string  `json:"sort_direction,omitempty" jsonschema:"Sort direction: desc (default) or asc."`
+	MinLikes            int     `json:"min_likes,omitempty" jsonschema:"Minimum likes. 0=no filter."`
+	MinViews            int     `json:"min_views,omitempty" jsonschema:"Minimum views. 0=no filter."`
+	MinComments         int     `json:"min_comments,omitempty" jsonschema:"Minimum comments. 0=no filter."`
+	MinReposts          int     `json:"min_reposts,omitempty" jsonschema:"Minimum reposts. 0=no filter."`
+	MinInvolvement      float64 `json:"min_involvement,omitempty" jsonschema:"Minimum engagement (e.g. 10.5). 0=no filter."`
+	PhotosAmount        int     `json:"photos_amount,omitempty" jsonschema:"Exact photo count. 0=no filter."`
+	ContentTypes        string  `json:"content_types,omitempty" jsonschema:"Comma-separated content types to include: photos, videos, audios, documents, links (AND filter)."`
+	ContentTypesExclude string  `json:"content_types_exclude,omitempty" jsonschema:"Comma-separated content types to exclude."`
 }
 
 func registerListSearchPosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_search_posts",
-			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. Supports sorting and filtering by metrics (likes, views, comments, reposts, involvement) and content types. UNDOCUMENTED endpoint — may change without notice.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listSearchPostsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -976,14 +986,24 @@ func registerListSearchPosts(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			resp, err := c.ListSearchPosts(ctx, hooppy.SearchPostsFilter{
-				Text:             in.Text,
-				DateFrom:         in.DateFrom,
-				DateTo:           in.DateTo,
-				SourceType:       in.SourceType,
-				SourceID:         in.SourceID,
-				SourceResourceID: in.SourceResourceID,
-				OwnerID:          in.OwnerID,
-				Page:             in.Page,
+				Text:                in.Text,
+				DateFrom:            in.DateFrom,
+				DateTo:              in.DateTo,
+				SourceType:          in.SourceType,
+				SourceID:            in.SourceID,
+				SourceResourceID:    in.SourceResourceID,
+				OwnerID:             in.OwnerID,
+				Page:                in.Page,
+				SortBy:              in.SortBy,
+				SortDirection:       in.SortDirection,
+				MinLikes:            in.MinLikes,
+				MinViews:            in.MinViews,
+				MinComments:         in.MinComments,
+				MinReposts:          in.MinReposts,
+				MinInvolvement:      in.MinInvolvement,
+				PhotosAmount:        in.PhotosAmount,
+				ContentTypes:        in.ContentTypes,
+				ContentTypesExclude: in.ContentTypesExclude,
 			})
 			if err != nil {
 				return errResult(err.Error())

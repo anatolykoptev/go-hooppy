@@ -72,6 +72,67 @@ func TestListSearchPosts(t *testing.T) {
 	}
 }
 
+func TestListSearchPosts_MetricsAndSorting(t *testing.T) {
+	var gotSortBy, gotSortDir, gotMinLikes, gotMinViews, gotContentTypes string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		gotSortBy = q.Get("sort_by")
+		gotSortDir = q.Get("sort_direction")
+		gotMinLikes = q.Get("min_likes")
+		gotMinViews = q.Get("min_views")
+		gotContentTypes = q.Get("content_types")
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
+		SortBy:        "likes",
+		SortDirection: "desc",
+		MinLikes:      5000,
+		MinViews:      1000000,
+		ContentTypes:  "photos,videos",
+	})
+	if err != nil {
+		t.Fatalf("ListSearchPosts: %v", err)
+	}
+	if gotSortBy != "likes" {
+		t.Errorf("sort_by = %q, want likes", gotSortBy)
+	}
+	if gotSortDir != "desc" {
+		t.Errorf("sort_direction = %q, want desc", gotSortDir)
+	}
+	if gotMinLikes != "5000" {
+		t.Errorf("min_likes = %q, want 5000", gotMinLikes)
+	}
+	if gotMinViews != "1000000" {
+		t.Errorf("min_views = %q, want 1000000", gotMinViews)
+	}
+	if gotContentTypes != "photos,videos" {
+		t.Errorf("content_types = %q, want photos,videos", gotContentTypes)
+	}
+}
+
+func TestListSearchPosts_MinInvolvement(t *testing.T) {
+	var gotMinInvolvement string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMinInvolvement = r.URL.Query().Get("min_involvement")
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
+		MinInvolvement: 10.5,
+	})
+	if err != nil {
+		t.Fatalf("ListSearchPosts: %v", err)
+	}
+	if gotMinInvolvement != "10.5" {
+		t.Errorf("min_involvement = %q, want 10.5", gotMinInvolvement)
+	}
+}
+
 func TestListSourceResources(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/posts-search/source-resources" {
