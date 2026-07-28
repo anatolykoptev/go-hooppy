@@ -810,14 +810,22 @@ func registerSearch(root *cobra.Command) {
 	var copyPages string
 	var copyWhenType, copyHowType int
 	var copySchedules string
+	var copyDate, copyHours, copyMinutes string
 	copyCmd.Flags().IntVar(&copyPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED)")
 	copyCmd.Flags().StringVar(&copyPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
 	copyCmd.Flags().IntVar(&copyWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
 	copyCmd.Flags().IntVar(&copyHowType, "how-type", 1, "publication how type (1=default)")
 	copyCmd.Flags().StringVar(&copySchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
+	copyCmd.Flags().StringVar(&copyDate, "date", "", "publication date dd.mm.yyyy (for when-type 2)")
+	copyCmd.Flags().StringVar(&copyHours, "hours", "", "publication hours HH (for when-type 2)")
+	copyCmd.Flags().StringVar(&copyMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
 	copyCmd.Run = func(_ *cobra.Command, _ []string) {
 		if copyPostID == 0 {
 			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
+			os.Exit(1)
+		}
+		if copyWhenType == 2 && (copyDate == "" || copyHours == "" || copyMinutes == "") {
+			fmt.Fprintln(os.Stderr, "error: --date, --hours, --minutes are required for --when-type 2")
 			os.Exit(1)
 		}
 		c := mustClient()
@@ -826,9 +834,17 @@ func registerSearch(root *cobra.Command) {
 			PublicationWhenType: copyWhenType,
 			PublicationHowType:  copyHowType,
 		}
-		if copyWhenType == 3 {
+		switch copyWhenType {
+		case 3:
 			payload.SchedulesIDs = parseIntList(copySchedules)
-		} else {
+		case 2:
+			payload.SelectedPagesIDs = parseIntList(copyPages)
+			payload.PublicationDate = &hooppy.PublicationDate{
+				Date:    copyDate,
+				Hours:   copyHours,
+				Minutes: copyMinutes,
+			}
+		default:
 			payload.SelectedPagesIDs = parseIntList(copyPages)
 		}
 		resp, err := c.CopySearchPost(context.Background(), payload)

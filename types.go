@@ -706,11 +706,12 @@ type ParsingStartResponse struct {
 //
 // UNDOCUMENTED: PUT /posts/copy with search_post_id is not in the public OpenAPI spec.
 type CopySearchPostPayload struct {
-	SearchPostID        int          `json:"search_post_id"`        // ID from GET /posts-search (REQUIRED)
-	PublicationWhenType int          `json:"publication_when_type"` // 1=now, 2=at specific time, 3=by schedule
-	PublicationHowType  int          `json:"publication_how_type"`  // 1
-	SelectedPagesIDs    []int        `json:"selected_pages_ids"`    // for when_type=1 or 2
-	SchedulesIDs        []int        `json:"schedules_ids"`         // for when_type=3
-	Texts               []PostText   `json:"texts"`                 // auto-filled by server when search_post_id is set
-	Attachments         []Attachment `json:"attachments"`           // auto-filled by server when search_post_id is set
+	SearchPostID        int              `json:"search_post_id"`             // ID from GET /posts-search (REQUIRED)
+	PublicationWhenType int              `json:"publication_when_type"`      // 1=now, 2=at specific time, 3=by schedule
+	PublicationHowType  int              `json:"publication_how_type"`       // 1
+	SelectedPagesIDs    []int            `json:"selected_pages_ids"`         // for when_type=1 or 2
+	SchedulesIDs        []int            `json:"schedules_ids"`              // for when_type=3
+	PublicationDate     *PublicationDate `json:"publication_date,omitempty"` // for when_type=2
+	Texts               []PostText       `json:"texts"`                      // auto-filled by server when search_post_id is set
+	Attachments         []Attachment     `json:"attachments"`                // auto-filled by server when search_post_id is set
 }

@@ -203,3 +203,73 @@ func TestCopySearchPost(t *testing.T) {
 		t.Errorf("publication_when_type = %v, want 1", capturedBody["publication_when_type"])
 	}
 }
+
+func TestCopySearchPost_NilSlicesInitialized(t *testing.T) {
+	var capturedBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Write([]byte(`{"id":5002}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	// Pass no slices at all — verify they're initialized to [] not null
+	_, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        1002,
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+	})
+	if err != nil {
+		t.Fatalf("CopySearchPost: %v", err)
+	}
+	// Server expects arrays, not null
+	if capturedBody["texts"] == nil {
+		t.Errorf("texts = null, want []")
+	}
+	if capturedBody["attachments"] == nil {
+		t.Errorf("attachments = null, want []")
+	}
+	if capturedBody["selected_pages_ids"] == nil {
+		t.Errorf("selected_pages_ids = null, want []")
+	}
+}
+
+func TestCopySearchPost_Scheduled(t *testing.T) {
+	var capturedBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Write([]byte(`{"id":5003}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        1003,
+		PublicationWhenType: 2,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		PublicationDate: &PublicationDate{
+			Date:    "01.02.2026",
+			Hours:   "14",
+			Minutes: "30",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CopySearchPost: %v", err)
+	}
+	if resp.ID != 5003 {
+		t.Errorf("ID = %d, want 5003", resp.ID)
+	}
+	if capturedBody["publication_when_type"].(float64) != 2 {
+		t.Errorf("publication_when_type = %v, want 2", capturedBody["publication_when_type"])
+	}
+	pubDate, ok := capturedBody["publication_date"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("publication_date not a map: %T", capturedBody["publication_date"])
+	}
+	if pubDate["date"] != "01.02.2026" || pubDate["hours"] != "14" || pubDate["minutes"] != "30" {
+		t.Errorf("publication_date = %+v", pubDate)
+	}
+}
