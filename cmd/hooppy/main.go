@@ -975,6 +975,52 @@ func registerSearch(root *cobra.Command) {
 		die(err)
 		printJSON(resp)
 	}
+
+	// search import — batch copy via PUT /posts/import with full text + attachments
+	importCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
+		Name:  "import",
+		Short: "Batch-copy a scraped post with full text + photos/videos via PUT /posts/import (server downloads photos async)",
+	})
+	var impPostID int
+	var impSchedules string
+	var impWhenType, impHowType int
+	var impNoAttachments bool
+	importCmd.Flags().IntVar(&impPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED)")
+	importCmd.Flags().IntVar(&impWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule")
+	importCmd.Flags().IntVar(&impHowType, "how-type", 2, "publication how type (2=by schedule pages)")
+	importCmd.Flags().StringVar(&impSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
+	importCmd.Flags().BoolVar(&impNoAttachments, "no-attachments", false, "strip all attachments (photos, videos, links, etc.)")
+	importCmd.Run = func(_ *cobra.Command, _ []string) {
+		if impPostID == 0 {
+			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
+			os.Exit(1)
+		}
+		c := mustClient()
+		// Get edit data for text + attachments
+		edit, err := c.GetSearchPostEdit(context.Background(), impPostID)
+		die(err)
+		// Extract original text
+		text := ""
+		if len(edit.Texts) > 0 {
+			text = edit.Texts[0].Text
+		}
+		// Build attachments — photos AND videos grouped into {type: "photos"} (UI behavior)
+		var attachments []hooppy.Attachment
+		if !impNoAttachments {
+			attachments = hooppy.SearchPostEditAttachments(edit.Attachments)
+		}
+		payload := hooppy.CopySearchPostPayload{
+			SearchPostID:        impPostID,
+			PublicationWhenType: impWhenType,
+			PublicationHowType:  impHowType,
+			SchedulesIDs:        parseIntList(impSchedules),
+			Texts:               []hooppy.PostText{{Text: text, SourceID: 0}},
+			Attachments:         attachments,
+		}
+		resp, err := c.ImportSearchPost(context.Background(), payload)
+		die(err)
+		printJSON(resp)
+	}
 }
 
 func parseIntList(s string) []int {
