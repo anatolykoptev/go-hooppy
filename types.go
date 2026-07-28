@@ -168,7 +168,7 @@ type PostPublishNowPayload struct {
 	PublicationHowType  int          `json:"publication_how_type"`  // 1
 	SelectedPagesIDs    []int        `json:"selected_pages_ids"`
 	Texts               []PostText   `json:"texts"`
-	Attachments         []Attachment `json:"attachments,omitempty"`
+	Attachments         []Attachment `json:"attachments"`
 }
 
 // PostPublishAtPayload publishes at a specific date/time to manually selected pages.
@@ -178,7 +178,7 @@ type PostPublishAtPayload struct {
 	PublicationDate     PublicationDate `json:"publication_date"`
 	SelectedPagesIDs    []int           `json:"selected_pages_ids"`
 	Texts               []PostText      `json:"texts"`
-	Attachments         []Attachment    `json:"attachments,omitempty"`
+	Attachments         []Attachment    `json:"attachments"`
 }
 
 // PostPublishBySchedulePayload publishes via one or more schedules.
@@ -187,7 +187,7 @@ type PostPublishBySchedulePayload struct {
 	PublicationHowType  int          `json:"publication_how_type"`  // 1 (ignored)
 	SchedulesIDs        []int        `json:"schedules_ids"`
 	Texts               []PostText   `json:"texts"`
-	Attachments         []Attachment `json:"attachments,omitempty"`
+	Attachments         []Attachment `json:"attachments"`
 }
 
 // PostPublishByProjectPayload publishes via a project.
@@ -196,7 +196,7 @@ type PostPublishByProjectPayload struct {
 	PublicationHowType  int          `json:"publication_how_type"`  // 1 (ignored)
 	ProjectID           int          `json:"project_id"`
 	Texts               []PostText   `json:"texts"`
-	Attachments         []Attachment `json:"attachments,omitempty"`
+	Attachments         []Attachment `json:"attachments"`
 }
 
 // CreatePostResponse is returned by POST /posts.
