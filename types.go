@@ -700,11 +700,18 @@ type ParsingStartResponse struct {
 	Success bool `json:"success"`
 }
 
-// CopySearchPostPayload copies a scraped post (from GET /posts-search) to the
-// user's own pages. The server auto-fills text and attachments from the
-// scraped post identified by SearchPostID — no need to pass texts/attachments.
+// CopySearchPostPayload copies or rewrites a scraped post (from GET /posts-search)
+// to the user's own pages. Used by both CopySearchPost (PUT /posts/copy) and
+// RewriteSearchPost (PUT /posts/rewrite).
 //
-// UNDOCUMENTED: PUT /posts/copy with search_post_id is not in the public OpenAPI spec.
+// To keep the original photos, pass the scraped post's photo IDs in Attachments
+// with type "photos" and each photo's id + owner_id. The server copies them
+// asynchronously from the source social network. This works for immediate
+// publish (when_type=1); for scheduled publish (when_type=2), upload photos
+// via UploadMedia first and pass the uploaded media IDs instead.
+//
+// UNDOCUMENTED: PUT /posts/copy and PUT /posts/rewrite with search_post_id
+// are not in the public OpenAPI spec.
 type CopySearchPostPayload struct {
 	SearchPostID        int              `json:"search_post_id"`             // ID from GET /posts-search (REQUIRED)
 	PublicationWhenType int              `json:"publication_when_type"`      // 1=now, 2=at specific time, 3=by schedule
@@ -712,6 +719,6 @@ type CopySearchPostPayload struct {
 	SelectedPagesIDs    []int            `json:"selected_pages_ids"`         // for when_type=1 or 2
 	SchedulesIDs        []int            `json:"schedules_ids"`              // for when_type=3
 	PublicationDate     *PublicationDate `json:"publication_date,omitempty"` // for when_type=2
-	Texts               []PostText       `json:"texts"`                      // auto-filled by server when search_post_id is set
-	Attachments         []Attachment     `json:"attachments"`                // auto-filled by server when search_post_id is set
+	Texts               []PostText       `json:"texts"`                      // custom text to override original
+	Attachments         []Attachment     `json:"attachments"`                // photos (scraped IDs or uploaded media IDs)
 }

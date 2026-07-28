@@ -273,3 +273,99 @@ func TestCopySearchPost_Scheduled(t *testing.T) {
 		t.Errorf("publication_date = %+v", pubDate)
 	}
 }
+
+func TestRewriteSearchPost(t *testing.T) {
+	var capturedBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/posts/rewrite" {
+			t.Errorf("PUT /posts/rewrite, got %s %s", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Write([]byte(`{"id":6001}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        2001,
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "Rewritten text", SourceID: 0}},
+	})
+	if err != nil {
+		t.Fatalf("RewriteSearchPost: %v", err)
+	}
+	if resp.ID != 6001 {
+		t.Errorf("ID = %d, want 6001", resp.ID)
+	}
+	if capturedBody["search_post_id"].(float64) != 2001 {
+		t.Errorf("search_post_id = %v, want 2001", capturedBody["search_post_id"])
+	}
+	texts, ok := capturedBody["texts"].([]interface{})
+	if !ok || len(texts) != 1 {
+		t.Fatalf("texts = %v, want array of 1", capturedBody["texts"])
+	}
+	textMap := texts[0].(map[string]interface{})
+	if textMap["text"] != "Rewritten text" {
+		t.Errorf("texts[0].text = %v, want 'Rewritten text'", textMap["text"])
+	}
+}
+
+func TestRewriteSearchPost_Scheduled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/posts/rewrite" {
+			t.Errorf("path = %s, want /posts/rewrite", r.URL.Path)
+		}
+		w.Write([]byte(`{"id":6002}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        2002,
+		PublicationWhenType: 2,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		PublicationDate: &PublicationDate{
+			Date:    "15.08.2026",
+			Hours:   "09",
+			Minutes: "15",
+		},
+		Texts: []PostText{{Text: "Scheduled rewrite", SourceID: 0}},
+	})
+	if err != nil {
+		t.Fatalf("RewriteSearchPost: %v", err)
+	}
+	if resp.ID != 6002 {
+		t.Errorf("ID = %d, want 6002", resp.ID)
+	}
+}
+
+func TestScrapedPhotoAttachment(t *testing.T) {
+	photos := []SearchPostPhoto{
+		{ID: 111, OwnerID: -222, URL: "https://example.com/1.jpg"},
+		{ID: 333, OwnerID: -222, URL: "https://example.com/2.jpg"},
+	}
+	att := ScrapedPhotoAttachment(photos)
+	if att.Type != "photos" {
+		t.Errorf("Type = %q, want 'photos'", att.Type)
+	}
+	items, ok := att.Data.([]map[string]interface{})
+	if !ok {
+		t.Fatalf("Data = %T, want []map[string]interface{}", att.Data)
+	}
+	if len(items) != 2 {
+		t.Fatalf("len(items) = %d, want 2", len(items))
+	}
+	if items[0]["id"] != "111" {
+		t.Errorf("items[0].id = %v, want '111'", items[0]["id"])
+	}
+	if items[0]["owner_id"] != -222 {
+		t.Errorf("items[0].owner_id = %v, want -222", items[0]["owner_id"])
+	}
+	if items[0]["type"] != "photo" {
+		t.Errorf("items[0].type = %v, want 'photo'", items[0]["type"])
+	}
+}
