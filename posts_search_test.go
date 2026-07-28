@@ -15,23 +15,23 @@ func TestListSearchPosts(t *testing.T) {
 			t.Errorf("GET /posts-search, got %s %s", r.Method, r.URL.Path)
 		}
 		q := r.URL.Query()
-		if q.Get("source_resource_id") != "578" {
-			t.Errorf("source_resource_id = %q, want 578", q.Get("source_resource_id"))
+		if q.Get("source_resource_id") != "123" {
+			t.Errorf("source_resource_id = %q, want 123", q.Get("source_resource_id"))
 		}
-		if q.Get("text") != "Петербург" {
-			t.Errorf("text = %q, want Петербург", q.Get("text"))
+		if q.Get("text") != "test query" {
+			t.Errorf("text = %q, want test query", q.Get("text"))
 		}
 		w.Write([]byte(`{
 			"list":[{
-				"id":6445575,
+				"id":1001,
 				"is_attachments_in_process":0,
 				"source_id":1,
 				"publication_date":"28.07.2026, 10:07",
-				"text":"Flow Fest возвращается",
-				"photos":[{"id":1,"owner_id":-26270763,"url":"https://example.com/p.jpg","info":""}],
+				"text":"Test post text",
+				"photos":[{"id":1,"owner_id":-100,"url":"https://example.com/p.jpg","info":""}],
 				"videos":[],"audios":[],"documents":[],
-				"owner":{"id":"26270763","type":"page","name":"blog_fiesta","alias":"blog_fiesta","photo":"","link":"https://vk.ru/public26270763"},
-				"link":"https://vk.ru/wall-26270763_1435615",
+				"owner":{"id":"100","type":"page","name":"test_page","alias":"test_page","photo":"","link":"https://vk.ru/public100"},
+				"link":"https://vk.ru/wall-100_1",
 				"likes":"1","reposts":"3","views":"864","comments":"0","involvement":"0.463",
 				"video_duration":0,"is_used":0
 			}],
@@ -42,8 +42,8 @@ func TestListSearchPosts(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
-		SourceResourceID: 578,
-		Text:             "Петербург",
+		SourceResourceID: 123,
+		Text:             "test query",
 	})
 	if err != nil {
 		t.Fatalf("ListSearchPosts: %v", err)
@@ -55,8 +55,8 @@ func TestListSearchPosts(t *testing.T) {
 		t.Fatalf("List len = %d, want 1", len(resp.List))
 	}
 	p := resp.List[0]
-	if p.ID != 6445575 {
-		t.Errorf("ID = %d, want 6445575", p.ID)
+	if p.ID != 1001 {
+		t.Errorf("ID = %d, want 1001", p.ID)
 	}
 	if p.PublicationDate != "28.07.2026, 10:07" {
 		t.Errorf("PublicationDate = %q", p.PublicationDate)
@@ -64,7 +64,7 @@ func TestListSearchPosts(t *testing.T) {
 	if p.Likes != "1" {
 		t.Errorf("Likes = %q, want 1", p.Likes)
 	}
-	if p.Owner.Name != "blog_fiesta" {
+	if p.Owner.Name != "test_page" {
 		t.Errorf("Owner.Name = %q", p.Owner.Name)
 	}
 	if len(p.Photos) != 1 || p.Photos[0].URL != "https://example.com/p.jpg" {
@@ -78,7 +78,7 @@ func TestListSourceResources(t *testing.T) {
 			t.Errorf("GET /posts-search/source-resources, got %s %s", r.Method, r.URL.Path)
 		}
 		w.Write([]byte(`{"list":[
-			{"id":578,"user_id":5751,"name":"Питер паблики вк","source_type":1,"search_type":1,"source_id":1,"data":"https://vk.com/piter","hashtag":"","link":""}
+			{"id":123,"user_id":456,"name":"Test Source","source_type":1,"search_type":1,"source_id":1,"data":"https://vk.com/test","hashtag":"","link":""}
 		]}`))
 	}))
 	defer srv.Close()
@@ -92,7 +92,7 @@ func TestListSourceResources(t *testing.T) {
 		t.Fatalf("List len = %d, want 1", len(resp.List))
 	}
 	s := resp.List[0]
-	if s.ID != 578 || s.Name != "Питер паблики вк" || s.SourceID != 1 {
+	if s.ID != 123 || s.Name != "Test Source" || s.SourceID != 1 {
 		t.Errorf("Source = %+v", s)
 	}
 }
@@ -103,8 +103,8 @@ func TestGetParsingForm(t *testing.T) {
 			t.Errorf("GET /posts-search/parsing/form, got %s %s", r.Method, r.URL.Path)
 		}
 		w.Write([]byte(`{
-			"source_resources":[{"id":578,"name":"Питер","source_type":1,"search_type":1,"source_id":1,"data":"https://vk.com/piter"}],
-			"social_accounts":[{"id":94294,"source_id":1,"name":"Екатерина Вторая"}],
+			"source_resources":[{"id":123,"name":"Test","source_type":1,"search_type":1,"source_id":1,"data":"https://vk.com/test"}],
+			"social_accounts":[{"id":999,"source_id":1,"name":"Test Account"}],
 			"is_parsing_in_progress":false
 		}`))
 	}))
@@ -118,7 +118,7 @@ func TestGetParsingForm(t *testing.T) {
 	if resp.IsParsingInProgress {
 		t.Errorf("IsParsingInProgress = true, want false")
 	}
-	if len(resp.SocialAccounts) != 1 || resp.SocialAccounts[0].ID != 94294 {
+	if len(resp.SocialAccounts) != 1 || resp.SocialAccounts[0].ID != 999 {
 		t.Errorf("SocialAccounts = %+v", resp.SocialAccounts)
 	}
 }
@@ -140,8 +140,8 @@ func TestStartParsing(t *testing.T) {
 		SourceType:                1,
 		SearchType:                1,
 		SourceID:                  1,
-		SourceResourceID:          578,
-		SocialAccountForParsingID: 94294,
+		SourceResourceID:          123,
+		SocialAccountForParsingID: 999,
 		DateFrom:                  0,
 		DateTo:                    0,
 	})
@@ -151,8 +151,8 @@ func TestStartParsing(t *testing.T) {
 	if !resp.Success {
 		t.Errorf("Success = false, want true")
 	}
-	if capturedBody["source_resource_id"].(float64) != 578 {
-		t.Errorf("source_resource_id = %v, want 578", capturedBody["source_resource_id"])
+	if capturedBody["source_resource_id"].(float64) != 123 {
+		t.Errorf("source_resource_id = %v, want 123", capturedBody["source_resource_id"])
 	}
 }
 
@@ -179,25 +179,25 @@ func TestCopySearchPost(t *testing.T) {
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &capturedBody)
-		w.Write([]byte(`{"id":92760716}`))
+		w.Write([]byte(`{"id":5001}`))
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
 	resp, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        6457842,
+		SearchPostID:        1001,
 		PublicationWhenType: 1,
 		PublicationHowType:  1,
-		SelectedPagesIDs:    []int{2355344},
+		SelectedPagesIDs:    []int{123456},
 	})
 	if err != nil {
 		t.Fatalf("CopySearchPost: %v", err)
 	}
-	if resp.ID != 92760716 {
-		t.Errorf("ID = %d, want 92760716", resp.ID)
+	if resp.ID != 5001 {
+		t.Errorf("ID = %d, want 5001", resp.ID)
 	}
-	if capturedBody["search_post_id"].(float64) != 6457842 {
-		t.Errorf("search_post_id = %v, want 6457842", capturedBody["search_post_id"])
+	if capturedBody["search_post_id"].(float64) != 1001 {
+		t.Errorf("search_post_id = %v, want 1001", capturedBody["search_post_id"])
 	}
 	if capturedBody["publication_when_type"].(float64) != 1 {
 		t.Errorf("publication_when_type = %v, want 1", capturedBody["publication_when_type"])

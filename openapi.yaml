@@ -315,7 +315,7 @@ paths:
           in: path
           required: true
           description: Идентификатор поста
-          example: 533241
+          example: 123456
           schema:
             type: integer
       responses:
@@ -651,7 +651,7 @@ components:
           type: array
           items:
             type: integer
-          example: [822454, 22543, 312]
+          example: [123456, 789012, 345678]
         texts:
           type: array
           items:
@@ -695,7 +695,7 @@ components:
           type: array
           items:
             type: integer
-          example: [822454, 22543, 312]
+          example: [123456, 789012, 345678]
         texts:
           type: array
           items:
