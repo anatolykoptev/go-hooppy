@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"testing"
 )
 
@@ -218,75 +219,90 @@ func TestCreateSchedule_AllFieldsSerialized(t *testing.T) {
 	}
 }
 
+// TestListSchedules_PageParam verifies the page param mapping AND that
+// consecutive page inputs emit DISTINCT page= query values. The API is
+// 1-indexed: page 0 (or omit) hits server page 1, page 1 sends page=1,
+// page 2 sends page=2. A client iterating 0,1,2,3 must NOT receive
+// page1,page1,page2,page3 — the distinctness assertion catches any mapping
+// that collapses 0 and 1 (the double-fetch this PR fixed), and the absolute
+// assertions catch a boundary translation (apiPage = userPage + 1) that would
+// silently shift every caller's page by one.
 func TestListSchedules_PageParam(t *testing.T) {
-	tests := []struct {
-		name      string
-		page      int
-		wantParam string
-	}{
-		{"page 0 (default)", 0, ""},
-		{"page 1", 1, "page=1"},
-		{"page 2", 2, "page=2"},
+	pages := []int{0, 1, 2}
+	wantAbs := map[int]string{0: "", 1: "1", 2: "2"}
+	got := make([]string, len(pages))
+	for i, p := range pages {
+		var capturedURL string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedURL = r.URL.String()
+			w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+		}))
+		c := newTestClient(t, srv)
+		if _, err := c.ListSchedules(context.Background(), p); err != nil {
+			srv.Close()
+			t.Fatalf("ListSchedules(%d): %v", p, err)
+		}
+		srv.Close()
+		got[i] = pageParamFromURL(capturedURL)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var capturedURL string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				capturedURL = r.URL.String()
-				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
-			}))
-			defer srv.Close()
-			c := newTestClient(t, srv)
-			_, err := c.ListSchedules(context.Background(), tt.page)
-			if err != nil {
-				t.Fatalf("ListSchedules: %v", err)
-			}
-			if tt.wantParam == "" {
-				if contains(capturedURL, "page=") {
-					t.Errorf("page 0 should not add page param, got: %s", capturedURL)
-				}
-			} else {
-				if !contains(capturedURL, tt.wantParam) {
-					t.Errorf("URL should contain %s, got: %s", tt.wantParam, capturedURL)
-				}
-			}
-		})
+	// Absolute mapping: page 0 -> no param, page N -> "N" for N>=1.
+	for i, p := range pages {
+		if got[i] != wantAbs[p] {
+			t.Errorf("page %d emitted page=%q, want %q", p, got[i], wantAbs[p])
+		}
+	}
+	// Distinctness: consecutive pages must emit distinct page= values, so a
+	// walk iterating 0,1,2 cannot fetch the same server page twice.
+	if got[0] == got[1] {
+		t.Errorf("page 0 and page 1 both emit page=%q — double-fetch (server page 1 fetched twice)", got[0])
+	}
+	if got[1] == got[2] {
+		t.Errorf("page 1 and page 2 both emit page=%q — distinct pages collapsed", got[1])
 	}
 }
 
-func TestListProjects_PageParam(t *testing.T) {
-	tests := []struct {
-		name      string
-		page      int
-		wantParam string
-	}{
-		{"page 0 (default)", 0, ""},
-		{"page 1", 1, "page=1"},
-		{"page 2", 2, "page=2"},
+// pageParamFromURL extracts the raw "page" query value ("" if absent) from a
+// request URL string. Used by the page-param distinctness tests.
+func pageParamFromURL(raw string) string {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return ""
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var capturedURL string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				capturedURL = r.URL.String()
-				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
-			}))
-			defer srv.Close()
-			c := newTestClient(t, srv)
-			_, err := c.ListProjects(context.Background(), tt.page)
-			if err != nil {
-				t.Fatalf("ListProjects: %v", err)
-			}
-			if tt.wantParam == "" {
-				if contains(capturedURL, "page=") {
-					t.Errorf("page 0 should not add page param, got: %s", capturedURL)
-				}
-			} else {
-				if !contains(capturedURL, tt.wantParam) {
-					t.Errorf("URL should contain %s, got: %s", tt.wantParam, capturedURL)
-				}
-			}
-		})
+	return u.Query().Get("page")
+}
+
+// TestListProjects_PageParam mirrors TestListSchedules_PageParam: verifies
+// the absolute page mapping AND that consecutive page inputs emit DISTINCT
+// page= values (no double-fetch). See TestListSchedules_PageParam for the
+// rationale.
+func TestListProjects_PageParam(t *testing.T) {
+	pages := []int{0, 1, 2}
+	wantAbs := map[int]string{0: "", 1: "1", 2: "2"}
+	got := make([]string, len(pages))
+	for i, p := range pages {
+		var capturedURL string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedURL = r.URL.String()
+			w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+		}))
+		c := newTestClient(t, srv)
+		if _, err := c.ListProjects(context.Background(), p); err != nil {
+			srv.Close()
+			t.Fatalf("ListProjects(%d): %v", p, err)
+		}
+		srv.Close()
+		got[i] = pageParamFromURL(capturedURL)
+	}
+	for i, p := range pages {
+		if got[i] != wantAbs[p] {
+			t.Errorf("page %d emitted page=%q, want %q", p, got[i], wantAbs[p])
+		}
+	}
+	if got[0] == got[1] {
+		t.Errorf("page 0 and page 1 both emit page=%q — double-fetch", got[0])
+	}
+	if got[1] == got[2] {
+		t.Errorf("page 1 and page 2 both emit page=%q — distinct pages collapsed", got[1])
 	}
 }
 
@@ -409,5 +425,39 @@ func TestListAllSchedules_SanityCap(t *testing.T) {
 	}
 	if !contains(err.Error(), "exceeded") {
 		t.Errorf("expected cap error mentioning 'exceeded', got: %v", err)
+	}
+}
+
+// TestListAllSchedules_TruncatedWalkErrors verifies that when the server
+// clears is_has_more early while total_rows still exceeds the rows served,
+// the walk returns the short list + the server's totalRows with err == nil,
+// and allListEnvelope catches the mismatch and errors — instead of letting a
+// truncated walk pass as complete with total_rows substituted by len(list).
+//
+// Without the envelope mismatch check: allListEnvelope returns
+// {list: short, total_rows: len(short), is_has_more: false} with err == nil,
+// and a truncated walk is indistinguishable from a complete one.
+func TestListAllSchedules_TruncatedWalkErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Single page: 2 rows served, is_has_more already false, but the
+		// server's total_rows=5 contradicts the 2 rows it served.
+		w.Write([]byte(`{"list":[{"id":1},{"id":2}],"total_rows":5,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	all, total, err := c.ListAllSchedulesWithTotal(context.Background())
+	if err != nil {
+		t.Fatalf("walk itself should succeed (API OK): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("len(all) = %d, want 2 (rows served)", len(all))
+	}
+	if total != 5 {
+		t.Fatalf("totalRows = %d, want 5 (server's last-seen total_rows)", total)
+	}
+	// The envelope is the fail-loud gate: len(all)=2 != totalRows=5 -> error.
+	if _, err := NewAllListEnvelope(all, len(all), total); err == nil {
+		t.Fatal("allListEnvelope must error when len(list) != totalRows (truncated walk), got nil")
 	}
 }

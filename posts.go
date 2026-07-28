@@ -58,6 +58,42 @@ func (c *Client) ListPosts(ctx context.Context, f ListPostsFilter) (*PostsRespon
 	return &resp, nil
 }
 
+// ListAllPosts walks GET /posts from page 1 with the given filter,
+// accumulating posts until is_has_more is false, and returns the full list
+// with no duplicates. The filter's non-page fields are preserved across the
+// walk; only Page is incremented. See projects.ListAllSchedules for the
+// 1-indexed rationale and the sanity cap.
+//
+// ListAllPosts drops the server's last-seen total_rows. Callers that need
+// it (to detect a truncated walk) should use ListAllPostsWithTotal and
+// allListEnvelope.
+func (c *Client) ListAllPosts(ctx context.Context, f ListPostsFilter) ([]Post, error) {
+	all, _, err := c.ListAllPostsWithTotal(ctx, f)
+	return all, err
+}
+
+// ListAllPostsWithTotal is ListAllPosts but also returns the server's
+// last-seen total_rows. See projects.ListAllSchedulesWithTotal.
+func (c *Client) ListAllPostsWithTotal(ctx context.Context, f ListPostsFilter) ([]Post, int, error) {
+	var all []Post
+	var totalRows int
+	for page := 1; ; page++ {
+		if page > maxListAllPages {
+			return nil, 0, fmt.Errorf("hooppy: ListAllPosts exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+		}
+		f.Page = page
+		resp, err := c.ListPosts(ctx, f)
+		if err != nil {
+			return nil, 0, err
+		}
+		all = append(all, resp.List...)
+		totalRows = resp.TotalRows
+		if !resp.IsHasMore {
+			return all, totalRows, nil
+		}
+	}
+}
+
 // CreatePost creates a post with the given payload. The payload must be one
 // of PostPublishNowPayload, PostPublishAtPayload, PostPublishBySchedulePayload,
 // or PostPublishByProjectPayload.
@@ -132,8 +168,8 @@ func (c *Client) GetPostEdit(ctx context.Context, postID int) (*PostEditResponse
 const scheduleDrivenWhereType = 1
 
 // UpdatePostText is a high-level helper that changes ONLY the text of an
-// existing post while preserving its schedule, attachments, page targets,
-// and publication settings. It fetches the current post state via
+// existing post while preserving its schedule, project, attachments, page
+// targets, and publication settings. It fetches the current post state via
 // GetPostEdit, swaps the text of each existing per-network text variant
 // (keeping every entry's SourceID), and sends the full payload back via
 // PUT /posts/{id}.
@@ -147,6 +183,20 @@ const scheduleDrivenWhereType = 1
 // refusing to publish to nothing rather than silently clearing page
 // targets). When a non-empty page selection IS recovered, it is sent back
 // verbatim.
+//
+// Attachments: GET /posts/{id}/edit returns the SAME singular vocabulary
+// the scraped-post edit endpoint does — measured across 11 real own-posts
+// (20 attachments of type "photo" and 1 of type "video", no pre-grouped
+// "photos" type). The PUT /posts/{id} endpoint expects photos and videos
+// grouped under a single {type: "photos"} attachment, so the scraped-post
+// grouping helper SearchPostEditAttachments is the correct transform here
+// (verified by a 12-call live round trip through UpdatePostText with 1, 2,
+// 3 and 6 attachments — every post kept its photos and the one video,
+// which still read type "video" afterwards). This is measured, not assumed.
+//
+// project_id is sent back from edit.ProjectID so a project-scoped post
+// does not lose its association through the full-state PUT — the same
+// class of wipe the schedule_id guard exists to prevent.
 //
 // This is the correct way to edit a scheduled post's text — the low-level
 // UpdatePost requires the full payload (schedule_id singular, attachments
@@ -194,6 +244,7 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 		Attachments              []Attachment     `json:"attachments"`
 		SelectedPagesBySourceIDs map[int][]int    `json:"selected_pages_by_source_ids"`
 		ScheduleID               int              `json:"schedule_id,omitempty"`
+		ProjectID                int              `json:"project_id,omitempty"`
 	}{
 		AsCopy:                   0,
 		PublicationWhenType:      edit.PublicationWhenType,
@@ -204,6 +255,7 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 		Attachments:              attachments,
 		SelectedPagesBySourceIDs: selection,
 		ScheduleID:               edit.ScheduleID,
+		ProjectID:                edit.ProjectID,
 	}
 	return c.UpdatePost(ctx, postID, payload)
 }

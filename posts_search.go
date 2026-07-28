@@ -145,6 +145,11 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 	if payload.SchedulesIDs == nil {
 		payload.SchedulesIDs = []int{}
 	}
+	// Fail closed: a schedule-driven copy (when_type=3) targeted at an empty
+	// schedules list publishes to nothing. Refuse before issuing any request.
+	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
+		return nil, fmt.Errorf("hooppy: CopySearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
+	}
 	var resp PostIDResponse
 	if err := c.doPUT(ctx, pathPostsCopy, payload, &resp); err != nil {
 		return nil, err
@@ -286,6 +291,12 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	if payload.SchedulesIDs == nil {
 		payload.SchedulesIDs = []int{}
 	}
+	// Fail closed: a schedule-driven rewrite (when_type=3) targeted at an
+	// empty schedules list publishes to nothing. Refuse before issuing any
+	// request.
+	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
+		return nil, fmt.Errorf("hooppy: RewriteSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
+	}
 	// POST /posts with as_copy=1 — same format the UI uses.
 	body := struct {
 		AsCopy               int              `json:"as_copy"`
@@ -391,6 +402,13 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 	}
 	if payload.SchedulesIDs == nil {
 		payload.SchedulesIDs = []int{}
+	}
+	// Fail closed: a schedule-driven import (when_type=3) targeted at an
+	// empty schedules list publishes to nothing. Refuse before issuing any
+	// request — the CLI `search import` command defaults to when_type=3
+	// with an empty --schedules, which is exactly this trap.
+	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
+		return nil, fmt.Errorf("hooppy: ImportSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
 	}
 	body := struct {
 		AsCopy               int              `json:"as_copy"`

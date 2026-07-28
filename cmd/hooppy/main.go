@@ -151,7 +151,7 @@ func registerPosts(root *cobra.Command) {
 	listCmd.Flags().IntVar(&projectID, "project-id", 0, "filter by project ID")
 	listCmd.Flags().IntVar(&scheduleID, "schedule-id", 0, "filter by schedule ID")
 	listCmd.Flags().IntVar(&accountID, "account-id", 0, "filter by account ID")
-	listCmd.Flags().IntVar(&pageNum, "page", 0, "page number for pagination (0=first page)")
+	listCmd.Flags().IntVar(&pageNum, "page", 0, "page number, 1-indexed (0 or omit = first page)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		if published && unpublished {
 			fmt.Fprintln(os.Stderr, "error: --published and --unpublished are mutually exclusive")
@@ -339,18 +339,16 @@ func registerProjects(root *cobra.Command) {
 	})
 	var projPage int
 	var projAll bool
-	listCmd.Flags().IntVar(&projPage, "page", 0, "page number (0=first page)")
+	listCmd.Flags().IntVar(&projPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
 	listCmd.Flags().BoolVar(&projAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		if projAll {
-			all, err := c.ListAllProjects(context.Background())
+			all, total, err := c.ListAllProjectsWithTotal(context.Background())
 			die(err)
-			printJSON(map[string]interface{}{
-				"list":        all,
-				"total_rows":  len(all),
-				"is_has_more": false,
-			})
+			env, err := hooppy.NewAllListEnvelope(all, len(all), total)
+			die(err)
+			printJSON(env)
 			return
 		}
 		resp, err := c.ListProjects(context.Background(), projPage)
@@ -431,18 +429,16 @@ func registerSchedules(root *cobra.Command) {
 	})
 	var schedPage int
 	var schedAll bool
-	listCmd.Flags().IntVar(&schedPage, "page", 0, "page number (0=first page)")
+	listCmd.Flags().IntVar(&schedPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
 	listCmd.Flags().BoolVar(&schedAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		if schedAll {
-			all, err := c.ListAllSchedules(context.Background())
+			all, total, err := c.ListAllSchedulesWithTotal(context.Background())
 			die(err)
-			printJSON(map[string]interface{}{
-				"list":        all,
-				"total_rows":  len(all),
-				"is_has_more": false,
-			})
+			env, err := hooppy.NewAllListEnvelope(all, len(all), total)
+			die(err)
+			printJSON(env)
 			return
 		}
 		resp, err := c.ListSchedules(context.Background(), schedPage)
@@ -924,6 +920,10 @@ func registerSearch(root *cobra.Command) {
 			fmt.Fprintln(os.Stderr, "error: --date, --hours, --minutes are required for --when-type 2")
 			os.Exit(1)
 		}
+		if copyWhenType == 3 && len(parseIntList(copySchedules)) == 0 {
+			fmt.Fprintln(os.Stderr, "error: --schedules is required for --when-type 3 (by schedule) — a schedule-driven copy targeted at no schedule publishes to nothing")
+			os.Exit(1)
+		}
 		c := mustClient()
 		payload := hooppy.CopySearchPostPayload{
 			SearchPostID:        copyPostID,
@@ -979,6 +979,10 @@ func registerSearch(root *cobra.Command) {
 		}
 		if rwWhenType == 2 && (rwDate == "" || rwHours == "" || rwMinutes == "") {
 			fmt.Fprintln(os.Stderr, "error: --date, --hours, --minutes are required for --when-type 2")
+			os.Exit(1)
+		}
+		if rwWhenType == 3 && len(parseIntList(rwSchedules)) == 0 {
+			fmt.Fprintln(os.Stderr, "error: --schedules is required for --when-type 3 (by schedule) — a schedule-driven rewrite targeted at no schedule publishes to nothing")
 			os.Exit(1)
 		}
 		c := mustClient()
@@ -1066,6 +1070,10 @@ func registerSearch(root *cobra.Command) {
 	importCmd.Run = func(_ *cobra.Command, _ []string) {
 		if impPostID == 0 {
 			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
+			os.Exit(1)
+		}
+		if impWhenType == 3 && len(parseIntList(impSchedules)) == 0 {
+			fmt.Fprintln(os.Stderr, "error: --schedules is required for --when-type 3 (by schedule) — a schedule-driven import targeted at no schedule publishes to nothing")
 			os.Exit(1)
 		}
 		c := mustClient()

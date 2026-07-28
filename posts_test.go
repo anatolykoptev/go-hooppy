@@ -431,3 +431,179 @@ func TestUpdatePostText_NonScheduleDriven_RecoveredSelection(t *testing.T) {
 		t.Error("must not send selected_pages_ids")
 	}
 }
+
+// TestUpdatePostText_AttachmentsGrouped verifies that UpdatePostText groups
+// mixed singular photo/video attachments (the vocabulary GET /posts/{id}/edit
+// returns for own posts — measured: 20 photo + 1 video across 11 real posts,
+// no pre-grouped "photos" type) into a SINGLE {type: "photos"} attachment in
+// the PUT body, which is what the server accepts.
+//
+// Without SearchPostEditAttachments (e.g. if posts.go used
+// `attachments := edit.Attachments`): the PUT body carries 3 separate
+// {type:"photo"}/{type:"video"} entries and the server rejects them — the
+// bypass test below fails.
+func TestUpdatePostText_AttachmentsGrouped(t *testing.T) {
+	var putBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			// Schedule-driven own post with 2 photos + 1 video as SINGULAR
+			// attachment types (the measured GET /posts/{id}/edit vocabulary).
+			w.Write([]byte(`{
+				"id":42,
+				"publication_when_type":3,
+				"publication_how_type":1,
+				"publication_where_type":1,
+				"created_by":1,
+				"texts":[{"text":"old","source_id":0}],
+				"attachments":[
+					{"type":"photo","data":{"id":"p1","url":"https://example.com/1.jpg","type":"photo"}},
+					{"type":"photo","data":{"id":"p2","url":"https://example.com/2.jpg","type":"photo"}},
+					{"type":"video","data":{"id":"v1","url":"https://example.com/v.mp4","type":"video"}}
+				],
+				"selected_pages_by_source_ids":{},
+				"all_pages_ids_by_source_ids":{},
+				"schedule_id":7,
+				"project_id":0
+			}`))
+		case http.MethodPut:
+			putBody, _ = io.ReadAll(r.Body)
+			w.Write([]byte(`{"success":true}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	if _, err := c.UpdatePostText(context.Background(), 42, "new text"); err != nil {
+		t.Fatalf("UpdatePostText: %v", err)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(putBody, &body); err != nil {
+		t.Fatalf("unmarshal PUT body: %v", err)
+	}
+	atts, ok := body["attachments"].([]interface{})
+	if !ok {
+		t.Fatalf("attachments = %v, want array", body["attachments"])
+	}
+	// Must be exactly ONE attachment: the grouped {type: "photos"}.
+	if len(atts) != 1 {
+		t.Fatalf("len(attachments) = %d, want 1 (photos+video grouped into a single {type:photos}); got %v", len(atts), atts)
+	}
+	grouped, ok := atts[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("attachments[0] = %v, want object", atts[0])
+	}
+	if grouped["type"] != "photos" {
+		t.Errorf("attachments[0].type = %v, want \"photos\" (grouped)", grouped["type"])
+	}
+	// The grouped attachment must carry all 3 data items (2 photos + 1 video).
+	items, ok := grouped["data"].([]interface{})
+	if !ok {
+		t.Fatalf("grouped data = %v, want array", grouped["data"])
+	}
+	if len(items) != 3 {
+		t.Errorf("grouped photos data len = %d, want 3 (2 photos + 1 video)", len(items))
+	}
+	// No bare "photo" or "video" type may survive in the top-level array.
+	for _, a := range atts {
+		if at, _ := a.(map[string]interface{})["type"].(string); at == "photo" || at == "video" {
+			t.Errorf("bare %q attachment leaked into PUT body — must be grouped under {type:photos}", at)
+		}
+	}
+}
+
+// TestUpdatePostText_AttachmentsBypassFails is the falsification guard for
+// the grouping transform: if UpdatePostText is changed to bypass
+// SearchPostEditAttachments (e.g. `attachments := edit.Attachments`), this
+// test fails because the PUT body would carry separate photo/video entries
+// instead of one grouped {type:photos} attachment. It shares the fixture
+// shape with TestUpdatePostText_AttachmentsGrouped but asserts the
+// invariant from the negative direction.
+func TestUpdatePostText_AttachmentsBypassFails(t *testing.T) {
+	var putBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Write([]byte(`{
+				"id":43,
+				"publication_when_type":3,
+				"publication_how_type":1,
+				"publication_where_type":1,
+				"created_by":1,
+				"texts":[{"text":"old","source_id":0}],
+				"attachments":[
+					{"type":"photo","data":{"id":"p1"}},
+					{"type":"video","data":{"id":"v1"}}
+				],
+				"selected_pages_by_source_ids":{},
+				"schedule_id":7,
+				"project_id":0
+			}`))
+		case http.MethodPut:
+			putBody, _ = io.ReadAll(r.Body)
+			w.Write([]byte(`{"success":true}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	if _, err := c.UpdatePostText(context.Background(), 43, "new text"); err != nil {
+		t.Fatalf("UpdatePostText: %v", err)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(putBody, &body); err != nil {
+		t.Fatalf("unmarshal PUT body: %v", err)
+	}
+	atts, _ := body["attachments"].([]interface{})
+	// The transform MUST group: a bypass yields len>1 with bare photo/video.
+	if len(atts) != 1 {
+		t.Fatalf("attachments bypassed: len=%d (separate photo/video entries) — SearchPostEditAttachments must group into one {type:photos}; got %v", len(atts), atts)
+	}
+	if at, _ := atts[0].(map[string]interface{})["type"].(string); at != "photos" {
+		t.Errorf("attachments[0].type = %q, want \"photos\" (grouped)", at)
+	}
+}
+
+// TestUpdatePostText_PreservesProjectID verifies that UpdatePostText sends
+// project_id back in the PUT body, sourced from edit.ProjectID. A
+// project-scoped post must not lose its association through the full-state
+// PUT — the same class of wipe the schedule_id guard exists to prevent.
+func TestUpdatePostText_PreservesProjectID(t *testing.T) {
+	var putBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Write([]byte(`{
+				"id":55,
+				"publication_when_type":3,
+				"publication_how_type":1,
+				"publication_where_type":1,
+				"created_by":1,
+				"texts":[{"text":"old","source_id":0}],
+				"attachments":[],
+				"selected_pages_by_source_ids":{},
+				"schedule_id":7,
+				"project_id":31
+			}`))
+		case http.MethodPut:
+			putBody, _ = io.ReadAll(r.Body)
+			w.Write([]byte(`{"success":true}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	if _, err := c.UpdatePostText(context.Background(), 55, "new text"); err != nil {
+		t.Fatalf("UpdatePostText: %v", err)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(putBody, &body); err != nil {
+		t.Fatalf("unmarshal PUT body: %v", err)
+	}
+	if body["project_id"] != float64(31) {
+		t.Errorf("PUT body project_id = %v, want 31 (must preserve edit.ProjectID)", body["project_id"])
+	}
+	if body["schedule_id"] != float64(7) {
+		t.Errorf("PUT body schedule_id = %v, want 7", body["schedule_id"])
+	}
+}

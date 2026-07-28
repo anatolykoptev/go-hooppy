@@ -598,3 +598,90 @@ func TestScrapedPhotoAttachment(t *testing.T) {
 		t.Errorf("items[0].type = %v, want 'photo'", items[0]["type"])
 	}
 }
+
+// TestImportSearchPost_ScheduleDrivenNoSchedules verifies the fail-closed
+// guard: a schedule-driven import (publication_when_type=3) targeted at an
+// EMPTY schedules list issues NO request and returns an error, rather than
+// sending a PUT with schedules_ids=[] — a schedule-driven import targeted at
+// nothing.
+//
+// Without the guard: ImportSearchPost normalises nil schedules to []int{}
+// and issues the PUT, which the server may accept and silently publish to
+// nothing.
+func TestImportSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":7001}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        2003,
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        nil, // empty — the bug default
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected fail-closed error for when_type=3 with empty schedules, got nil")
+	}
+	if requestMade {
+		t.Fatal("ImportSearchPost issued a request despite when_type=3 + empty schedules — must fail before any request")
+	}
+	if !contains(err.Error(), "schedule") {
+		t.Errorf("error must explain the schedule requirement, got: %v", err)
+	}
+}
+
+// TestCopySearchPost_ScheduleDrivenNoSchedules mirrors the import guard for
+// the copy endpoint: when_type=3 + empty schedules must fail closed.
+func TestCopySearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":7002}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        2004,
+		PublicationWhenType: 3,
+		PublicationHowType:  1,
+		SchedulesIDs:        []int{}, // explicit empty
+	})
+	if err == nil {
+		t.Fatal("expected fail-closed error for when_type=3 with empty schedules, got nil")
+	}
+	if requestMade {
+		t.Fatal("CopySearchPost issued a request despite when_type=3 + empty schedules")
+	}
+}
+
+// TestRewriteSearchPost_ScheduleDrivenNoSchedules mirrors the guard for the
+// rewrite endpoint: when_type=3 + empty schedules must fail closed.
+func TestRewriteSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":7003}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        2005,
+		PublicationWhenType: 3,
+		PublicationHowType:  1,
+		SchedulesIDs:        nil,
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected fail-closed error for when_type=3 with empty schedules, got nil")
+	}
+	if requestMade {
+		t.Fatal("RewriteSearchPost issued a request despite when_type=3 + empty schedules")
+	}
+}

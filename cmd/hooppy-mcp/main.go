@@ -181,19 +181,39 @@ type listPostsInput struct {
 	PageID          int    `json:"page_id,omitempty" jsonschema:"Filter by group/page ID."`
 	ScheduleID      int    `json:"schedule_id,omitempty" jsonschema:"Filter by schedule ID."`
 	ProjectID       int    `json:"project_id,omitempty" jsonschema:"Filter by project ID."`
-	Page            int    `json:"page,omitempty" jsonschema:"Page number for pagination (0=first page)."`
+	Page            int    `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page)."`
+	All             bool   `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page."`
 }
 
 func registerListPosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_posts",
-			Description: "List posts on Hooppy with optional filters by status, date, social network, account, page, schedule, or project.",
+			Description: "List posts on Hooppy with optional filters by status, date, social network, account, page, schedule, or project. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listPostsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
+			}
+			if in.All {
+				all, total, err := c.ListAllPostsWithTotal(ctx, hooppy.ListPostsFilter{
+					IsPublished:     in.IsPublished,
+					PublicationDate: in.PublicationDate,
+					SourceID:        in.SourceID,
+					AccountID:       in.AccountID,
+					PageID:          in.PageID,
+					ScheduleID:      in.ScheduleID,
+					ProjectID:       in.ProjectID,
+				})
+				if err != nil {
+					return errResult(err.Error())
+				}
+				env, err := hooppy.NewAllListEnvelope(all, len(all), total)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
 			}
 			resp, err := c.ListPosts(ctx, hooppy.ListPostsFilter{
 				IsPublished:     in.IsPublished,
@@ -402,7 +422,7 @@ func registerUploadDocument(server *mcp.Server) {
 // --- list_projects ---
 
 type listProjectsInput struct {
-	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination (0=first page, 20 rows per page). Omit for first page."`
+	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
 	All  bool `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page."`
 }
 
@@ -410,7 +430,7 @@ func registerListProjects(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_projects",
-			Description: "List post projects on Hooppy. Projects group posts for multi-platform publishing. Returns 20 rows per page; use page to paginate, or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
+			Description: "List post projects on Hooppy. Projects group posts for multi-platform publishing. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listProjectsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -418,15 +438,15 @@ func registerListProjects(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			if in.All {
-				all, err := c.ListAllProjects(ctx)
+				all, total, err := c.ListAllProjectsWithTotal(ctx)
 				if err != nil {
 					return errResult(err.Error())
 				}
-				return jsonResult(map[string]interface{}{
-					"list":        all,
-					"total_rows":  len(all),
-					"is_has_more": false,
-				})
+				env, err := hooppy.NewAllListEnvelope(all, len(all), total)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
 			}
 			resp, err := c.ListProjects(ctx, in.Page)
 			if err != nil {
@@ -440,7 +460,7 @@ func registerListProjects(server *mcp.Server) {
 // --- list_schedules ---
 
 type listSchedulesInput struct {
-	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination (0=first page, 20 rows per page). Omit for first page."`
+	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
 	All  bool `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page."`
 }
 
@@ -448,7 +468,7 @@ func registerListSchedules(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_schedules",
-			Description: "List publication schedules on Hooppy. Schedules define recurring publication plans. Returns 20 rows per page; use page to paginate, or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
+			Description: "List publication schedules on Hooppy. Schedules define recurring publication plans. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listSchedulesInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -456,15 +476,15 @@ func registerListSchedules(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			if in.All {
-				all, err := c.ListAllSchedules(ctx)
+				all, total, err := c.ListAllSchedulesWithTotal(ctx)
 				if err != nil {
 					return errResult(err.Error())
 				}
-				return jsonResult(map[string]interface{}{
-					"list":        all,
-					"total_rows":  len(all),
-					"is_has_more": false,
-				})
+				env, err := hooppy.NewAllListEnvelope(all, len(all), total)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
 			}
 			resp, err := c.ListSchedules(ctx, in.Page)
 			if err != nil {
