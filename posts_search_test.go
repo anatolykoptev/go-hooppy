@@ -107,10 +107,19 @@ func TestListSearchPosts_SortingAndContent(t *testing.T) {
 // min_* metric threshold flags (min_likes, min_views, min_comments,
 // min_reposts, min_involvement) are NOT server-side filters — the API
 // silently ignores them and returns an unfiltered result set. The library
-// now refuses them before any request is issued, pointing the caller at
+// refuses them before any request is issued, pointing the caller at
 // --sort-by, which does work server-side. The flags stay registered (a flag
 // that errors with an explanation is strictly better than one that lies),
-// so this is NOT a breaking change.
+// so this is source-compatible but BEHAVIOUR-CHANGING: a caller that
+// previously passed MinViews: 100 got a result set and now gets an error
+// (see CHANGELOG). The guard fires on any non-zero value, including
+// negatives — a computed threshold like avg-stddev going negative must not
+// silently fall through to an unfiltered result (issue #65 item 4).
+//
+// The load-bearing property — refusal happens BEFORE any request is issued
+// — is pinned by a reached flag in the stub handler: a refactor that issues
+// the GET and then errors keeps err != nil but trips the reached assertion
+// (issue #65 item 5).
 func TestListSearchPosts_MetricFiltersRejected(t *testing.T) {
 	cases := []struct {
 		name string
@@ -121,9 +130,22 @@ func TestListSearchPosts_MetricFiltersRejected(t *testing.T) {
 		{"MinComments", SearchPostsFilter{MinComments: 10}},
 		{"MinReposts", SearchPostsFilter{MinReposts: 5}},
 		{"MinInvolvement", SearchPostsFilter{MinInvolvement: 10.5}},
+		// Negative thresholds must be refused too: a caller passing -1
+		// (directly, or from a computed threshold like avg-stddev going
+		// negative) took neither branch of the old > 0 guard — no error, no
+		// parameter, an unfiltered result while the help promised the flag
+		// errors. Same shape as the original defect.
+		{"MinLikes negative", SearchPostsFilter{MinLikes: -1}},
+		{"MinViews negative", SearchPostsFilter{MinViews: -100}},
+		{"MinComments negative", SearchPostsFilter{MinComments: -10}},
+		{"MinReposts negative", SearchPostsFilter{MinReposts: -5}},
+		{"MinInvolvement negative", SearchPostsFilter{MinInvolvement: -0.5}},
 	}
 	// A server that, if ever reached, would lie that the filter was applied.
+	// reached MUST stay false for every case — refusal is before any request.
+	reached := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
 		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
 	}))
 	defer srv.Close()
@@ -131,9 +153,13 @@ func TestListSearchPosts_MetricFiltersRejected(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			reached = false
 			_, err := c.ListSearchPosts(context.Background(), tc.f)
 			if err == nil {
 				t.Fatalf("ListSearchPosts with %s: expected an error refusing the metric threshold filter, got nil — the API has no such server-side parameter and would silently return an unfiltered result", tc.name)
+			}
+			if reached {
+				t.Fatalf("ListSearchPosts with %s: the refusal guard issued a request before erroring — refusal MUST happen before any request is issued (issue #65 item 5)", tc.name)
 			}
 		})
 	}

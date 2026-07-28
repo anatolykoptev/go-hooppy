@@ -189,6 +189,11 @@ func TestSearchPost_ParseMetrics(t *testing.T) {
 		{"zero", "0", 0},
 		{"empty string", "", 0},
 		{"malformed", "12abc", -1}, // -1 sentinel: expect an error, not 0
+		// Decimal-comma / non-thousands-grouped comma forms MUST error: the
+		// vendor is a Russian-language service where comma is the decimal
+		// separator, and stripping the comma before Atoi would silently turn
+		// "1,2,3" into 123 with no error (issue #65 item 1).
+		{"comma-grouped malformed", "1,2,3", -1},
 	}
 	parsers := []struct {
 		name string
@@ -235,6 +240,14 @@ func TestSearchPost_ParseMetrics(t *testing.T) {
 		{"zero", "0", 0},
 		{"empty string", "", 0},
 		{"malformed", "0.5abc", -1}, // -1 sentinel: expect an error
+		// Decimal-comma forms MUST error, not silently parse to a 1000×-wrong
+		// value: in the vendor's Russian locale "0,520" is the ratio 0.520,
+		// but stripping the comma yields "0520" → 520.0 with err==nil — the
+		// exact silent-wrongness class this accessor exists to prevent
+		// (issue #65 item 1). A space-separated thousands form is also
+		// rejected (the strip only handles commas).
+		{"decimal comma", "0,520", -1},
+		{"space-separated thousands", "1 234", -1},
 	}
 	for _, tc := range floatCases {
 		t.Run("InvolvementFloat/"+tc.name, func(t *testing.T) {

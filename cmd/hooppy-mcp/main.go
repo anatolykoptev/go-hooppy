@@ -1019,8 +1019,8 @@ type listSearchPostsInput struct {
 	MinComments         int     `json:"min_comments,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-comments filter; use sort_by=comments instead. Setting this errors."`
 	MinReposts          int     `json:"min_reposts,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-reposts filter; use sort_by=reposts instead. Setting this errors."`
 	MinInvolvement      float64 `json:"min_involvement,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-involvement filter; use sort_by=involvement instead. Setting this errors."`
-	PhotosAmount        int     `json:"photos_amount,omitempty" jsonschema:"Exact photo count. 0=no filter."`
-	VideoDuration       int     `json:"video_duration,omitempty" jsonschema:"Video duration bucket (see filters_plug values in the response). 0=no filter."`
+	PhotosAmount        int     `json:"photos_amount,omitempty" jsonschema:"Photo count bucket. Measured against a live account to filter the result set (unset 10000; =1 -> 9297; =5 -> 566). The filters_plug values array is empty, so valid keys are not discoverable from the descriptor; pass the integer key the vendor's UI selects. 0=no filter."`
+	VideoDuration       int     `json:"video_duration,omitempty" jsonschema:"Video duration bucket. Measured against a live account (video content only): keys 1-4 are accepted and each changes the result set (unset 4194; =1 -> 710; =2 -> 159; =3 -> 3525; =4 -> 4036; counts overlap, so these are overlapping/cumulative ranges, not disjoint buckets). The vendor does not document the range semantics and the filters_plug values array is empty, so the meaning of each key is unknown — no labels are inferred. 0=no filter."`
 	ContentTypes        string  `json:"content_types,omitempty" jsonschema:"Comma-separated content types to include: photos, videos, audios, documents, links (AND filter)."`
 	ContentTypesExclude string  `json:"content_types_exclude,omitempty" jsonschema:"Comma-separated content types to exclude."`
 }
@@ -1029,7 +1029,7 @@ func registerListSearchPosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_search_posts",
-			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. Supports sorting and filtering by metrics (likes, views, comments, reposts, involvement) and content types. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. Supports sorting by metrics (sort_by: likes, views, comments, reposts, involvement) and filtering by content types, photo count, and video duration. Metric THRESHOLD filters (min_likes/min_views/min_comments/min_reposts/min_involvement) are NOT server-side — the API silently ignores them; setting any of them errors, so use sort_by to rank by a metric instead. UNDOCUMENTED endpoint — may change without notice.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listSearchPostsInput) (*mcp.CallToolResult, error) {
 			c, err := client()

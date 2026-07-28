@@ -28,7 +28,11 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	// has no such server-side parameters, so emitting them would silently
 	// return an unfiltered result set that looks filtered. Sorting by the
 	// same metric (SortBy) is the supported path and works server-side.
-	if f.MinLikes > 0 || f.MinViews > 0 || f.MinComments > 0 || f.MinReposts > 0 || f.MinInvolvement > 0 {
+	// Guard on != 0 (not > 0) so a negative threshold — passed directly or
+	// produced by a computed threshold like avg-stddev going negative — is
+	// refused too; the old > 0 guard let negatives fall through to an
+	// unfiltered result while the help promised the flag errors.
+	if f.MinLikes != 0 || f.MinViews != 0 || f.MinComments != 0 || f.MinReposts != 0 || f.MinInvolvement != 0 {
 		return nil, fmt.Errorf("hooppy: ListSearchPosts: min_likes/min_views/min_comments/min_reposts/min_involvement are not server-side filters — the API silently ignores them and returns an unfiltered result set; use sort_by (likes|views|reposts|comments|involvement) instead, which does work server-side (issue #63)")
 	}
 	params := url.Values{}
@@ -72,6 +76,15 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	//     `text` is accepted (returns the unfiltered count).
 	//   - photos_amount and video_duration ship values: [] (empty), so the
 	//     valid keys are NOT discoverable from the descriptor at all.
+	//     Measured on a live account (video content only), video_duration
+	//     accepts keys 1-4 and each changes the result set: unset 4194;
+	//     =1 → 710; =2 → 159; =3 → 3525; =4 → 4036. The counts overlap
+	//     (3 and 4 alone exceed the unfiltered total), so these are
+	//     overlapping or cumulative ranges, not disjoint buckets. The
+	//     vendor does not document the range semantics, so the meaning of
+	//     each key is unknown — no labels (short/medium/long, etc.) are
+	//     inferred. photos_amount was measured too and also filters
+	//     (unset 10000; =1 → 9297; =5 → 566).
 	// A value absent from `values` may still work; an empty `values` array
 	// does NOT mean the filter takes no argument. We therefore pass caller
 	// strings through verbatim and never hardcode a value enum.

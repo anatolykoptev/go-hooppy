@@ -3,6 +3,7 @@ package hooppy
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -705,8 +706,8 @@ type SearchPostsFilter struct {
 	MinReposts     int
 	MinInvolvement float64
 	// Content filters (empirically verified).
-	PhotosAmount        int    // exact photo count
-	VideoDuration       int    // video duration bucket (values from filters_plug descriptor)
+	PhotosAmount        int    // photo count bucket; measured to filter the result set (filters_plug values:[] — keys not discoverable from the descriptor)
+	VideoDuration       int    // video duration bucket; measured (video content only) that keys 1-4 are accepted and each changes the result set — counts overlap so these are overlapping/cumulative ranges, not disjoint buckets; the vendor does not document the range semantics and filters_plug values:[] is empty, so the meaning of each key is unknown
 	ContentTypes        string // comma-separated: photos, videos, audios, documents, links (AND filter)
 	ContentTypesExclude string // comma-separated — exclude posts with these types
 }
@@ -828,15 +829,35 @@ func (p SearchPost) InvolvementFloat() (float64, error) {
 	return parseMetricFloat("involvement", p.Involvement)
 }
 
+// metricShapeRe pins the wire format the parse accessors accept BEFORE any
+// comma-stripping. The shape is: an optional sign, then either a plain
+// decimal (0, 864, 0.520, 2.0) or a comma-thousands-grouped integer part
+// (1,520 / 334,881 / 1,234.56). A leading-zero head followed by a comma
+// (e.g. "0,520") is REJECTED: the vendor is a Russian-language service
+// where the comma is the decimal separator, so "0,520" is the ratio 0.520,
+// not 520 — and stripping the comma before ParseFloat would yield 520.0
+// with err==nil, the exact 1000×-wrong silent value this accessor exists
+// to prevent. Thousands grouping never writes a leading zero before the
+// comma, so rejecting this shape costs nothing. Non-thousands-grouped
+// comma forms ("1,2,3", "3,14") and other-locale separators ("1 234",
+// "1.234,56") are rejected too. See issue #65 item 1.
+var metricShapeRe = regexp.MustCompile(`^[+-]?(0(\.\d+)?|[1-9]\d{0,2}(,\d{3})*(\.\d+)?)$`)
+
 // parseMetricInt strips the observed thousands separator (comma) and parses
 // an integer metric string as sent by the server (e.g. "334,881" → 334881).
 // An empty string is treated as 0 (the server sends "" for absent metrics).
-// Any other unparseable form — including an unexpected separator from a
-// different locale — returns an error rather than a silent 0, so a caller
-// cannot accidentally rank on a wrong value.
+// The shape is validated BEFORE stripping so a decimal-comma form (which the
+// Russian-language vendor uses as its decimal separator) is rejected rather
+// than silently parsed to a wrong value. Any other unparseable form —
+// including an unexpected separator from a different locale — returns an
+// error rather than a silent 0, so a caller cannot accidentally rank on a
+// wrong value.
 func parseMetricInt(name, v string) (int, error) {
 	if v == "" {
 		return 0, nil
+	}
+	if !metricShapeRe.MatchString(v) {
+		return 0, fmt.Errorf("hooppy: SearchPost.%s: parse %q: not a well-formed metric (expected a plain or comma-thousands-grouped number; a decimal comma is not accepted — the vendor's locale uses comma as the decimal separator)", name, v)
 	}
 	s := strings.ReplaceAll(v, ",", "")
 	n, err := strconv.Atoi(s)
@@ -848,10 +869,16 @@ func parseMetricInt(name, v string) (int, error) {
 
 // parseMetricFloat strips the observed thousands separator (comma) and parses
 // a decimal metric string (involvement is a ratio, e.g. "0.520" or "1,234.56").
-// Same error discipline as parseMetricInt.
+// The shape is validated BEFORE stripping so a decimal-comma form (e.g.
+// "0,520", which the Russian-language vendor emits as the ratio 0.520) is
+// rejected rather than silently parsed to 520.0 — a 1000×-wrong value with
+// err==nil. Same error discipline as parseMetricInt.
 func parseMetricFloat(name, v string) (float64, error) {
 	if v == "" {
 		return 0, nil
+	}
+	if !metricShapeRe.MatchString(v) {
+		return 0, fmt.Errorf("hooppy: SearchPost.%s: parse %q: not a well-formed metric (expected a plain or comma-thousands-grouped number; a decimal comma is not accepted — the vendor's locale uses comma as the decimal separator)", name, v)
 	}
 	s := strings.ReplaceAll(v, ",", "")
 	f, err := strconv.ParseFloat(s, 64)

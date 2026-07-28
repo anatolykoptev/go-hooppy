@@ -26,11 +26,14 @@
 * `APIError` struct gains a `RetryAfter time.Duration` field (additive, zero value = no behavior change).
 * `Schedule` struct expanded with `UserID`, `Position`, `State`, `StopDate`, `StartDate`, `IsDeleted`, `PublicationHowType`, `PublicationWhereType` fields (additive, omitempty).
 * `ScheduleResponse` includes `Success` bool field (returned by DELETE).
+* **BEHAVIOUR CHANGE — `ListSearchPosts` metric threshold filters now error** (#63, #65): the five `min_*` fields on `SearchPostsFilter` (`MinLikes`, `MinViews`, `MinComments`, `MinReposts`, `MinInvolvement`) are NOT server-side filters — the Hooppy API silently ignores them and returns an unfiltered result set that looks filtered. `ListSearchPosts` now refuses any non-zero value (including negatives) with an error before issuing a request, pointing the caller at `SortBy` (likes|views|reposts|comments|involvement), which does work server-side. The fields stay on the struct (source-compatible — existing code still compiles), but this is BEHAVIOUR-CHANGING: a consumer that previously called `ListSearchPosts` with `MinViews: 100` got a result set and now gets an error. Under `release-please` this ships as a `fix:` patch bump; callers must remove the `min_*` arguments and switch to `SortBy`. The CLI flags (`--min-likes`, etc.) and MCP tool fields are kept and now error with an explanation.
 
 ### Fixed
 
 * **TOCTOU in `openFileForUpload`** (#40): file is now opened BEFORE the stat/size check (was stat-then-open, allowing symlink swap between calls).
 * **Goroutine leak in `doMultipartStream`** (#41): `pr.Close()` is now called on `NewRequestWithContext` failure to unblock the writer goroutine (was leaking on the request-build error path).
+* **`parseMetricFloat`/`parseMetricInt` silent 1000×-wrong value on a decimal comma** (#65): the accessors stripped commas before `ParseFloat`/`Atoi`, so a decimal-comma string from the vendor's Russian locale (`"0,520"` = the ratio 0.520) silently became `520.0` with `err==nil`, and `"1,2,3"` became `123` on the int path — the exact silent-wrongness class these accessors exist to prevent. The shape is now validated BEFORE stripping: only a plain decimal or a comma-thousands-grouped number is accepted; a leading-zero head followed by a comma (`"0,520"`), non-thousands-grouped commas (`"1,2,3"`, `"3,14"`), and other-locale separators (`"1 234"`, `"1.234,56"`) return an error.
+* **Negative metric thresholds fell through the refusal guard** (#65): the guard used `> 0`, so a caller passing `-1` (directly, or from a computed threshold like `avg-stddev` going negative) took neither branch — no error, no parameter, an unfiltered result while the help stated the flag errors. The guard now fires on `!= 0` for the four ints and the float.
 ## 1.0.0 (2026-07-28)
 
 
