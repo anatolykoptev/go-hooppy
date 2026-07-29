@@ -3,11 +3,8 @@ package hooppy
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
-
-	"github.com/anatolykoptev/go-kit/retry"
 )
 
 // fillScheduleSlots reads back the publication slot(s) the server assigned
@@ -17,22 +14,26 @@ import (
 // id because a follow-up read failed is strictly worse than today's
 // behaviour (the post exists; a lookup failure is a reporting problem).
 //
-// Single-post path (resp.ID != 0): the server returned {"id": ...} — one
-// GetPostEdit call reads the slot structurally as *PublicationDate
-// ({date, hours, minutes}) plus schedule_id. The date is returned directly
-// by the server in dd.mm.yyyy format — no timezone conversion is needed.
+// BOTH the single-post and the batch case use ONE mechanism: the schedule
+// snapshot-diff over ListAllPostsWithTotal. A single create is a batch of
+// one — there is no reason for two mechanisms, and the second one does not
+// work. The caller snapshots the schedule's post ids BEFORE the create
+// (beforeSnapshot, via ListAllPostsWithTotal filtered by schedule_id), and
+// this method snapshots AFTER the create, then computes created = after -
+// before. This is correct regardless of the list's sort order, page size,
+// or how many posts the schedule already holds, and regardless of whether
+// the server returned {"id": ...} (single) or {"success": true} (batch).
 //
-// Batch path (resp.ID == 0): the server returns {"success": true} for a
-// batch create — NO id, NO ids. The created post ids are recovered via a
-// snapshot-diff: the caller snapshots the schedule's post ids BEFORE the
-// create (beforeSnapshot, via ListPosts filtered by schedule_id), and this
-// method snapshots AFTER the create, then computes created = after - before.
-// This is correct regardless of the list's sort order, page size, or how
-// many posts the schedule already holds. It costs two list walks (before +
-// after) instead of one; the cheaper "take the N newest" was rejected
-// because ListPostsFilter has no sort parameter, the server's default order
-// is unspecified, and the list is paginated — every version of that idea
-// depends on an assumption we have not measured.
+// WHY the list surface and not GET /posts/{id}/edit: immediately after a
+// create, GET /posts/{id}/edit returns HTTP 403 "The post is processing and
+// cannot be edited" for roughly a minute (measured ~52s on a real create)
+// while the server processes attachments. The list surface returns the
+// slot immediately, with no processing window — proven by the batch path
+// in the same run, seconds after the same kind of create. A bounded retry
+// on /edit was an order of magnitude short of the real window (6s budget
+// vs ~52s) and blocking a CLI import for a minute to report a field is a
+// worse product than not reporting it; the retry machinery was deleted
+// rather than tuned, because the correct source does not have the problem.
 //
 // Count guard: if len(created) != idsSentCount, do NOT guess — a concurrent
 // create by another client is the obvious way this diverges, and quietly
@@ -85,29 +86,17 @@ func (c *Client) fillScheduleSlots(ctx context.Context, resp *PostIDResponse, wh
 		resp.ScheduleID = scheduleIDs[0]
 	}
 
-	// Single-post path: server returned an id.
-	if resp.ID != 0 {
-		edit, err := c.getPostEditWithProcessingRetry(ctx, resp.ID)
-		if err != nil {
-			resp.SlotLookupError = fmt.Sprintf("slot lookup: GetPostEdit(%d): %v", resp.ID, err)
-			return
-		}
-		resp.PublicationDate = edit.PublicationDate
-		if edit.ScheduleID != 0 {
-			resp.ScheduleID = edit.ScheduleID
-		}
-		return
-	}
-
-	// Batch path: server returned {"success": true} — no id, no ids.
-	// Recover the created ids via snapshot-diff.
+	// One path for single and batch: recover the created ids via
+	// snapshot-diff. See the fillScheduleSlots doc comment for WHY the
+	// list surface is used instead of GET /posts/{id}/edit (403 processing
+	// window ~1 min on /edit; list returns the slot immediately).
 	c.fillBatchSlotsBySnapshotDiff(ctx, resp, scheduleIDs, beforeSnapshot, beforeErr, idsSentCount)
 }
 
-// fillBatchSlotsBySnapshotDiff recovers the created post ids for a batch
-// by diffing the schedule's post list after the create against the before
-// snapshot taken by the caller. See fillScheduleSlots for the full design
-// rationale.
+// fillBatchSlotsBySnapshotDiff recovers the created post ids by diffing
+// the schedule's post list after the create against the before snapshot
+// taken by the caller. Used for BOTH single and batch creates (a single is
+// a batch of one). See fillScheduleSlots for the full design rationale.
 func (c *Client) fillBatchSlotsBySnapshotDiff(ctx context.Context, resp *PostIDResponse, scheduleIDs []int, before []Post, beforeErr error, idsSentCount int) {
 	if len(scheduleIDs) == 0 {
 		resp.SlotLookupError = "slot lookup: batch path requires at least one schedule ID to filter the list"
@@ -296,75 +285,4 @@ func (c *Client) fetchTimezoneOffset(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("GetSettings: %w", err)
 	}
 	return settings.TimezoneOffset, nil
-}
-
-// getPostEditWithProcessingRetry wraps GetPostEdit with a bounded retry for
-// the 403-still-processing condition. Immediately after a single-post
-// create, GET /posts/{id}/edit often returns HTTP 403 with a body
-// indicating the post is still being processed server-side (attachments
-// downloading, etc.). This is a transient condition that resolves in
-// seconds — not a permissions 403. A real permissions 403 (insufficient
-// plan, no access) would be consistent across retries and is NOT retried
-// (isProcessing403 checks the body for processing indicators).
-//
-// The retry is bounded: 4 attempts, 500ms initial delay, exponential
-// backoff, 3s max delay, 6s total budget. This is short enough to not
-// block a CLI caller perceptibly while covering the typical 1-3s processing
-// window. A non-processing 403 (or any non-403 error) is returned
-// immediately — only the processing-403 is retried.
-//
-// This retry is ONLY on the slot read-back path (fillScheduleSlots → single
-// post). GetPostEdit itself is not retried — callers who call GetPostEdit
-// directly get the raw server response.
-func (c *Client) getPostEditWithProcessingRetry(ctx context.Context, postID int) (*PostEditResponse, error) {
-	return retry.Do(ctx, retry.Options{
-		MaxAttempts:    4,
-		InitialDelay:   500 * time.Millisecond,
-		MaxDelay:       3 * time.Second,
-		MaxElapsedTime: 6 * time.Second,
-	}, func() (*PostEditResponse, error) {
-		edit, err := c.GetPostEdit(ctx, postID)
-		if err != nil {
-			if isProcessing403(err) {
-				return nil, err // retryable — retry.Do will retry
-			}
-			return nil, retry.Permanent(err) // non-processing error — stop immediately
-		}
-		return edit, nil
-	})
-}
-
-// isProcessing403 reports whether err is an APIError with HTTP 403 whose
-// body indicates the post is still being processed server-side (a transient
-// condition, not a permissions denial). The check is on the error message
-// (extracted from {"message": "..."} or {"error": "..."} by newAPIError)
-// and the raw body, matching common processing indicators in English and
-// Russian (Hooppy is a Russian service). A 403 without a processing
-// indicator is treated as a real permissions error and NOT retried.
-func isProcessing403(err error) bool {
-	ae, ok := err.(*APIError)
-	if !ok || ae.StatusCode != http.StatusForbidden {
-		return false
-	}
-	haystack := strings.ToLower(ae.Message + " " + string(ae.Body))
-	for _, indicator := range processing403Indicators {
-		if strings.Contains(haystack, indicator) {
-			return true
-		}
-	}
-	return false
-}
-
-// processing403Indicators are lowercase substrings that indicate a 403 is
-// transient (post still processing), not a permissions denial. Covers
-// English and Russian (Hooppy is a Russian service).
-var processing403Indicators = []string{
-	"process",
-	"processing",
-	"обрабатыва", // обрабатывается, обрабатывается...
-	"обработк",   // обработка, обработке...
-	"not ready",
-	"still",
-	"загружает", // загружается (downloading)
-	"загрузк",   // загрузка, загрузке...
 }

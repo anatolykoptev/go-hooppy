@@ -280,28 +280,54 @@ func TestGetScheduleEdit_DecodeRealCapture(t *testing.T) {
 // --- Slot reporting tests ---
 
 // TestImportSearchPost_SlotReported verifies that a single import into a
-// schedule (when_type=3) reads back the assigned slot from GET /posts/{id}/edit
-// and populates PublicationDate + ScheduleID on the response.
+// schedule (when_type=3) recovers the assigned slot via the schedule
+// snapshot-diff over the list surface — the SAME mechanism the batch path
+// uses. A single create is a batch of one: the before snapshot is empty,
+// the after snapshot carries the one created post, the diff recovers it,
+// and the slot (hours/minutes from the time field, date from the timestamp
+// at the account offset) is reported.
+//
+// The stub asserts NO call reaches /posts/{id}/edit on the single path —
+// that is the regression guard. GET /posts/{id}/edit returns 403 "post is
+// processing" for ~1 min after a create; the list surface returns the slot
+// immediately. A test that merely checked the slot appears would pass with
+// the old /edit path restored (against a stub that answers /edit), so the
+// no-/edit-call assertion is what makes this a real guard.
+//
+// RED-on-revert: restore the single-path GetPostEdit branch and the stub's
+// /edit handler will be hit → editCalls != 0 → test fails.
 func TestImportSearchPost_SlotReported(t *testing.T) {
+	var listCalls int32
+	var editCalls int32
+	var settingsCalls int32
+	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			// Single create: server returns {"id": ...}.
+			atomic.StoreInt32(&createCalled, 1)
 			w.Write([]byte(`{"id":92820377}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			atomic.AddInt32(&settingsCalls, 1)
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[{"id":101,"name":"(GMT+03:00) SPb"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			atomic.AddInt32(&listCalls, 1)
+			if atomic.LoadInt32(&createCalled) == 0 {
+				// Before snapshot: empty schedule.
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				// After snapshot: 1 created post.
+				// 1753770300 = 2025-07-29 06:25:00 UTC → +3 = 09:25 local → date 29.07.2025.
+				// time field "14:25" → hours 14, minutes 25 (independent of timestamp).
+				w.Write([]byte(`{"list":[
+					{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],"total_rows":1,"is_has_more":false,"rows_limit":20}`))
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
-			w.Write([]byte(`{
-				"id": 92820377,
-				"publication_when_type": 3,
-				"publication_how_type": 1,
-				"publication_where_type": 1,
-				"publication_date": {"date":"31.07.2026","hours":"14","minutes":"25"},
-				"created_by": 1,
-				"texts": [],
-				"attachments": [],
-				"selected_pages_by_source_ids": {},
-				"all_pages_ids_by_source_ids": {},
-				"schedule_id": 55,
-				"project_id": 0
-			}`))
+			// MUST NOT be called — the single path uses the list snapshot-diff.
+			atomic.AddInt32(&editCalls, 1)
+			t.Errorf("unexpected /posts/92820377/edit call — single path must use the list snapshot-diff, not GET /posts/{id}/edit")
+			w.Write([]byte(`{"id":92820377,"publication_date":{"date":"31.07.2026","hours":"14","minutes":"25"},"schedule_id":55}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -319,14 +345,17 @@ func TestImportSearchPost_SlotReported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportSearchPost: %v", err)
 	}
+	// ID set (server-returned id, confirmed by the diff).
 	if resp.ID != 92820377 {
 		t.Errorf("ID = %d, want 92820377", resp.ID)
 	}
-	if resp.PublicationDate == nil {
-		t.Fatal("PublicationDate = nil, want the slot from the read-back")
+	// IDs carries exactly one id (the single create recovered as a batch of one).
+	if len(resp.IDs) != 1 || resp.IDs[0] != 92820377 {
+		t.Errorf("IDs = %v, want [92820377] (single create = batch of one)", resp.IDs)
 	}
-	if got, want := resp.PublicationDate.Date, "31.07.2026"; got != want {
-		t.Errorf("PublicationDate.Date = %q, want %q", got, want)
+	// Slot reported from the list snapshot.
+	if resp.PublicationDate == nil {
+		t.Fatal("PublicationDate = nil, want the slot from the list snapshot-diff")
 	}
 	if got, want := resp.PublicationDate.Hours, "14"; got != want {
 		t.Errorf("PublicationDate.Hours = %q, want %q", got, want)
@@ -334,11 +363,28 @@ func TestImportSearchPost_SlotReported(t *testing.T) {
 	if got, want := resp.PublicationDate.Minutes, "25"; got != want {
 		t.Errorf("PublicationDate.Minutes = %q, want %q", got, want)
 	}
+	// Date from the timestamp at offset +3 (29.07.2025, not UTC 29.07.2025 —
+	// same calendar day here, but the offset path is exercised).
+	if got, want := resp.PublicationDate.Date, "29.07.2025"; got != want {
+		t.Errorf("PublicationDate.Date = %q, want %q (timestamp 1753770300 at offset +3)", got, want)
+	}
 	if resp.ScheduleID != 55 {
 		t.Errorf("ScheduleID = %d, want 55", resp.ScheduleID)
 	}
 	if resp.SlotLookupError != "" {
 		t.Errorf("SlotLookupError = %q, want empty", resp.SlotLookupError)
+	}
+	// Regression guard: NO /posts/{id}/edit call on the single path.
+	if got := atomic.LoadInt32(&editCalls); got != 0 {
+		t.Errorf("GetPostEdit calls = %d, want 0 (single path uses list snapshot-diff, not /posts/{id}/edit)", got)
+	}
+	// At least 2 list calls (before + after snapshots).
+	if got := atomic.LoadInt32(&listCalls); got < 2 {
+		t.Errorf("ListPosts calls = %d, want >= 2 (before + after snapshots)", got)
+	}
+	// ONE settings call.
+	if got := atomic.LoadInt32(&settingsCalls); got != 1 {
+		t.Errorf("GetSettings calls = %d, want 1 (offset fetched once)", got)
 	}
 }
 
@@ -477,17 +523,38 @@ func TestImportSearchPost_BatchSlotSnapshotDiff(t *testing.T) {
 	}
 }
 
-// TestImportSearchPost_SlotLookupFails verifies that a failed read-back
-// (stub 500) does NOT fail the import: the id is still returned,
-// SlotLookupError is set, and the method returns nil error (exit zero).
+// TestImportSearchPost_SlotLookupFails verifies that a failed snapshot-diff
+// on a SINGLE create (stub 500 on the after-snapshot list) does NOT fail
+// the import: the server-returned id is still returned, SlotLookupError is
+// set, and the method returns nil error (exit zero). The posts exist; this
+// is reporting.
+//
+// RED-on-revert: this is the single-path failure contract under the unified
+// snapshot-diff. The stub asserts NO /posts/{id}/edit call — the failure
+// comes from the list, not /edit.
 func TestImportSearchPost_SlotLookupFails(t *testing.T) {
+	var editCalls int32
+	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			atomic.StoreInt32(&createCalled, 1)
 			w.Write([]byte(`{"id":92820377}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			if atomic.LoadInt32(&createCalled) == 0 {
+				// Before snapshot succeeds (empty).
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				// After snapshot fails (500).
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"server error"}`))
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
+			atomic.AddInt32(&editCalls, 1)
+			t.Errorf("unexpected /posts/92820377/edit call — single path uses the list snapshot-diff")
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error":"server error"}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -505,162 +572,19 @@ func TestImportSearchPost_SlotLookupFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportSearchPost: a failed read-back must not fail the import, got error: %v", err)
 	}
+	// The server-returned id is still returned (the create succeeded).
 	if resp.ID != 92820377 {
 		t.Errorf("ID = %d, want 92820377 (the id must still be returned)", resp.ID)
 	}
 	if resp.PublicationDate != nil {
-		t.Errorf("PublicationDate = %+v, want nil (read-back failed)", resp.PublicationDate)
+		t.Errorf("PublicationDate = %+v, want nil (snapshot-diff failed)", resp.PublicationDate)
 	}
 	if resp.SlotLookupError == "" {
 		t.Error("SlotLookupError = empty, want a non-empty error message")
 	}
-}
-
-// TestImportSearchPost_Slot403ProcessingRetry verifies that a 403 with a
-// "still processing" body is retried with backoff, and the slot is
-// eventually read back when the server stops returning 403. The stub
-// returns 403 with {"error":"post is still processing"} for the first 2
-// attempts, then 200 with the slot on the 3rd. The retry must succeed
-// without failing the import.
-//
-// RED-on-revert: if the retry is removed (GetPostEdit called directly), the
-// first 403 fails the read-back, SlotLookupError is set, and
-// PublicationDate is nil — the test fails at the PublicationDate check.
-func TestImportSearchPost_Slot403ProcessingRetry(t *testing.T) {
-	var editCalls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			w.Write([]byte(`{"id":92820377}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
-			n := atomic.AddInt32(&editCalls, 1)
-			if n <= 2 {
-				w.WriteHeader(http.StatusForbidden)
-				w.Write([]byte(`{"error":"post is still processing"}`))
-				return
-			}
-			w.Write([]byte(`{"id":92820377,"publication_date":{"date":"31.07.2026","hours":"14","minutes":"25"},"schedule_id":55}`))
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        1001,
-		PublicationWhenType: 3,
-		PublicationHowType:  2,
-		SchedulesIDs:        []int{55},
-	})
-	if err != nil {
-		t.Fatalf("ImportSearchPost: a processing-403 that later succeeds must not fail the import, got: %v", err)
-	}
-	if resp.ID != 92820377 {
-		t.Errorf("ID = %d, want 92820377", resp.ID)
-	}
-	// The slot was read back after the retry succeeded.
-	if resp.PublicationDate == nil {
-		t.Fatal("PublicationDate = nil, want the slot read back after retry")
-	}
-	if resp.PublicationDate.Hours != "14" || resp.PublicationDate.Minutes != "25" {
-		t.Errorf("PublicationDate: hours=%q minutes=%q, want 14/25", resp.PublicationDate.Hours, resp.PublicationDate.Minutes)
-	}
-	if resp.SlotLookupError != "" {
-		t.Errorf("SlotLookupError = %q, want empty (retry succeeded)", resp.SlotLookupError)
-	}
-	// At least 3 edit calls (2 × 403 + 1 × 200).
-	if got := atomic.LoadInt32(&editCalls); got < 3 {
-		t.Errorf("GetPostEdit calls = %d, want >= 3 (2 processing-403 + 1 success)", got)
-	}
-}
-
-// TestImportSearchPost_Slot403ProcessingRetryExhausted verifies that when
-// the 403-processing condition persists beyond the retry budget, the
-// read-back fails gracefully: SlotLookupError is set, the id is still
-// returned, and the import is NOT failed (exit zero).
-func TestImportSearchPost_Slot403ProcessingRetryExhausted(t *testing.T) {
-	var editCalls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			w.Write([]byte(`{"id":92820377}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
-			atomic.AddInt32(&editCalls, 1)
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"post is still processing"}`))
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        1001,
-		PublicationWhenType: 3,
-		PublicationHowType:  2,
-		SchedulesIDs:        []int{55},
-	})
-	if err != nil {
-		t.Fatalf("ImportSearchPost: an exhausted retry must not fail the import, got: %v", err)
-	}
-	if resp.ID != 92820377 {
-		t.Errorf("ID = %d, want 92820377 (the id must still be returned)", resp.ID)
-	}
-	if resp.PublicationDate != nil {
-		t.Errorf("PublicationDate = %+v, want nil (read-back failed after retry exhausted)", resp.PublicationDate)
-	}
-	if resp.SlotLookupError == "" {
-		t.Error("SlotLookupError = empty, want a non-empty error message about the exhausted retry")
-	}
-	// Bounded: exactly 4 attempts (MaxAttempts), not more.
-	if got := atomic.LoadInt32(&editCalls); got != 4 {
-		t.Errorf("GetPostEdit calls = %d, want 4 (MaxAttempts, not unbounded)", got)
-	}
-}
-
-// TestImportSearchPost_Slot403PermissionsNotRetried verifies that a 403
-// WITHOUT a processing indicator (a real permissions denial) is NOT
-// retried — the read-back fails immediately with one edit call.
-func TestImportSearchPost_Slot403PermissionsNotRetried(t *testing.T) {
-	var editCalls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			w.Write([]byte(`{"id":92820377}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
-			atomic.AddInt32(&editCalls, 1)
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"insufficient plan"}`))
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        1001,
-		PublicationWhenType: 3,
-		PublicationHowType:  2,
-		SchedulesIDs:        []int{55},
-	})
-	if err != nil {
-		t.Fatalf("ImportSearchPost: a permissions 403 must not fail the import, got: %v", err)
-	}
-	if resp.ID != 92820377 {
-		t.Errorf("ID = %d, want 92820377", resp.ID)
-	}
-	if resp.SlotLookupError == "" {
-		t.Error("SlotLookupError = empty, want a non-empty error message")
-	}
-	// ONE edit call — a non-processing 403 is not retried.
-	if got := atomic.LoadInt32(&editCalls); got != 1 {
-		t.Errorf("GetPostEdit calls = %d, want 1 (permissions 403 not retried)", got)
+	// No /edit call — the failure came from the list.
+	if got := atomic.LoadInt32(&editCalls); got != 0 {
+		t.Errorf("GetPostEdit calls = %d, want 0 (single path uses list snapshot-diff)", got)
 	}
 }
 
@@ -709,14 +633,30 @@ func TestImportSearchPost_NoSlotForNonSchedule(t *testing.T) {
 	}
 }
 
-// TestCopySearchPost_SlotReported verifies the slot read-back fires for
-// CopySearchPost too (single-post, when_type=3).
+// TestCopySearchPost_SlotReported verifies the slot is reported for a
+// single CopySearchPost (when_type=3) via the list snapshot-diff — the same
+// mechanism as ImportSearchPost. The stub asserts NO /posts/{id}/edit call.
 func TestCopySearchPost_SlotReported(t *testing.T) {
+	var editCalls int32
+	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/copy":
+			atomic.StoreInt32(&createCalled, 1)
 			w.Write([]byte(`{"id":92820377}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			if atomic.LoadInt32(&createCalled) == 0 {
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				w.Write([]byte(`{"list":[
+					{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],"total_rows":1,"is_has_more":false,"rows_limit":20}`))
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
+			atomic.AddInt32(&editCalls, 1)
+			t.Errorf("unexpected /posts/92820377/edit call — CopySearchPost single path uses the list snapshot-diff")
 			w.Write([]byte(`{"id":92820377,"publication_date":{"date":"31.07.2026","hours":"14","minutes":"25"},"schedule_id":55}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -736,21 +676,41 @@ func TestCopySearchPost_SlotReported(t *testing.T) {
 		t.Fatalf("CopySearchPost: %v", err)
 	}
 	if resp.PublicationDate == nil || resp.PublicationDate.Hours != "14" {
-		t.Errorf("PublicationDate = %+v, want hours=14 from the read-back", resp.PublicationDate)
+		t.Errorf("PublicationDate = %+v, want hours=14 from the list snapshot-diff", resp.PublicationDate)
 	}
 	if resp.ScheduleID != 55 {
 		t.Errorf("ScheduleID = %d, want 55", resp.ScheduleID)
 	}
+	if got := atomic.LoadInt32(&editCalls); got != 0 {
+		t.Errorf("GetPostEdit calls = %d, want 0 (CopySearchPost single path uses list snapshot-diff)", got)
+	}
 }
 
-// TestRewriteSearchPost_SlotReported verifies the slot read-back fires for
-// RewriteSearchPost (single-post, when_type=3).
+// TestRewriteSearchPost_SlotReported verifies the slot is reported for a
+// single RewriteSearchPost (when_type=3) via the list snapshot-diff. The
+// stub asserts NO /posts/{id}/edit call.
 func TestRewriteSearchPost_SlotReported(t *testing.T) {
+	var editCalls int32
+	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			// POST /posts is the create (the list is GET /posts, below).
+			atomic.StoreInt32(&createCalled, 1)
 			w.Write([]byte(`{"id":92820377}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			if atomic.LoadInt32(&createCalled) == 0 {
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				w.Write([]byte(`{"list":[
+					{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],"total_rows":1,"is_has_more":false,"rows_limit":20}`))
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
+			atomic.AddInt32(&editCalls, 1)
+			t.Errorf("unexpected /posts/92820377/edit call — RewriteSearchPost single path uses the list snapshot-diff")
 			w.Write([]byte(`{"id":92820377,"publication_date":{"date":"31.07.2026","hours":"14","minutes":"25"},"schedule_id":55}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -771,7 +731,10 @@ func TestRewriteSearchPost_SlotReported(t *testing.T) {
 		t.Fatalf("RewriteSearchPost: %v", err)
 	}
 	if resp.PublicationDate == nil || resp.PublicationDate.Hours != "14" {
-		t.Errorf("PublicationDate = %+v, want hours=14 from the read-back", resp.PublicationDate)
+		t.Errorf("PublicationDate = %+v, want hours=14 from the list snapshot-diff", resp.PublicationDate)
+	}
+	if got := atomic.LoadInt32(&editCalls); got != 0 {
+		t.Errorf("GetPostEdit calls = %d, want 0 (RewriteSearchPost single path uses list snapshot-diff)", got)
 	}
 }
 
