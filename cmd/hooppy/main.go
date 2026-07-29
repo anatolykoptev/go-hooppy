@@ -505,6 +505,40 @@ func registerSchedules(root *cobra.Command) {
 		die(err)
 		printJSON(resp)
 	}
+
+	// schedules times — print a schedule's posting slots per weekday
+	timesCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
+		Name:  "times",
+		Short: "Print a schedule's posting slots per weekday (undocumented endpoint)",
+	})
+	timesCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy schedules times <id>")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		edit, err := c.GetScheduleEdit(context.Background(), id)
+		die(err)
+		weekdays := []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+		result := make(map[string][]map[string]int64, len(edit.Times))
+		for i, day := range edit.Times {
+			dayName := fmt.Sprintf("day%d", i)
+			if i < len(weekdays) {
+				dayName = weekdays[i]
+			}
+			slots := make([]map[string]int64, 0, len(day))
+			for _, s := range day {
+				slots = append(slots, map[string]int64{
+					"hours":   s.Hours.Int64(),
+					"minutes": s.Minutes.Int64(),
+				})
+			}
+			result[dayName] = slots
+		}
+		printJSON(result)
+	}
 }
 
 // --- files ---

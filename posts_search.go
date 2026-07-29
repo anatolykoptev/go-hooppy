@@ -286,6 +286,10 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 	if err := c.doPUT(ctx, pathPostsCopy, payload, &resp); err != nil {
 		return nil, err
 	}
+	// Report the assigned slot when the post was created into a schedule
+	// (when_type=3). Best-effort: a lookup failure populates
+	// SlotLookupError, not an error return — the post exists.
+	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs)
 	return &resp, nil
 }
 
@@ -517,6 +521,10 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	if err := c.doPOST(ctx, pathPosts, body, &resp); err != nil {
 		return nil, err
 	}
+	// Report the assigned slot when the post was created into a schedule
+	// (when_type=3). Best-effort: a lookup failure populates
+	// SlotLookupError, not an error return — the post exists.
+	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs)
 	return &resp, nil
 }
 
@@ -652,5 +660,9 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 	if err := c.doPUT(ctx, pathPostsImport, body, &resp); err != nil {
 		return nil, err
 	}
+	// Report the assigned slot when the post was created into a schedule
+	// (when_type=3). Best-effort: a lookup failure populates
+	// SlotLookupError, not an error return — the post exists.
+	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs)
 	return &resp, nil
 }

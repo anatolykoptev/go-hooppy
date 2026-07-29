@@ -303,3 +303,20 @@ func (c *Client) DeleteSchedule(ctx context.Context, id int) (*ScheduleResponse,
 	}
 	return &resp, nil
 }
+
+// GetScheduleEdit returns a schedule's full editable state via
+// GET /posts/schedules/{id}/edit. The response carries 72 keys, including
+// times — the posting schedule itself (an array of 7 arrays, one per
+// weekday, each holding that day's slots) — and nine other fields the list
+// response never returns. See ScheduleEditResponse for the modelled fields
+// and the evidence behind each type choice.
+//
+// UNDOCUMENTED: GET /posts/schedules/{id}/edit is not in the public OpenAPI
+// spec (v0.1.0). Discovered via API probing — may change without notice.
+func (c *Client) GetScheduleEdit(ctx context.Context, id int) (*ScheduleEditResponse, error) {
+	var resp ScheduleEditResponse
+	if err := c.doGET(ctx, fmt.Sprintf(pathScheduleEdit, id), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}

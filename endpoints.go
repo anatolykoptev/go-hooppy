@@ -8,6 +8,7 @@ const (
 	pathProjectDelete    = "/posts/projects/%d"
 	pathSchedules        = "/posts/schedules"
 	pathScheduleDelete   = "/posts/schedules/%d"
+	pathScheduleEdit     = "/posts/schedules/%d/edit"
 	pathUploadMedia      = "/files/media/upload"
 	pathUploadDocument   = "/files/documents/upload"
 	pathPosts            = "/posts"

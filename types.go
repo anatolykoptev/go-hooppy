@@ -138,6 +138,70 @@ type ScheduleResponse struct {
 	Schedules []Schedule `json:"schedules"`
 }
 
+// ScheduleTimeSlot is one time slot in a schedule's times array. Both Hours
+// and Minutes are FlexInt because the API encodes them polymorphically:
+// measured across several schedules, minutes arrived as a JSON number in 21
+// values and as a JSON string ("00") in 7; hours was a number in every sample
+// but is the same field family, so it is treated the same way. A bare int
+// here aborts the whole decode — the bug this repo has shipped five times.
+// FlexInt already handles number-or-numeric-string; reusing it rather than
+// inventing a second one.
+type ScheduleTimeSlot struct {
+	Hours   FlexInt `json:"hours"`
+	Minutes FlexInt `json:"minutes"`
+}
+
+// ScheduleEditResponse is returned by GET /posts/schedules/{id}/edit. It
+// carries 72 keys — three more than the list response — including ten fields
+// the list never returns: times, posts_hashtags, posts_links, project_id,
+// projects, selected_pages_by_source_ids, selected_albums_by_source_ids,
+// social_pages_by_accounts, social_albums_by_pages, watermarks.
+//
+// times is the posting schedule itself: an array of 7 arrays, one per
+// weekday, each holding that day's slots (ScheduleTimeSlot). A weekday with
+// no slots is an empty array. That is how a "ПН/СР/ЧТ" schedule is expressed
+// — days with slots and days without.
+//
+// Field types are chosen from the evidence in the issue (measured, not
+// inferred from the name):
+//   - project_id: int (measured).
+//   - selected_pages_by_source_ids / selected_albums_by_source_ids:
+//     map[int][]int — same shape as PostEditResponse.SelectedPagesBySourceIDs
+//     (source_id → list of page/album ids).
+//   - social_pages_by_accounts: map[int][]Page — page-shaped, keyed by
+//     account id. Reuses the narrow Page struct (id/source/social-ids/name/
+//     photo only) so the OAuth tokens page objects carry elsewhere in this
+//     API CANNOT reach the marshalled output. See
+//     TestScheduleEdit_DecodeCredentialHygiene.
+//   - projects: []Project — array of narrow project objects (id/name).
+//   - watermarks: []Watermark — array of narrow watermark objects (no
+//     credential fields).
+//   - posts_hashtags, posts_links: json.RawMessage — measured as objects,
+//     but the key/value shape is not evidenced; RawMessage is the one choice
+//     that cannot abort the decode on a wrong guess.
+//   - social_albums_by_pages: json.RawMessage — shape not measured beyond
+//     the name (albums keyed by page); RawMessage avoids a wrong-guess abort.
+//
+// UNDOCUMENTED: GET /posts/schedules/{id}/edit is not in the public OpenAPI
+// spec (v0.1.0). Discovered via API probing — may change without notice.
+type ScheduleEditResponse struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	// Times is the posting schedule: 7 arrays (one per weekday), each
+	// holding that day's slots. A weekday with no slots is an empty array.
+	Times [][]ScheduleTimeSlot `json:"times"`
+	// The ten list-absent fields (issue #69).
+	PostsHashtags             json.RawMessage `json:"posts_hashtags"` // object — key/value shape not measured
+	PostsLinks                json.RawMessage `json:"posts_links"`    // object — key/value shape not measured
+	ProjectID                 int             `json:"project_id"`
+	Projects                  []Project       `json:"projects"`
+	SelectedPagesBySourceIDs  map[int][]int   `json:"selected_pages_by_source_ids"`
+	SelectedAlbumsBySourceIDs map[int][]int   `json:"selected_albums_by_source_ids"`
+	SocialPagesByAccounts     map[int][]Page  `json:"social_pages_by_accounts"`
+	SocialAlbumsByPages       json.RawMessage `json:"social_albums_by_pages"` // shape not measured
+	Watermarks                []Watermark     `json:"watermarks"`
+}
+
 // DeleteResponse is returned by DELETE endpoints (schedules, projects).
 type DeleteResponse struct {
 	Success bool `json:"success"`
@@ -369,8 +433,39 @@ const (
 )
 
 // PostIDResponse is returned by PUT /posts/{mode} cross-posting endpoints.
+//
+// Slot reporting (issue #69): when a post is created into a schedule
+// (publication_when_type=3), the server assigns the publication slot
+// server-side and returns only the new id. The library now reads the slot
+// back and populates the fields below so the caller does not need a second
+// call they have to know to make. The read-back is best-effort: a lookup
+// failure populates SlotLookupError and the method still returns the id
+// (exit zero) — losing the id because a follow-up read failed is strictly
+// worse than today's behaviour.
+//
+//   - PublicationDate: the assigned slot ({date, hours, minutes} shape from
+//     GET /posts/{id}/edit). Populated for the primary id (ID). For a batch,
+//     per-id slots are in Slots.
+//   - ScheduleID: the schedule the post was created into.
+//   - SlotLookupError: set when the read-back failed (id still returned).
+//   - IDs: all created post ids for a batch (server returns "ids" alongside
+//     "id"); empty for a single-post create.
+//   - Slots: per-id slots for a batch; empty for a single-post create.
 type PostIDResponse struct {
-	ID int `json:"id"`
+	ID              int              `json:"id"`
+	IDs             []int            `json:"ids,omitempty"`
+	PublicationDate *PublicationDate `json:"publication_date,omitempty"`
+	ScheduleID      int              `json:"schedule_id,omitempty"`
+	SlotLookupError string           `json:"slot_lookup_error,omitempty"`
+	Slots           []ScheduleSlot   `json:"slots,omitempty"`
+}
+
+// ScheduleSlot is one created post's assigned publication slot, used in the
+// per-id Slots array of a batch PostIDResponse. The shape mirrors the flat
+// PublicationDate/ScheduleID fields that a single-post create populates.
+type ScheduleSlot struct {
+	ID              int              `json:"id"`
+	PublicationDate *PublicationDate `json:"publication_date,omitempty"`
 }
 
 // Post is a post returned by GET /posts (the user's own posts). The live
