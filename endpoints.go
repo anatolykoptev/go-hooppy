@@ -17,6 +17,7 @@ const (
 	// Undocumented endpoints (not in OpenAPI spec v0.1.0).
 	// Discovered via API probing — may change without notice.
 	pathUser           = "/users/me"
+	pathUserSettings   = "/users/settings"
 	pathWatermarks     = "/watermarks"
 	pathWatermarkByID  = "/watermarks/%d"
 	pathProxies        = "/proxies"

@@ -346,11 +346,15 @@ func TestImportSearchPost_SlotReported(t *testing.T) {
 func TestImportSearchPost_BatchSlotOneCall(t *testing.T) {
 	var listCalls int32
 	var editCalls int32
+	var settingsCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
 			// Server returns the first id plus the full ids array for the batch.
 			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378,92820379]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			atomic.AddInt32(&settingsCalls, 1)
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[{"id":101,"name":"(GMT+03:00) Санкт-Петербург"}],"api_token":"SECRET","gpt_key":"SECRET","ru_captcha_key":"SECRET"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
 			atomic.AddInt32(&listCalls, 1)
 			// Return all posts in the schedule, each with its slot.
@@ -393,6 +397,10 @@ func TestImportSearchPost_BatchSlotOneCall(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&editCalls); got != 0 {
 		t.Errorf("GetPostEdit calls = %d, want 0 (all ids matched in the list — no per-id fallback)", got)
+	}
+	// ONE settings call for the whole batch, not one per matched id.
+	if got := atomic.LoadInt32(&settingsCalls); got != 1 {
+		t.Errorf("GetSettings calls = %d, want 1 (offset fetched once per batch, not per id)", got)
 	}
 	// All three slots matched to the right ids.
 	if len(resp.Slots) != 3 {
@@ -583,7 +591,9 @@ func TestRewriteSearchPost_SlotReported(t *testing.T) {
 
 // TestPostPubDateToPublicationDate_Conversion verifies the conversion from
 // the list-surface PostPublicationDate ({date, time, timestamp}) to the
-// {date, hours, minutes} PublicationDate shape.
+// {date, hours, minutes} PublicationDate shape. With offset=0 the date is
+// formatted in UTC (the baseline); offset behaviour is covered by
+// TestPostPubDateToPublicationDate_OffsetShift.
 func TestPostPubDateToPublicationDate_Conversion(t *testing.T) {
 	ppd := &PostPublicationDate{
 		Date:      "29 Июля",
@@ -593,7 +603,7 @@ func TestPostPubDateToPublicationDate_Conversion(t *testing.T) {
 	// Set timestamp via JSON unmarshal (the normal path).
 	_ = json.Unmarshal([]byte(`1753770300`), &ppd.Timestamp)
 
-	pd := postPubDateToPublicationDate(ppd)
+	pd := postPubDateToPublicationDate(ppd, 0)
 	if pd == nil {
 		t.Fatal("postPubDateToPublicationDate returned nil")
 	}
@@ -603,10 +613,45 @@ func TestPostPubDateToPublicationDate_Conversion(t *testing.T) {
 	if pd.Minutes != "25" {
 		t.Errorf("Minutes = %q, want 25", pd.Minutes)
 	}
-	// Date from timestamp formatted as dd.mm.yyyy in UTC.
+	// Date from timestamp formatted as dd.mm.yyyy at offset 0 (UTC).
 	// 1753770300 = 2025-07-29 06:25:00 UTC → "29.07.2025"
 	if pd.Date != "29.07.2025" {
-		t.Errorf("Date = %q, want 29.07.2025 (from timestamp 1753770300 in UTC)", pd.Date)
+		t.Errorf("Date = %q, want 29.07.2025 (from timestamp 1753770300 at offset 0/UTC)", pd.Date)
+	}
+}
+
+// TestPostPubDateToPublicationDate_OffsetShift verifies that the date is
+// formatted at the account's timezone offset, not UTC. A positive offset
+// shifts the date forward; a negative offset shifts it back. The timestamps
+// are chosen so UTC and the offset land on DIFFERENT calendar days — a
+// test that passes either way proves nothing.
+func TestPostPubDateToPublicationDate_OffsetShift(t *testing.T) {
+	// Positive offset (+3): 23:30 UTC → 02:30 local (next day).
+	// 1753831800 = 2025-07-29 23:30:00 UTC → UTC date "29.07.2025",
+	// UTC+3 date "30.07.2025".
+	var tsPos FlexInt
+	_ = json.Unmarshal([]byte(`1753831800`), &tsPos)
+	ppdPos := &PostPublicationDate{Time: "23:30", Timestamp: tsPos}
+	pdPos := postPubDateToPublicationDate(ppdPos, 3)
+	if pdPos == nil {
+		t.Fatal("postPubDateToPublicationDate returned nil for offset+3")
+	}
+	if pdPos.Date != "30.07.2025" {
+		t.Errorf("offset+3: Date = %q, want 30.07.2025 (23:30 UTC + 3h = 02:30 next day)", pdPos.Date)
+	}
+
+	// Negative offset (-5): 02:00 UTC → 21:00 previous day local.
+	// 1753754400 = 2025-07-29 02:00:00 UTC → UTC date "29.07.2025",
+	// UTC-5 date "28.07.2025".
+	var tsNeg FlexInt
+	_ = json.Unmarshal([]byte(`1753754400`), &tsNeg)
+	ppdNeg := &PostPublicationDate{Time: "02:00", Timestamp: tsNeg}
+	pdNeg := postPubDateToPublicationDate(ppdNeg, -5)
+	if pdNeg == nil {
+		t.Fatal("postPubDateToPublicationDate returned nil for offset-5")
+	}
+	if pdNeg.Date != "28.07.2025" {
+		t.Errorf("offset-5: Date = %q, want 28.07.2025 (02:00 UTC - 5h = 21:00 previous day)", pdNeg.Date)
 	}
 }
 
@@ -621,6 +666,8 @@ func TestImportSearchPost_BatchPerIDFallback(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
 			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378,92820399]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
 			atomic.AddInt32(&listCalls, 1)
 			// Return only 2 of the 3 created ids — 92820399 is missing.
@@ -726,5 +773,254 @@ func TestImportSearchPost_BatchListFailsAllFallback(t *testing.T) {
 	// Both slots resolved despite the list failure.
 	if len(resp.Slots) != 2 {
 		t.Fatalf("Slots = %d entries, want 2 (both via fallback)", len(resp.Slots))
+	}
+}
+
+// TestImportSearchPost_BatchDateAtAccountOffset verifies that the batch path
+// formats the publication date at the account's timezone offset (from
+// GET /users/settings), not UTC. The fixture uses a post whose timestamp
+// falls at 23:30 UTC — at UTC the date is 29.07.2025, at UTC+3 it is
+// 30.07.2025 (the next day). The GetPostEdit stub returns 30.07.2025 for
+// the same post (what the single path reports), and the batch slot's date
+// must match — the two paths agree instead of diverging by a day.
+//
+// RED-on-revert: if the offset is ignored (format in UTC), the batch date
+// is 29.07.2025, not 30.07.2025 → the assertion fails.
+func TestImportSearchPost_BatchDateAtAccountOffset(t *testing.T) {
+	var settingsCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378,92820379]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			atomic.AddInt32(&settingsCalls, 1)
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[{"id":101,"name":"(GMT+03:00) SPb"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			// 1753831800 = 2025-07-29 23:30:00 UTC → UTC date 29.07.2025,
+			// UTC+3 date 30.07.2025. The first post carries this timestamp.
+			w.Write([]byte(`{
+				"list": [
+					{"id":92820377,"publication_date":{"date":"30 Июля","time":"02:30","timestamp":1753831800,"source_timestamp":1753842600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+					{"id":92820378,"publication_date":{"date":"30 Июля","time":"10:00","timestamp":1753856400,"source_timestamp":1753867200},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+					{"id":92820379,"publication_date":{"date":"30 Июля","time":"14:00","timestamp":1753870800,"source_timestamp":1753881600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],
+				"total_rows": 3,
+				"is_has_more": false,
+				"rows_limit": 20
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
+			// What the single path would report for the same post — the
+			// batch date must match this, not diverge by a day.
+			w.Write([]byte(`{"id":92820377,"publication_date":{"date":"30.07.2025","hours":"02","minutes":"30"},"schedule_id":55}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{2001, 2002, 2003},
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost batch: %v", err)
+	}
+	if len(resp.Slots) != 3 {
+		t.Fatalf("Slots = %d entries, want 3", len(resp.Slots))
+	}
+	// The first slot's date must be 30.07.2025 (UTC+3), NOT 29.07.2025 (UTC).
+	// This is what the single path (GetPostEdit stub above) reports for the
+	// same post — the two paths agree.
+	pd := resp.Slots[0].PublicationDate
+	if pd == nil {
+		t.Fatal("Slots[0].PublicationDate = nil")
+	}
+	if pd.Date != "30.07.2025" {
+		t.Errorf("Slots[0].Date = %q, want 30.07.2025 (23:30 UTC at offset+3 = 02:30 next day; GetPostEdit reports the same) — if this is 29.07.2025 the offset was ignored (UTC bug)", pd.Date)
+	}
+	// Settings called once for the batch of three, not three times.
+	if got := atomic.LoadInt32(&settingsCalls); got != 1 {
+		t.Errorf("GetSettings calls = %d, want 1 (offset fetched once per batch)", got)
+	}
+	if resp.SlotLookupError != "" {
+		t.Errorf("SlotLookupError = %q, want empty (settings lookup succeeded)", resp.SlotLookupError)
+	}
+}
+
+// TestImportSearchPost_BatchDateNegativeOffset verifies the negative-offset
+// case: a post at 02:00 UTC with timezone_offset -5 → the date is the
+// PREVIOUS day (28.07.2025, not 29.07.2025 UTC).
+func TestImportSearchPost_BatchDateNegativeOffset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.Write([]byte(`{"timezone_id":5,"timezone_offset":-5,"timezones":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			// 1753754400 = 2025-07-29 02:00:00 UTC → UTC date 29.07.2025,
+			// UTC-5 date 28.07.2025 (previous day).
+			w.Write([]byte(`{
+				"list": [
+					{"id":92820377,"publication_date":{"date":"28 Июля","time":"21:00","timestamp":1753754400,"source_timestamp":1753736400},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+					{"id":92820378,"publication_date":{"date":"29 Июля","time":"10:00","timestamp":1753790400,"source_timestamp":1753772400},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],
+				"total_rows": 2,
+				"is_has_more": false,
+				"rows_limit": 20
+			}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{2001, 2002},
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost batch: %v", err)
+	}
+	if len(resp.Slots) != 2 {
+		t.Fatalf("Slots = %d entries, want 2", len(resp.Slots))
+	}
+	pd := resp.Slots[0].PublicationDate
+	if pd == nil {
+		t.Fatal("Slots[0].PublicationDate = nil")
+	}
+	if pd.Date != "28.07.2025" {
+		t.Errorf("Slots[0].Date = %q, want 28.07.2025 (02:00 UTC at offset-5 = 21:00 previous day)", pd.Date)
+	}
+}
+
+// TestImportSearchPost_BatchSettingsLookupFails verifies that a failed
+// settings lookup (stub 500) does NOT fail the import: the id is still
+// returned, exit zero, SlotLookupError records the offset was unavailable,
+// and the publication dates for list-matched ids are OMITTED (empty) — a
+// stated-unknown date is better than a silently-wrong one. Hours/minutes
+// are still correct (from the time field, not the timestamp).
+func TestImportSearchPost_BatchSettingsLookupFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"server error"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			w.Write([]byte(`{
+				"list": [
+					{"id":92820377,"publication_date":{"date":"30 Июля","time":"14:25","timestamp":1753831800,"source_timestamp":1753842600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+					{"id":92820378,"publication_date":{"date":"30 Июля","time":"16:25","timestamp":1753839000,"source_timestamp":1753849800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],
+				"total_rows": 2,
+				"is_has_more": false,
+				"rows_limit": 20
+			}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{2001, 2002},
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost: a failed settings lookup must not fail the import, got error: %v", err)
+	}
+	// The id is still returned (exit zero).
+	if resp.ID != 92820377 {
+		t.Errorf("ID = %d, want 92820377 (the id must still be returned)", resp.ID)
+	}
+	// SlotLookupError records the offset was unavailable.
+	if resp.SlotLookupError == "" {
+		t.Error("SlotLookupError = empty, want a message about the unavailable timezone offset")
+	}
+	if !strings.Contains(resp.SlotLookupError, "timezone offset unavailable") {
+		t.Errorf("SlotLookupError = %q, want it to mention the unavailable timezone offset", resp.SlotLookupError)
+	}
+	// Both slots resolved (list matched), but dates are OMITTED (empty).
+	if len(resp.Slots) != 2 {
+		t.Fatalf("Slots = %d entries, want 2", len(resp.Slots))
+	}
+	for i, s := range resp.Slots {
+		if s.PublicationDate == nil {
+			t.Errorf("Slots[%d].PublicationDate = nil, want non-nil with hours/minutes", i)
+			continue
+		}
+		if s.PublicationDate.Date != "" {
+			t.Errorf("Slots[%d].Date = %q, want empty (offset unavailable — date omitted, not guessed at UTC)", i, s.PublicationDate.Date)
+		}
+		// Hours/minutes are still correct (from the time field).
+		if s.PublicationDate.Hours == "" {
+			t.Errorf("Slots[%d].Hours = empty, want the time from the list row", i)
+		}
+	}
+}
+
+// TestSettings_DecodeCredentialHygiene verifies that GET /users/settings
+// carrying api_token, gpt_key, and ru_captcha_key cannot reach the
+// marshalled SettingsResponse output. The narrow struct models only
+// timezone_id, timezone_offset, and the timezones array — the credential
+// fields are silently dropped at decode and absent from any re-marshal.
+// This is the RED-on-revert test for the credential-hygiene invariant on
+// the settings decode path: if SettingsResponse were widened to
+// map[string]interface{} or json.RawMessage, the credential values would
+// leak through to stdout via printJSON.
+func TestSettings_DecodeCredentialHygiene(t *testing.T) {
+	body := `{
+		"timezone_id": 101,
+		"timezone_offset": 3,
+		"timezones": [{"id": 101, "name": "(GMT+03:00) Санкт-Петербург"}],
+		"api_token": "SECRET_API_TOKEN_VALUE",
+		"gpt_key": "SECRET_GPT_KEY_VALUE",
+		"ru_captcha_key": "SECRET_RU_CAPTCHA_KEY_VALUE"
+	}`
+	var settings SettingsResponse
+	if err := json.Unmarshal([]byte(body), &settings); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(out)
+	secretValues := []string{
+		"SECRET_API_TOKEN_VALUE",
+		"SECRET_GPT_KEY_VALUE",
+		"SECRET_RU_CAPTCHA_KEY_VALUE",
+	}
+	for _, secret := range secretValues {
+		if strings.Contains(got, secret) {
+			t.Errorf("marshalled SettingsResponse leaked credential value %q:\n%s", secret, got)
+		}
+	}
+	// The modelled fields must still be present.
+	if settings.TimezoneID != 101 {
+		t.Errorf("TimezoneID = %d, want 101", settings.TimezoneID)
+	}
+	if settings.TimezoneOffset != 3 {
+		t.Errorf("TimezoneOffset = %d, want 3", settings.TimezoneOffset)
+	}
+	if len(settings.Timezones) != 1 || settings.Timezones[0].ID != 101 {
+		t.Errorf("Timezones = %+v, want one entry with id 101", settings.Timezones)
+	}
+	if !strings.Contains(got, `"timezone_id":101`) {
+		t.Errorf("marshalled SettingsResponse lost timezone_id:\n%s", got)
 	}
 }

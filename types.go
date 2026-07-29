@@ -315,6 +315,24 @@ type UserResponse struct {
 	User User `json:"user"`
 }
 
+// SettingsResponse is returned by GET /users/settings. Narrowly modelled:
+// only timezone_id, timezone_offset, and the timezones array ({id, name})
+// are kept. The response carries api_token, gpt_key, and ru_captcha_key —
+// NONE of them are modelled, so they are dropped at decode and absent from
+// any re-marshal. A credential cannot reach stdout via printJSON. See
+// TestSettings_DecodeCredentialHygiene.
+type SettingsResponse struct {
+	TimezoneID     int        `json:"timezone_id,omitempty"`
+	TimezoneOffset int        `json:"timezone_offset,omitempty"`
+	Timezones      []Timezone `json:"timezones,omitempty"`
+}
+
+// Timezone is one entry in the timezones array on GET /users/settings.
+type Timezone struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
 // Watermark is an image watermark configuration.
 type Watermark struct {
 	ID       int    `json:"id"`
