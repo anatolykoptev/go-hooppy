@@ -1,0 +1,154 @@
+{
+  "list": [
+    {
+      "id": 1,
+      "text": "A",
+      "link": "https://example.invalid/x",
+      "source_link": "https://example.invalid/x",
+      "repost_link": "https://example.invalid/x",
+      "repost_title": "A",
+      "created_by": 2,
+      "photos_amount": 1,
+      "is_ad": 0,
+      "is_published": 0,
+      "is_repeated": 0,
+      "is_attachments_in_process": 0,
+      "is_planned_by_networks": 1,
+      "is_planning_by_networks_needed": 0,
+      "views": null,
+      "likes": null,
+      "comments": null,
+      "reposts": null,
+      "photo": null,
+      "publication_date": {
+        "date": "29 Июля",
+        "time": "12:25",
+        "timestamp": 1753770300,
+        "source_timestamp": 1753773900
+      },
+      "pages": [
+        {"source_id": 1, "page_id": 6}
+      ],
+      "post_schedules": [
+        {"id": 7, "name": "A"}
+      ],
+      "post_projects": [
+        {"id": 8, "name": "A"}
+      ],
+      "errors_for_source_ids": []
+    },
+    {
+      "id": 2,
+      "text": "A",
+      "link": "https://example.invalid/x",
+      "source_link": "https://example.invalid/x",
+      "repost_link": "https://example.invalid/x",
+      "repost_title": "A",
+      "created_by": 2,
+      "photos_amount": 1,
+      "is_ad": 0,
+      "is_published": 1,
+      "is_repeated": 0,
+      "is_attachments_in_process": 0,
+      "is_planned_by_networks": 1,
+      "is_planning_by_networks_needed": 0,
+      "views": null,
+      "likes": null,
+      "comments": null,
+      "reposts": null,
+      "photo": {
+        "id": 11,
+        "owner_id": 12,
+        "post_id": "13",
+        "access_key": "A",
+        "source_id": 1,
+        "type": "video",
+        "title": "A",
+        "description": "",
+        "duration": 383,
+        "preview": "https://example.invalid/x",
+        "is_used": 0,
+        "name": "A",
+        "sticker": "",
+        "file_path": "A",
+        "text": "",
+        "folder": "A",
+        "updated_date": 1700000000
+      },
+      "publication_date": {
+        "date": "29 Июля",
+        "time": "12:25",
+        "timestamp": 1753770300,
+        "source_timestamp": 1753773900
+      },
+      "pages": [
+        {"source_id": 1, "page_id": 6}
+      ],
+      "post_schedules": [
+        {"id": 7, "name": "A"}
+      ],
+      "post_projects": [
+        {"id": 8, "name": "A"}
+      ],
+      "errors_for_source_ids": []
+    },
+    {
+      "id": 3,
+      "text": "A",
+      "link": "https://example.invalid/x",
+      "source_link": "https://example.invalid/x",
+      "repost_link": "https://example.invalid/x",
+      "repost_title": "A",
+      "created_by": 2,
+      "photos_amount": 1,
+      "is_ad": 0,
+      "is_published": 1,
+      "is_repeated": 0,
+      "is_attachments_in_process": 0,
+      "is_planned_by_networks": 1,
+      "is_planning_by_networks_needed": 0,
+      "views": null,
+      "likes": null,
+      "comments": null,
+      "reposts": null,
+      "photo": {
+        "id": "21",
+        "owner_id": 22,
+        "post_id": "23",
+        "access_key": "A",
+        "source_id": 1,
+        "type": "video",
+        "title": "A",
+        "description": "",
+        "duration": 383,
+        "preview": "https://example.invalid/x",
+        "is_used": 0,
+        "name": "A",
+        "sticker": "",
+        "file_path": "A",
+        "text": "",
+        "folder": "A",
+        "updated_date": "1800000000"
+      },
+      "publication_date": {
+        "date": "29 Июля",
+        "time": "12:25",
+        "timestamp": 1753770300,
+        "source_timestamp": 1753773900
+      },
+      "pages": [
+        {"source_id": 1, "page_id": 6}
+      ],
+      "post_schedules": [
+        {"id": 7, "name": "A"}
+      ],
+      "post_projects": [
+        {"id": 8, "name": "A"}
+      ],
+      "errors_for_source_ids": []
+    }
+  ],
+  "total_rows": 3,
+  "is_has_more": false,
+  "rows_limit": 20
+}

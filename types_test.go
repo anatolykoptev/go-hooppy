@@ -285,7 +285,7 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	if p.Photo == nil {
 		t.Fatal("Photo = nil, want the media-descriptor object")
 	}
-	if p.Photo.PostID != "30" || p.Photo.ID != 10 || p.Photo.OwnerID != 20 {
+	if p.Photo.PostID != "30" || p.Photo.ID.Int64() != 10 || p.Photo.OwnerID != 20 {
 		t.Errorf("Photo = %+v, want id 10 / owner_id 20 / post_id \"30\"", p.Photo)
 	}
 	if p.Photo.Type != "video" {
@@ -490,8 +490,8 @@ func TestPost_DecodeRealCapture(t *testing.T) {
 	if p.Photo.PostID != "5" {
 		t.Errorf("Photo.PostID = %q, want %q (string while id/owner_id are numbers)", p.Photo.PostID, "5")
 	}
-	if p.Photo.ID != 3 || p.Photo.OwnerID != 4 {
-		t.Errorf("Photo.ID/OwnerID = %d/%d, want 3/4 (numbers)", p.Photo.ID, p.Photo.OwnerID)
+	if p.Photo.ID.Int64() != 3 || p.Photo.OwnerID != 4 {
+		t.Errorf("Photo.ID/OwnerID = %d/%d, want 3/4 (numbers)", p.Photo.ID.Int64(), p.Photo.OwnerID)
 	}
 	if p.Photo.Type != "video" {
 		t.Errorf("Photo.Type = %q, want %q (not photo-specific despite the field name)", p.Photo.Type, "video")
@@ -525,6 +525,145 @@ func TestPost_DecodeRealCapture(t *testing.T) {
 	}
 	if p.Pages[0].PageID != 6 {
 		t.Errorf("Pages[0].PageID = %d, want 6", p.Pages[0].PageID)
+	}
+}
+
+// TestPost_DecodePolymorphicPhoto is the regression guard for the bug that
+// shipped TWICE because every prior fixture sampled a single row: PostPhoto.ID
+// and PostPhoto.UpdatedDate are POLYMORPHIC across the collection (number on
+// some rows, string on others — measured across 60 rows on three pages). A
+// typed int field aborts the entire unmarshal on the string form; a typed
+// string field aborts on the number form. The mixed fixture
+// (testdata/post_list_rows_polymorphic.json) carries three rows that differ
+// in shape — the guard a single-row fixture could never be:
+//
+//   - row 0: photo null (text-only post → *PostPhoto decodes to nil)
+//   - row 1: photo.id and photo.updated_date as JSON NUMBERS (11, 1700000000)
+//   - row 2: photo.id and photo.updated_date as JSON STRINGS ("21", "1800000000")
+//
+// Every KEY and every VALUE TYPE is preserved, including the string-vs-number
+// split. The accessor (FlexInt.Int64) MUST return the same int whether the
+// wire form was 21 or "21" — that equivalence is the point of the type.
+func TestPost_DecodePolymorphicPhoto(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "post_list_rows_polymorphic.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var resp PostsResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal mixed fixture: %v\n— a wrong field type aborts the whole decode (the photo.id int-vs-string bug class)", err)
+	}
+	if len(resp.List) != 3 {
+		t.Fatalf("len(List) = %d, want 3 (null + number-form + string-form rows)", len(resp.List))
+	}
+
+	// Row 0: photo null — *PostPhoto decodes to nil, not a zero struct.
+	if resp.List[0].Photo != nil {
+		t.Errorf("row 0 Photo = %+v, want nil (photo null on a text-only post)", resp.List[0].Photo)
+	}
+
+	// Row 1: photo.id and updated_date as JSON numbers.
+	r1 := resp.List[1]
+	if r1.Photo == nil {
+		t.Fatal("row 1 Photo = nil, want the number-form object")
+	}
+	if !r1.Photo.ID.IsSet() {
+		t.Error("row 1 Photo.ID not set, want the number-form id")
+	}
+	if got := r1.Photo.ID.Int64(); got != 11 {
+		t.Errorf("row 1 Photo.ID.Int64() = %d, want 11 (number form)", got)
+	}
+	if got := r1.Photo.UpdatedDate.Int64(); got != 1700000000 {
+		t.Errorf("row 1 Photo.UpdatedDate.Int64() = %d, want 1700000000 (number form)", got)
+	}
+	// Stable fields land regardless of the polymorphic split.
+	if r1.Photo.OwnerID != 12 || r1.Photo.PostID != "13" || r1.Photo.SourceID != 1 {
+		t.Errorf("row 1 stable fields = owner %d / post_id %q / source %d, want 12 / \"13\" / 1", r1.Photo.OwnerID, r1.Photo.PostID, r1.Photo.SourceID)
+	}
+	if r1.Photo.IsUsed != 0 || r1.Photo.Name != "A" || r1.Photo.Folder != "A" || r1.Photo.FilePath != "A" {
+		t.Errorf("row 1 new stable fields = is_used %d / name %q / folder %q / file_path %q", r1.Photo.IsUsed, r1.Photo.Name, r1.Photo.Folder, r1.Photo.FilePath)
+	}
+
+	// Row 2: photo.id and updated_date as JSON STRINGS — the form that
+	// aborted the decode when ID was typed int. Must decode AND yield the
+	// same int via the accessor.
+	r2 := resp.List[2]
+	if r2.Photo == nil {
+		t.Fatal("row 2 Photo = nil, want the string-form object")
+	}
+	if !r2.Photo.ID.IsSet() {
+		t.Error("row 2 Photo.ID not set, want the string-form id")
+	}
+	if got := r2.Photo.ID.Int64(); got != 21 {
+		t.Errorf("row 2 Photo.ID.Int64() = %d, want 21 (string form \"21\" → 21)", got)
+	}
+	if got := r2.Photo.UpdatedDate.Int64(); got != 1800000000 {
+		t.Errorf("row 2 Photo.UpdatedDate.Int64() = %d, want 1800000000 (string form)", got)
+	}
+	// The accessor equivalence: number-form 11 and string-form "21" both
+	// return ints; the caller never sees the wire split.
+	if r1.Photo.ID.Int64() == r2.Photo.ID.Int64() {
+		t.Errorf("row 1 and row 2 Photo.ID both decoded to %d — fixture must use distinct ids", r1.Photo.ID.Int64())
+	}
+}
+
+// TestFlexInt_RoundTrip covers the wire-form preservation: a number stays a
+// number and a string stays a string through MarshalJSON, and both decode
+// back to the same Int64. A silent coerce-on-unmarshal would break the
+// round-trip; this catches it.
+func TestFlexInt_RoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		wire string
+		want int64
+	}{
+		{"number", `21`, 21},
+		{"string", `"21"`, 21},
+		{"zero number", `0`, 0},
+		{"zero string", `"0"`, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var f FlexInt
+			if err := json.Unmarshal([]byte(c.wire), &f); err != nil {
+				t.Fatalf("unmarshal %s: %v", c.wire, err)
+			}
+			if !f.IsSet() {
+				t.Error("IsSet = false, want true")
+			}
+			if got := f.Int64(); got != c.want {
+				t.Errorf("Int64() = %d, want %d", got, c.want)
+			}
+			out, err := json.Marshal(f)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(out) != c.wire {
+				t.Errorf("round-trip = %s, want %s (wire form must be preserved)", out, c.wire)
+			}
+		})
+	}
+
+	// null → unset; Int64() returns 0; marshal emits 0 (the zero value).
+	var f FlexInt
+	if err := json.Unmarshal([]byte(`null`), &f); err != nil {
+		t.Fatalf("unmarshal null: %v", err)
+	}
+	if f.IsSet() {
+		t.Error("null IsSet = true, want false")
+	}
+	if got := f.Int64(); got != 0 {
+		t.Errorf("null Int64() = %d, want 0", got)
+	}
+
+	// A non-integer string MUST error — a silent coerce to 0 would recreate
+	// the wrong-type-hides-bug class FlexInt exists to prevent.
+	if err := json.Unmarshal([]byte(`"abc"`), &f); err == nil {
+		t.Error(`unmarshal "abc": nil error, want a parse error (silent coerce is the bug)`)
+	}
+	// An object MUST error loudly, not silently coerce.
+	if err := json.Unmarshal([]byte(`{"id":1}`), &f); err == nil {
+		t.Error(`unmarshal {"id":1}: nil error, want an error (object is not a valid FlexInt)`)
 	}
 }
 

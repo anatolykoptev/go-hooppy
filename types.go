@@ -436,10 +436,12 @@ type Post struct {
 	RepostTitle string `json:"repost_title"`
 	// photo: a media descriptor OBJECT, not a URL string — measured from a
 	// live GET /posts response. The name is misleading: type was "video"
-	// in the capture, so this field is not photo-specific. post_id is a
-	// STRING while id and owner_id are numbers. See PostPhoto for the
-	// measured shape. A pointer so a text-only post (photo null/absent)
-	// decodes to nil rather than a zero-value struct.
+	// in the capture, so this field is not photo-specific. Inside the
+	// object, id and updated_date are POLYMORPHIC (number on some rows,
+	// string on others — measured across 60 rows); every other field is
+	// stable. See PostPhoto for the censused shape and the FlexInt type
+	// for the polymorphic fields. A pointer so a text-only post
+	// (photo null/absent) decodes to nil rather than a zero-value struct.
 	Photo *PostPhoto `json:"photo"`
 	// photos_amount: photo count (SearchPostsFilter.PhotosAmount is int).
 	PhotosAmount int `json:"photos_amount"`
@@ -485,23 +487,46 @@ type PostPublicationDate struct {
 
 // PostPhoto is the media descriptor carried in Post.Photo. Despite the
 // field name, it is NOT photo-specific: the measured capture had
-// type:"video". Note the mixed types: id and owner_id are NUMBERS while
-// post_id is a STRING. Measured from a live GET /posts response:
+// type:"video". Types below are censused across 60 rows on three pages —
+// a field's type is a property of the collection, not of one row.
+//
+// Two fields are POLYMORPHIC across the collection: id and updated_date
+// each arrive as a JSON number on some rows and a JSON string on others.
+// Both are FlexInt (accept either form, expose Int64()) so neither shape
+// can abort the decode — the bug that shipped twice because the prior
+// fixtures sampled a single row. Every other field is stable across all
+// 60 rows; their types are exactly as censused:
+//
+//	access_key string, description string, duration number, file_path string,
+//	folder string, is_used number, name string, owner_id number,
+//	post_id string, preview string, source_id number, sticker string,
+//	text string, title string, type string
+//
+// Anonymised example (number-form id):
 //
 //	{"id":3,"owner_id":4,"post_id":"5","access_key":"A","source_id":1,
 //	 "type":"video","title":"A","description":"","duration":383,
-//	 "preview":"https://example.invalid/x"}
+//	 "preview":"https://example.invalid/x","is_used":0,"name":"A",
+//	 "sticker":"","file_path":"A","text":"","folder":"A",
+//	 "updated_date":1700000000}
 type PostPhoto struct {
-	ID          int    `json:"id"`
-	OwnerID     int    `json:"owner_id"`
-	PostID      string `json:"post_id"` // STRING while id/owner_id are numbers
-	AccessKey   string `json:"access_key"`
-	SourceID    int    `json:"source_id"`
-	Type        string `json:"type"` // "video" observed — not photo-specific
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Duration    int    `json:"duration"`
-	Preview     string `json:"preview"`
+	ID          FlexInt `json:"id"`           // POLYMORPHIC: number | string across rows
+	OwnerID     int     `json:"owner_id"`     // number (stable)
+	PostID      string  `json:"post_id"`      // string (stable, while id is polymorphic)
+	AccessKey   string  `json:"access_key"`   // string (stable)
+	SourceID    int     `json:"source_id"`    // number (stable)
+	Type        string  `json:"type"`         // "video" observed — not photo-specific
+	Title       string  `json:"title"`        // string (stable)
+	Description string  `json:"description"`  // string (stable)
+	Duration    int     `json:"duration"`     // number (stable)
+	Preview     string  `json:"preview"`      // string (stable)
+	IsUsed      int     `json:"is_used"`      // number (stable)
+	Name        string  `json:"name"`         // string (stable)
+	Sticker     string  `json:"sticker"`      // string (stable)
+	FilePath    string  `json:"file_path"`    // string (stable)
+	Text        string  `json:"text"`         // string (stable)
+	Folder      string  `json:"folder"`       // string (stable)
+	UpdatedDate FlexInt `json:"updated_date"` // POLYMORPHIC: number | string across rows
 }
 
 // PostSchedule is a nested schedule reference inside a GET /posts row's
@@ -567,6 +592,91 @@ func (m Metric) String() string {
 		return s
 	}
 	return string(m.raw)
+}
+
+// FlexInt is an integer field the API encodes as EITHER a JSON number or a
+// JSON string ("123") — both forms occur for PostPhoto.ID and
+// PostPhoto.UpdatedDate within the SAME collection (measured across 60 rows
+// on three pages), so a typed int field would abort the decode on the string
+// form and a typed string field would abort on the number form. That is the
+// same bug class as Post.Photo (string vs object) and Post.Photo.ID (int vs
+// string) that this fix addresses: a field's type is a property of the
+// collection, not of the row you happened to look at.
+//
+// FlexInt accepts a JSON number, a JSON string holding an integer, or null
+// (→ unset) via a custom UnmarshalJSON. The raw wire bytes are preserved so
+// MarshalJSON round-trips the exact form (string stays quoted, number stays
+// bare) and printJSON output stays clean. Int64() returns the typed value
+// regardless of the wire form; IsSet() reports whether a non-null value was
+// present.
+type FlexInt struct {
+	raw json.RawMessage
+	set bool
+}
+
+// UnmarshalJSON accepts null (→ unset), a JSON number, or a JSON string
+// holding an integer. Any other shape returns an error rather than silently
+// coercing — a silent coerce would recreate the wrong-type-hides-bug class
+// this type exists to prevent.
+func (f *FlexInt) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if len(s) == 0 || s == "null" {
+		f.raw, f.set = nil, false
+		return nil
+	}
+	// Validate: must be a number or a quoted string. Reject objects/arrays
+	// outright so a shape change is loud, not silent.
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		if _, err := strconv.ParseInt(strings.TrimSpace(str), 10, 64); err != nil {
+			return fmt.Errorf("FlexInt: string %q is not an integer: %w", str, err)
+		}
+	} else if _, err := strconv.ParseInt(s, 10, 64); err != nil {
+		return fmt.Errorf("FlexInt: expected number or string, got %s: %w", s, err)
+	}
+	f.raw = append(json.RawMessage(nil), b...)
+	f.set = true
+	return nil
+}
+
+// MarshalJSON round-trips the captured wire value, or 0 when unset (a missing
+// FlexInt field marshals as 0, matching the int zero-value convention).
+func (f FlexInt) MarshalJSON() ([]byte, error) {
+	if !f.set {
+		return []byte("0"), nil
+	}
+	return f.raw, nil
+}
+
+// IsSet reports whether a non-null value was present on the wire.
+func (f FlexInt) IsSet() bool { return f.set }
+
+// Int64 returns the integer value whether the wire form was a bare number or
+// a quoted string ("123" → 123). Returns 0 when unset/null. The accessor is
+// the point: callers compare a typed int, never the raw wire form, so a
+// string-vs-number split in the collection cannot reach them.
+func (f FlexInt) Int64() int64 {
+	if !f.set {
+		return 0
+	}
+	// Bare number first (the common case).
+	var n json.Number
+	if json.Unmarshal(f.raw, &n) == nil {
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+	}
+	// Quoted string form.
+	var str string
+	if json.Unmarshal(f.raw, &str) == nil {
+		if i, err := strconv.ParseInt(strings.TrimSpace(str), 10, 64); err == nil {
+			return i
+		}
+	}
+	return 0
 }
 
 // Photo is an uploaded photo attachment.

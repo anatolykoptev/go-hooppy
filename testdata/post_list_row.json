@@ -29,7 +29,14 @@
         "title": "A",
         "description": "",
         "duration": 383,
-        "preview": "https://example.invalid/x"
+        "preview": "https://example.invalid/x",
+        "is_used": 0,
+        "name": "A",
+        "sticker": "",
+        "file_path": "A",
+        "text": "",
+        "folder": "A",
+        "updated_date": 1700000000
       },
       "publication_date": {
         "date": "29 Июля",
