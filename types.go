@@ -74,6 +74,28 @@ type Schedule struct {
 // (all flags off/0, state=1, publication_how_type=1, publication_where_type=1);
 // then override only the fields you need.
 //
+// MODE INVARIANT (issue #66): the server enforces a mode-dependent
+// requirement that SchedulePayload MUST satisfy before any request:
+//   - publication_how_type=1 (manual): selected_pages_by_source_ids MUST be
+//     non-empty (at least one source→pages entry).
+//   - publication_how_type=2 (by project): project_id MUST be non-zero.
+//
+// NewSchedulePayload defaults to how_type=1 with NO pages — its output fails
+// Validate() until the caller sets SelectedPagesBySourceIDs. This is
+// intentional: a constructor whose output is silently accepted by the server
+// was never possible (every CreateSchedule call 500'd), so the honest default
+// is one that fails locally with a clear error rather than remotely with
+// "Undefined index". Callers who want how_type=2 must set PublicationHowType=2
+// and ProjectID.
+//
+// KNOWN-HOSTILE FIELD SHAPES (issue #66, out of scope for this PR):
+// publish_as_story_source_ids and share_stories_to_feed_source_ids are typed
+// int here, but the live API carries comma-separated strings like "1,2,7,9".
+// The server coerces, so the int type is not fatal for the create/update path,
+// but a byte-identity round trip through SchedulePayload would mangle them
+// (int 0 vs. the original string). Use UpdateScheduleFromEdit for round-trip
+// preservation; do not "fix" these types without a separate measurement PR.
+//
 // UNDOCUMENTED: these fields are not in the public OpenAPI spec (v0.1.0).
 // The API may change without notice.
 type SchedulePayload struct {
@@ -93,7 +115,7 @@ type SchedulePayload struct {
 	IsRandomContent             int    `json:"is_random_content"`                // 0/1
 	IsCommentsDisabled          int    `json:"is_comments_disabled"`             // 0/1
 	PublishAsStory              int    `json:"publish_as_story"`                 // 0/1
-	PublishAsStorySourceIDs     int    `json:"publish_as_story_source_ids"`      // 0=none
+	PublishAsStorySourceIDs     int    `json:"publish_as_story_source_ids"`      // 0=none — KNOWN-HOSTILE: server carries "1,2,7,9" (string), coerces; see struct doc.
 	PublishAsReels              int    `json:"publish_as_reels"`                 // 0/1
 	PublishAsClips              int    `json:"publish_as_clips"`                 // 0/1
 	PublishAsShorts             int    `json:"publish_as_shorts"`                // 0/1
@@ -101,7 +123,7 @@ type SchedulePayload struct {
 	PublishAsArticleByLink      int    `json:"publish_as_article_by_link"`       // 0/1
 	PublishInChannel            int    `json:"publish_in_channel"`               // 0/1
 	ShareStoriesToFeed          int    `json:"share_stories_to_feed"`            // 0/1
-	ShareStoriesToFeedSourceIDs int    `json:"share_stories_to_feed_source_ids"` // 0=none
+	ShareStoriesToFeedSourceIDs int    `json:"share_stories_to_feed_source_ids"` // 0=none — KNOWN-HOSTILE: server carries "1,2,7,9" (string), coerces; see struct doc.
 	ShareReelsToFeed            int    `json:"share_reels_to_feed"`              // 0/1
 	ShareClipsToFeed            int    `json:"share_clips_to_feed"`              // 0/1
 	ShareClipsToFeedWithText    int    `json:"share_clips_to_feed_with_text"`    // 0/1
@@ -116,12 +138,25 @@ type SchedulePayload struct {
 	SaveVKVideosNames           int    `json:"save_vk_videos_names"`             // 0/1
 	PlanByNetwork               int    `json:"plan_by_network"`                  // 0/1
 	PublishAsCarousel           int    `json:"publish_as_carousel"`              // 0/1
+	// ProjectID is required when PublicationHowType=2 (by project). The server
+	// 500s with "Undefined index: project_id" if it is absent. Added in #66 so
+	// the mode invariant is satisfiable for how_type=2.
+	ProjectID int `json:"project_id"`
+	// SelectedPagesBySourceIDs is required when PublicationHowType=1 (manual).
+	// Same shape as ScheduleEditResponse.SelectedPagesBySourceIDs:
+	// source_id → list of page ids. The server 500s if it is absent or empty
+	// under how_type=1. Added in #66 so the mode invariant is satisfiable.
+	SelectedPagesBySourceIDs map[int][]int `json:"selected_pages_by_source_ids"`
 }
 
 // NewSchedulePayload returns a SchedulePayload with sensible defaults:
 // all flags off (0), state=active, publication_how_type=manual,
 // publication_where_type=pages. Override fields as needed before
 // calling CreateSchedule or UpdateSchedule.
+//
+// The default how_type=1 requires a non-empty SelectedPagesBySourceIDs to
+// pass Validate() — set it before calling CreateSchedule, or switch to
+// how_type=2 with a ProjectID. See SchedulePayload doc for the mode invariant.
 func NewSchedulePayload(name string) SchedulePayload {
 	return SchedulePayload{
 		Name:                 name,
@@ -129,6 +164,33 @@ func NewSchedulePayload(name string) SchedulePayload {
 		PublicationHowType:   1,
 		PublicationWhereType: 1,
 	}
+}
+
+// Validate checks the mode invariant the Hooppy server enforces on
+// POST /posts/schedules and PUT /posts/schedules/{id}:
+//   - publication_how_type=1 (manual): SelectedPagesBySourceIDs must be
+//     non-empty (at least one source→pages entry).
+//   - publication_how_type=2 (by project): ProjectID must be non-zero.
+//
+// Returns an error naming which invariant failed and what would satisfy it,
+// so the caller learns the requirement without a server 500 that says only
+// "Undefined index: <key>". CreateSchedule calls this before any request;
+// callers of UpdateSchedule should call it explicitly (UpdateSchedule itself
+// does not guard — see its doc for why).
+func (p SchedulePayload) Validate() error {
+	switch p.PublicationHowType {
+	case 1:
+		if len(p.SelectedPagesBySourceIDs) == 0 {
+			return fmt.Errorf("hooppy: schedule payload invalid: publication_how_type=1 (manual) requires a non-empty selected_pages_by_source_ids (at least one source→pages entry); set SelectedPagesBySourceIDs or switch to publication_how_type=2 with a ProjectID")
+		}
+	case 2:
+		if p.ProjectID == 0 {
+			return fmt.Errorf("hooppy: schedule payload invalid: publication_how_type=2 (by project) requires a non-zero project_id; set ProjectID or switch to publication_how_type=1 with SelectedPagesBySourceIDs")
+		}
+	default:
+		return fmt.Errorf("hooppy: schedule payload invalid: publication_how_type=%d is not a recognised mode (1=manual, 2=by project)", p.PublicationHowType)
+	}
+	return nil
 }
 
 // ScheduleResponse is returned by POST/PUT/DELETE /posts/schedules.

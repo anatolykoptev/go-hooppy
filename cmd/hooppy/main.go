@@ -482,15 +482,18 @@ func registerSchedules(root *cobra.Command) {
 	}
 
 	// schedules update (undocumented)
+	// Routes through UpdateScheduleFromEdit (read-modify-write) — NOT the
+	// raw UpdateSchedule partial writer, which drops 36 of 72 fields the
+	// server carries on /edit and would silently destroy the schedule's
+	// times, page selection, and project binding on a name-only change.
 	schedUpdateCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
 		Name:  "update",
-		Short: "Update a schedule by ID (undocumented endpoint)",
+		Short: "Update a schedule by ID, preserving all fields (read-modify-write, undocumented endpoint)",
 	})
 	var schedUpdName string
 	var schedUpdState int
-	schedUpdateCmd.Flags().StringVar(&schedUpdName, "name", "", "schedule name (required)")
-	schedUpdateCmd.Flags().IntVar(&schedUpdState, "state", 1, "state: 1=active, 0=paused")
-	_ = schedUpdateCmd.MarkFlagRequired("name")
+	schedUpdateCmd.Flags().StringVar(&schedUpdName, "name", "", "schedule name (applied via read-modify-write; all other fields preserved)")
+	schedUpdateCmd.Flags().IntVar(&schedUpdState, "state", 0, "state override: 1=active, 2=deferred, 3=stopped (0 = leave unchanged)")
 	schedUpdateCmd.Run = func(_ *cobra.Command, args []string) {
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: hooppy schedules update <id> --name=... [--state=1]")
@@ -498,10 +501,23 @@ func registerSchedules(root *cobra.Command) {
 		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
+		if schedUpdName == "" && schedUpdState == 0 {
+			fmt.Fprintln(os.Stderr, "hooppy: schedules update: at least one of --name or --state is required")
+			os.Exit(1)
+		}
+		overrides := map[string]json.RawMessage{}
+		if schedUpdName != "" {
+			b, err := json.Marshal(schedUpdName)
+			die(err)
+			overrides["name"] = b
+		}
+		if schedUpdState != 0 {
+			b, err := json.Marshal(schedUpdState)
+			die(err)
+			overrides["state"] = b
+		}
 		c := mustClient()
-		payload := hooppy.NewSchedulePayload(schedUpdName)
-		payload.State = schedUpdState
-		resp, err := c.UpdateSchedule(context.Background(), id, payload)
+		resp, err := c.UpdateScheduleFromEdit(context.Background(), id, overrides)
 		die(err)
 		printJSON(resp)
 	}

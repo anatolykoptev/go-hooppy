@@ -26,6 +26,7 @@ func TestCreateSchedule(t *testing.T) {
 
 	payload := NewSchedulePayload("Test Schedule")
 	payload.PublishAsStory = 1
+	payload.SelectedPagesBySourceIDs = map[int][]int{1: {100, 200}} // satisfy how_type=1 invariant
 	resp, err := c.CreateSchedule(context.Background(), payload)
 	if err != nil {
 		t.Fatalf("CreateSchedule: %v", err)
@@ -45,7 +46,8 @@ func TestCreateSchedule(t *testing.T) {
 	if capturedBody["publish_as_story"] != float64(1) {
 		t.Errorf("body publish_as_story = %v, want 1", capturedBody["publish_as_story"])
 	}
-	// Verify all 34 required fields are present
+	// Verify all 36 required fields are present (34 original + project_id +
+	// selected_pages_by_source_ids added in #66).
 	requiredFields := []string{
 		"name", "state", "publication_how_type", "publication_where_type",
 		"watermark_id", "utm_tags", "is_unique_content", "is_posts_repeated",
@@ -58,6 +60,7 @@ func TestCreateSchedule(t *testing.T) {
 		"publish_as_user", "add_link_to_user", "message_to_community",
 		"message_to_channel", "download_vk_videos", "save_vk_videos_names",
 		"plan_by_network", "publish_as_carousel",
+		"project_id", "selected_pages_by_source_ids",
 	}
 	for _, field := range requiredFields {
 		if _, ok := capturedBody[field]; !ok {
@@ -198,8 +201,9 @@ func TestDeleteProject(t *testing.T) {
 }
 
 func TestCreateSchedule_AllFieldsSerialized(t *testing.T) {
-	// Verify that ALL 34 fields are serialized (no omitempty) — the API
-	// requires every field to be present.
+	// Verify that ALL 36 fields are serialized (no omitempty) — the API
+	// requires every field to be present. 34 original + project_id +
+	// selected_pages_by_source_ids added in #66.
 	var capturedBody map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -210,10 +214,11 @@ func TestCreateSchedule_AllFieldsSerialized(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	payload := NewSchedulePayload("test")
+	payload.SelectedPagesBySourceIDs = map[int][]int{1: {100}} // satisfy how_type=1 invariant
 	_, _ = c.CreateSchedule(context.Background(), payload)
 
 	// All fields must be present (no omitempty on SchedulePayload)
-	expectedFields := 34
+	expectedFields := 36
 	if len(capturedBody) != expectedFields {
 		t.Errorf("serialized field count = %d, want %d (all fields must be present, no omitempty)", len(capturedBody), expectedFields)
 		t.Logf("fields: %v", capturedBody)

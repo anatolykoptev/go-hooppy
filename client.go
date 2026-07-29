@@ -222,6 +222,51 @@ func (c *Client) doPUT(ctx context.Context, path string, body interface{}, out i
 	return c.do(req, out)
 }
 
+// doGETRaw performs a GET request and returns the raw response body bytes,
+// without JSON-decoding into a Go struct. Used by UpdateScheduleFromEdit to
+// fetch the full /edit response (72 keys) as raw bytes so unmodelled fields
+// are preserved through the read-modify-write cycle — decoding into a Go
+// struct would silently drop them.
+func (c *Client) doGETRaw(ctx context.Context, path string) ([]byte, error) {
+	u := c.baseURL + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: build request: %w", err)
+	}
+	c.setAuth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, newAPIError(resp)
+	}
+	limited := io.LimitReader(resp.Body, c.maxResponseBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: read response: %w", err)
+	}
+	if int64(len(data)) > c.maxResponseBytes {
+		return nil, fmt.Errorf("hooppy: response exceeds max size %d bytes", c.maxResponseBytes)
+	}
+	return data, nil
+}
+
+// doPUTRaw performs a PUT request with a pre-encoded JSON body (raw bytes)
+// and decodes the JSON response into out. Used by UpdateScheduleFromEdit to
+// send the complete 72-key state object without re-marshalling through a Go
+// struct (which would drop unmodelled fields).
+func (c *Client) doPUTRaw(ctx context.Context, path string, body []byte, out interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("hooppy: build request: %w", err)
+	}
+	c.setAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(req, out)
+}
+
 // doDELETE performs a DELETE request and decodes the response.
 // When retry is enabled (Config.RetryOptions non-nil), transient failures
 // (429/5xx) are retried with exponential backoff. DELETE is idempotent
