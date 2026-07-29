@@ -1,0 +1,40 @@
+{
+  "id": 42,
+  "name": "A",
+  "times": [
+    [{"hours": 12, "minutes": 25}, {"hours": 14, "minutes": 25}, {"hours": 16, "minutes": "00"}, {"hours": 17, "minutes": 35}],
+    [],
+    [{"hours": 12, "minutes": 25}, {"hours": 14, "minutes": 25}],
+    [],
+    [],
+    [],
+    []
+  ],
+  "posts_hashtags": {"tag1": "value1"},
+  "posts_links": {"link1": "https://example.invalid/x"},
+  "project_id": 7,
+  "projects": [
+    {"id": 7, "user_id": 1, "position": 0, "name": "A", "is_deleted": 0, "publication_where_type": 1, "posts_count": 3, "watermark_id": 0, "utm_tags": ""}
+  ],
+  "selected_pages_by_source_ids": {"1": [100, 200]},
+  "selected_albums_by_source_ids": {"1": [300]},
+  "social_pages_by_accounts": [
+    {
+      "account": {"id": 123, "social_id": "3251", "source_id": 6, "name": "A", "photo": "https://example.invalid/x", "link": "https://example.invalid/x"},
+      "pages": [
+        {"id": 100, "social_id": "100", "type": "board", "name": "A", "alias": "", "photo": "", "link": "https://example.invalid/x"},
+        {"id": 101, "social_id": "101", "type": "board", "name": "B", "alias": "", "photo": "", "link": "https://example.invalid/x"}
+      ]
+    },
+    {
+      "account": {"id": 124, "social_id": "3252", "source_id": 1, "name": "B", "photo": "https://example.invalid/x", "link": "https://example.invalid/x"},
+      "pages": [
+        {"id": 200, "social_id": "200", "type": "group", "name": "C", "alias": "c", "photo": "https://example.invalid/x", "link": "https://example.invalid/x"}
+      ]
+    }
+  ],
+  "social_albums_by_pages": [],
+  "watermarks": [
+    {"id": 1, "user_id": 1, "name": "A", "file": "https://example.invalid/x", "space": 10, "position": 1, "opacity": 80, "size": 50}
+  ]
+}

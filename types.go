@@ -168,19 +168,36 @@ type ScheduleTimeSlot struct {
 //   - selected_pages_by_source_ids / selected_albums_by_source_ids:
 //     map[int][]int — same shape as PostEditResponse.SelectedPagesBySourceIDs
 //     (source_id → list of page/album ids).
-//   - social_pages_by_accounts: map[int][]Page — page-shaped, keyed by
-//     account id. Reuses the narrow Page struct (id/source/social-ids/name/
-//     photo only) so the OAuth tokens page objects carry elsewhere in this
-//     API CANNOT reach the marshalled output. See
+//   - social_pages_by_accounts: []SocialPagesByAccount — an ARRAY, despite
+//     the "by_accounts" suffix reading like a map keyed by account id. This
+//     is the sixth instance on this API of a name implying the wrong shape
+//     (errors_for_source_ids was an array of ints, not a map; photo was an
+//     object, not a string). Each element is {account, pages}; the account
+//     and page sub-objects use a DIFFERENT field set from the accounts-surface
+//     Account/Page types (social_id/name/photo/link, not social_account_id/
+//     social_account_name/...), so they get their own narrow types —
+//     SocialPagesAccount and SocialPagesPage — which list ONLY the safe
+//     fields measured on the wire. The OAuth tokens page objects carry
+//     elsewhere in this API (access_token, bot_token, refresh_token,
+//     password, wp_app_password, access_token_secret) are intentionally NOT
+//     modelled and therefore cannot reach the marshalled output. See
 //     TestScheduleEdit_DecodeCredentialHygiene.
-//   - projects: []Project — array of narrow project objects (id/name).
+//   - projects: []Project — array of full project objects (id, user_id,
+//     position, name, is_deleted, publication_where_type, posts_count,
+//     watermark_id, utm_tags, ...). The existing narrow Project type (id/
+//     name) FITS: Go's encoding/json silently ignores the extra fields, so
+//     the decode succeeds and captures the two fields callers need. Reused
+//     rather than widened — a wider struct would model fields nobody reads
+//     and risk a wrong-guess abort on an unmeasured nested type.
 //   - watermarks: []Watermark — array of narrow watermark objects (no
 //     credential fields).
 //   - posts_hashtags, posts_links: json.RawMessage — measured as objects,
 //     but the key/value shape is not evidenced; RawMessage is the one choice
 //     that cannot abort the decode on a wrong guess.
-//   - social_albums_by_pages: json.RawMessage — shape not measured beyond
-//     the name (albums keyed by page); RawMessage avoids a wrong-guess abort.
+//   - social_albums_by_pages: json.RawMessage — an EMPTY ARRAY in every
+//     sample; the element shape is therefore UNOBSERVED. RawMessage avoids
+//     guessing a struct that would abort the decode once a non-empty
+//     response arrives.
 //
 // UNDOCUMENTED: GET /posts/schedules/{id}/edit is not in the public OpenAPI
 // spec (v0.1.0). Discovered via API probing — may change without notice.
@@ -191,15 +208,87 @@ type ScheduleEditResponse struct {
 	// holding that day's slots. A weekday with no slots is an empty array.
 	Times [][]ScheduleTimeSlot `json:"times"`
 	// The ten list-absent fields (issue #69).
-	PostsHashtags             json.RawMessage `json:"posts_hashtags"` // object — key/value shape not measured
-	PostsLinks                json.RawMessage `json:"posts_links"`    // object — key/value shape not measured
-	ProjectID                 int             `json:"project_id"`
-	Projects                  []Project       `json:"projects"`
-	SelectedPagesBySourceIDs  map[int][]int   `json:"selected_pages_by_source_ids"`
-	SelectedAlbumsBySourceIDs map[int][]int   `json:"selected_albums_by_source_ids"`
-	SocialPagesByAccounts     map[int][]Page  `json:"social_pages_by_accounts"`
-	SocialAlbumsByPages       json.RawMessage `json:"social_albums_by_pages"` // shape not measured
-	Watermarks                []Watermark     `json:"watermarks"`
+	PostsHashtags             json.RawMessage        `json:"posts_hashtags"` // object — key/value shape not measured
+	PostsLinks                json.RawMessage        `json:"posts_links"`    // object — key/value shape not measured
+	ProjectID                 int                    `json:"project_id"`
+	Projects                  []Project              `json:"projects"`
+	SelectedPagesBySourceIDs  map[int][]int          `json:"selected_pages_by_source_ids"`
+	SelectedAlbumsBySourceIDs map[int][]int          `json:"selected_albums_by_source_ids"`
+	SocialPagesByAccounts     []SocialPagesByAccount `json:"social_pages_by_accounts"`
+	SocialAlbumsByPages       json.RawMessage        `json:"social_albums_by_pages"` // empty array in every sample; element shape unobserved
+	Watermarks                []Watermark            `json:"watermarks"`
+}
+
+// SocialPagesByAccount is one element of the social_pages_by_accounts array
+// on GET /posts/schedules/{id}/edit: a connected account and the pages
+// available to it for this schedule. The field name reads like a map keyed
+// by account id, but the wire shape is an ARRAY of these objects — the
+// sixth name-implies-wrong-shape instance on this API.
+//
+// Narrow: only the account and pages sub-objects are modelled, and each of
+// those lists only the safe fields measured on the wire (see SocialPagesAccount
+// and SocialPagesPage). The OAuth tokens page objects carry elsewhere in this
+// API are NOT modelled and cannot reach the marshalled output — see
+// TestScheduleEdit_DecodeCredentialHygiene.
+type SocialPagesByAccount struct {
+	Account SocialPagesAccount `json:"account"`
+	Pages   []SocialPagesPage  `json:"pages"`
+}
+
+// SocialPagesAccount is the account sub-object inside a
+// social_pages_by_accounts element. Its field set DIFFERS from the
+// accounts-surface Account type (social_id/name/photo/link here, not
+// social_account_id/social_account_name/social_account_photo), so it gets
+// its own narrow type rather than reusing Account.
+//
+// Field types from the measured capture (15 elements):
+//   - id: number (int) — the account's internal id.
+//   - social_id: STRING — the same number-beside-stringified-id pattern that
+//     bit photo.id; typed string, not int, because the wire sends a string.
+//   - source_id: number (int).
+//   - name, photo, link: strings (photo/link are URLs).
+//
+// No token fields are modelled. Page-shaped objects elsewhere on this API
+// carry access_token/bot_token/refresh_token/password/wp_app_password/
+// access_token_secret; this account sub-object was not observed carrying
+// them, but the narrow modelling guarantees they cannot leak even if a
+// future response includes them.
+type SocialPagesAccount struct {
+	ID       int    `json:"id"`
+	SocialID string `json:"social_id"`
+	SourceID int    `json:"source_id"`
+	Name     string `json:"name"`
+	Photo    string `json:"photo"`
+	Link     string `json:"link"`
+}
+
+// SocialPagesPage is one page inside a social_pages_by_accounts element's
+// pages array. Its field set DIFFERS from the accounts-surface Page type
+// (social_id/type/name/alias/photo/link here, not social_page_id/
+// social_page_name/social_page_photo/page_id), so it gets its own narrow
+// type rather than reusing Page.
+//
+// Field types from the measured capture:
+//   - id: number (int).
+//   - social_id: STRING — number-beside-stringified-id pattern; typed string.
+//   - type: string (e.g. "board").
+//   - name, alias, photo, link: strings.
+//
+// No token fields are modelled. This is the credential-hygiene-critical
+// surface: page-shaped objects on this API carry live OAuth tokens
+// (access_token, bot_token, refresh_token, password, wp_app_password,
+// access_token_secret). The sample showed only safe fields, but the sample
+// is one account's worth — the narrow struct guarantees the token values
+// are dropped at decode and absent from any re-marshal, so a credential
+// cannot reach stdout via printJSON. See TestScheduleEdit_DecodeCredentialHygiene.
+type SocialPagesPage struct {
+	ID       int    `json:"id"`
+	SocialID string `json:"social_id"`
+	Type     string `json:"type"`
+	Name     string `json:"name"`
+	Alias    string `json:"alias"`
+	Photo    string `json:"photo"`
+	Link     string `json:"link"`
 }
 
 // DeleteResponse is returned by DELETE endpoints (schedules, projects).

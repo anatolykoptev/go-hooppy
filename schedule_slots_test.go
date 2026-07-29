@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,8 +38,8 @@ func TestGetScheduleEdit_DecodeTimes(t *testing.T) {
 		"projects": [{"id": 7, "name": "Project A"}],
 		"selected_pages_by_source_ids": {"1": [100, 200]},
 		"selected_albums_by_source_ids": {"1": [300]},
-		"social_pages_by_accounts": {"123": [{"id": 100, "source_id": 1, "social_page_name": "Page A"}]},
-		"social_albums_by_pages": {"100": [300]},
+		"social_pages_by_accounts": [{"account": {"id": 123, "social_id": "3251", "source_id": 1, "name": "A", "photo": "https://example.invalid/x", "link": "https://example.invalid/x"}, "pages": [{"id": 100, "social_id": "100", "type": "board", "name": "Page A", "alias": "", "photo": "", "link": "https://example.invalid/x"}]}],
+		"social_albums_by_pages": [],
 		"watermarks": [{"id": 1, "name": "WM A"}]
 	}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -93,27 +95,43 @@ func TestGetScheduleEdit_DecodeTimes(t *testing.T) {
 
 // TestScheduleEdit_DecodeCredentialHygiene verifies that
 // social_pages_by_accounts carrying OAuth tokens (access_token, bot_token,
-// password) cannot reach the marshalled ScheduleEditResponse output. The
-// field reuses the narrow Page struct, which models only id/source/social-
-// ids/name/photo — the token fields are silently dropped at decode and
-// therefore absent from any re-marshal. This is the RED-on-revert test for
-// the credential-hygiene invariant on the schedule-edit decode path.
+// refresh_token, password, wp_app_password, access_token_secret) cannot
+// reach the marshalled ScheduleEditResponse output. The field is an array
+// of {account, pages}; BOTH the account sub-object and the page sub-object
+// are modelled by narrow structs (SocialPagesAccount / SocialPagesPage)
+// that list only the safe fields measured on the wire — the token fields
+// are silently dropped at decode and therefore absent from any re-marshal.
+// This is the RED-on-revert test for the credential-hygiene invariant on
+// the schedule-edit decode path: if either sub-object were widened to
+// map[string]interface{} or json.RawMessage, the token values would leak
+// through to stdout via printJSON.
 func TestScheduleEdit_DecodeCredentialHygiene(t *testing.T) {
 	body := `{
 		"id": 42,
 		"name": "S",
 		"times": [[]],
-		"social_pages_by_accounts": {
-			"123": [{
-				"id": 100, "source_id": 1, "account_id": 123,
-				"social_page_id": "999", "social_page_name": "test page",
-				"social_page_photo": "https://pp.vk.me/p.jpg",
+		"social_pages_by_accounts": [{
+			"account": {
+				"id": 123, "social_id": "3251", "source_id": 1, "name": "A",
+				"photo": "https://example.invalid/x", "link": "https://example.invalid/x",
 				"access_token": "SECRET_ACCESS_TOKEN_VALUE",
 				"bot_token": "SECRET_BOT_TOKEN_VALUE",
+				"refresh_token": "SECRET_REFRESH_TOKEN_VALUE",
 				"password": "SECRET_PASSWORD_VALUE",
+				"wp_app_password": "SECRET_WP_APP_PASSWORD_VALUE",
+				"access_token_secret": "SECRET_ACCESS_TOKEN_SECRET_VALUE"
+			},
+			"pages": [{
+				"id": 100, "social_id": "100", "type": "board", "name": "test page",
+				"alias": "", "photo": "", "link": "https://example.invalid/x",
+				"access_token": "SECRET_ACCESS_TOKEN_VALUE",
+				"bot_token": "SECRET_BOT_TOKEN_VALUE",
+				"refresh_token": "SECRET_REFRESH_TOKEN_VALUE",
+				"password": "SECRET_PASSWORD_VALUE",
+				"wp_app_password": "SECRET_WP_APP_PASSWORD_VALUE",
 				"access_token_secret": "SECRET_ACCESS_TOKEN_SECRET_VALUE"
 			}]
-		}
+		}]
 	}`
 	var edit ScheduleEditResponse
 	if err := json.Unmarshal([]byte(body), &edit); err != nil {
@@ -127,7 +145,9 @@ func TestScheduleEdit_DecodeCredentialHygiene(t *testing.T) {
 	secretValues := []string{
 		"SECRET_ACCESS_TOKEN_VALUE",
 		"SECRET_BOT_TOKEN_VALUE",
+		"SECRET_REFRESH_TOKEN_VALUE",
 		"SECRET_PASSWORD_VALUE",
+		"SECRET_WP_APP_PASSWORD_VALUE",
 		"SECRET_ACCESS_TOKEN_SECRET_VALUE",
 	}
 	for _, secret := range secretValues {
@@ -135,9 +155,123 @@ func TestScheduleEdit_DecodeCredentialHygiene(t *testing.T) {
 			t.Errorf("marshalled ScheduleEditResponse leaked credential value %q:\n%s", secret, got)
 		}
 	}
-	// The modelled page fields must still be present.
-	if !strings.Contains(got, `"social_page_name":"test page"`) {
-		t.Errorf("marshalled ScheduleEditResponse lost the safe page field social_page_name:\n%s", got)
+	// The modelled page fields must still be present (the narrow struct
+	// kept the safe fields while dropping the tokens).
+	if !strings.Contains(got, `"name":"test page"`) {
+		t.Errorf("marshalled ScheduleEditResponse lost the safe page field name:\n%s", got)
+	}
+	// The account sub-object's safe fields must also survive.
+	if len(edit.SocialPagesByAccounts) != 1 {
+		t.Fatalf("SocialPagesByAccounts = %d entries, want 1", len(edit.SocialPagesByAccounts))
+	}
+	if got, want := edit.SocialPagesByAccounts[0].Account.ID, 123; got != want {
+		t.Errorf("Account.ID = %d, want %d", got, want)
+	}
+	if got, want := edit.SocialPagesByAccounts[0].Account.SocialID, "3251"; got != want {
+		t.Errorf("Account.SocialID = %q, want %q (string, not int)", got, want)
+	}
+	if len(edit.SocialPagesByAccounts[0].Pages) != 1 {
+		t.Fatalf("Pages = %d, want 1", len(edit.SocialPagesByAccounts[0].Pages))
+	}
+	if got, want := edit.SocialPagesByAccounts[0].Pages[0].ID, 100; got != want {
+		t.Errorf("Pages[0].ID = %d, want %d", got, want)
+	}
+	if got, want := edit.SocialPagesByAccounts[0].Pages[0].SocialID, "100"; got != want {
+		t.Errorf("Pages[0].SocialID = %q, want %q (string, not int)", got, want)
+	}
+}
+
+// TestGetScheduleEdit_DecodeRealCapture is the regression guard built from
+// the captured GET /posts/schedules/{id}/edit response shape
+// (testdata/schedule_edit.json), not a hand-written inline fixture. IDs →
+// small integers, names → "A"/"B"/"C", URLs → example.invalid, but every
+// KEY and every VALUE TYPE is exactly as the server sends them — including:
+//
+//   - social_pages_by_accounts is an ARRAY (the crash field: typed as a map
+//     it aborted the whole decode with "cannot unmarshal array into Go struct
+//     field ... of type map[int][]hooppy.Page"). This is the sixth
+//     name-implies-wrong-shape instance on this API.
+//   - the number-vs-string id/social_id split inside each account and page
+//     sub-object (id is a number, social_id is a string).
+//   - the polymorphic minutes (number 25 in one slot, string "00" in
+//     another, in the SAME times array).
+//   - the empty social_albums_by_pages array.
+//
+// This SINGLE capture cannot lie about the shape because it was recorded
+// from the wire. It is the RED-on-revert proof for the
+// social_pages_by_accounts type: revert the field to map[int][]Page and
+// this test fails at unmarshal with the exact error the live command
+// produced. The gate was green while the command was broken, so the gate
+// is not the evidence — this fixture decoding is.
+func TestGetScheduleEdit_DecodeRealCapture(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "schedule_edit.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var edit ScheduleEditResponse
+	if err := json.Unmarshal(raw, &edit); err != nil {
+		t.Fatalf("unmarshal real capture: %v\n— a wrong field type aborts the whole decode (the social_pages_by_accounts=map bug class)", err)
+	}
+	// times: 7 weekdays, day 0 has 4 slots, day 2 has 2, the rest empty.
+	if len(edit.Times) != 7 {
+		t.Fatalf("Times: %d weekdays, want 7", len(edit.Times))
+	}
+	if len(edit.Times[0]) != 4 {
+		t.Errorf("Times[0]: %d slots, want 4", len(edit.Times[0]))
+	}
+	// Polymorphic minutes: slot 0 number 25, slot 2 string "00".
+	if got, want := edit.Times[0][0].Minutes.Int64(), int64(25); got != want {
+		t.Errorf("Times[0][0].Minutes = %d, want %d (number form)", got, want)
+	}
+	if got, want := edit.Times[0][2].Minutes.Int64(), int64(0); got != want {
+		t.Errorf("Times[0][2].Minutes = %d, want %d (string form \"00\")", got, want)
+	}
+	// project_id is int.
+	if edit.ProjectID != 7 {
+		t.Errorf("ProjectID = %d, want 7", edit.ProjectID)
+	}
+	// projects: full project objects decode into the narrow Project type.
+	if len(edit.Projects) != 1 || edit.Projects[0].ID != 7 || edit.Projects[0].Name != "A" {
+		t.Errorf("Projects = %+v, want one {id:7,name:A}", edit.Projects)
+	}
+	// social_pages_by_accounts is an ARRAY of {account, pages} — the crash
+	// field. Two elements in the fixture.
+	if len(edit.SocialPagesByAccounts) != 2 {
+		t.Fatalf("SocialPagesByAccounts = %d entries, want 2 (array, not map)", len(edit.SocialPagesByAccounts))
+	}
+	// First element: account id 123 (number), social_id "3251" (string).
+	acc := edit.SocialPagesByAccounts[0].Account
+	if acc.ID != 123 {
+		t.Errorf("Account[0].ID = %d, want 123 (number)", acc.ID)
+	}
+	if acc.SocialID != "3251" {
+		t.Errorf("Account[0].SocialID = %q, want \"3251\" (string, not int)", acc.SocialID)
+	}
+	if acc.SourceID != 6 {
+		t.Errorf("Account[0].SourceID = %d, want 6", acc.SourceID)
+	}
+	// First element's pages: 2 pages, id number, social_id string.
+	if len(edit.SocialPagesByAccounts[0].Pages) != 2 {
+		t.Fatalf("Pages[0] = %d, want 2", len(edit.SocialPagesByAccounts[0].Pages))
+	}
+	pg := edit.SocialPagesByAccounts[0].Pages[0]
+	if pg.ID != 100 {
+		t.Errorf("Pages[0][0].ID = %d, want 100 (number)", pg.ID)
+	}
+	if pg.SocialID != "100" {
+		t.Errorf("Pages[0][0].SocialID = %q, want \"100\" (string, not int)", pg.SocialID)
+	}
+	if pg.Type != "board" {
+		t.Errorf("Pages[0][0].Type = %q, want \"board\"", pg.Type)
+	}
+	// watermarks: array of narrow watermark objects.
+	if len(edit.Watermarks) != 1 || edit.Watermarks[0].ID != 1 {
+		t.Errorf("Watermarks = %+v, want one with id 1", edit.Watermarks)
+	}
+	// social_albums_by_pages: empty array in every sample; RawMessage
+	// captures it without guessing the element shape.
+	if !strings.Contains(string(edit.SocialAlbumsByPages), "[") {
+		t.Errorf("SocialAlbumsByPages = %s, want the fixture's empty array \"[]\" (element shape unobserved)", edit.SocialAlbumsByPages)
 	}
 }
 
