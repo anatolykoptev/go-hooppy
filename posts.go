@@ -13,11 +13,17 @@ type ListPostsFilter struct {
 	IsPublished     *bool  // nil = no filter; true = published; false = unpublished
 	PublicationDate string // dd.mm.yyyy
 	SourceID        int
-	AccountID       int
-	PageID          int
-	ScheduleID      int
-	ProjectID       int
-	Page            int
+	// Deprecated: not a server-side filter on /posts; a non-zero value
+	// errors before the request (#67, #73). Use ScheduleID, SourceID, or
+	// ProjectID to narrow.
+	AccountID int
+	// Deprecated: not a server-side filter on /posts; a non-zero value
+	// errors before the request (#67, #73). Use ScheduleID, SourceID, or
+	// ProjectID to narrow.
+	PageID     int
+	ScheduleID int
+	ProjectID  int
+	Page       int
 }
 
 // ListPosts returns posts matching the given filter.

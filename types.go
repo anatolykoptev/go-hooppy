@@ -1116,18 +1116,29 @@ type SearchPostsResponse struct {
 
 // SearchPostsFilter is the query filter for GET /posts-search.
 type SearchPostsFilter struct {
-	Text             string
-	DateFrom         string // dd.mm.yyyy
-	DateTo           string // dd.mm.yyyy
-	SourceType       int    // 1=social, 2=RSS; must be non-negative (0 = unset); negatives are rejected before any request (see ListSearchPosts)
-	SourceID         int    // social network ID (1=VK, 7=Instagram, etc.); must be non-negative (0 = unset); negatives are rejected before any request
-	SourceResourceID int    // source resource ID (from ListSourceResources); must be non-negative (0 = unset); negatives are rejected before any request
-	OwnerID          int    // page ID within source; must be non-negative (0 = unset); negatives are rejected before any request
-	Page             int    // 1-indexed; must be non-negative (0 = unset = first page); negatives are rejected before any request — a negative drops the param and the server silently returns page 1
+	Text       string
+	DateFrom   string // dd.mm.yyyy
+	DateTo     string // dd.mm.yyyy
+	SourceType int    // 1=social, 2=RSS; must be non-negative (0 = unset); negatives are rejected before any request (see ListSearchPosts)
+	// Deprecated: not a server-side filter on /posts-search; a non-zero value
+	// errors before the request (#67, #73). Use SourceType, ContentTypes,
+	// PhotosAmount, VideoDuration, or Text to narrow.
+	SourceID int
+	// Deprecated: not a server-side filter on /posts-search; a non-zero value
+	// errors before the request (#67, #73). Use SourceType, ContentTypes,
+	// PhotosAmount, VideoDuration, or Text to narrow.
+	SourceResourceID int
+	// Deprecated: not a server-side filter on /posts-search; a non-zero value
+	// errors before the request (#67, #73). Use SourceType, ContentTypes,
+	// PhotosAmount, VideoDuration, or Text to narrow.
+	OwnerID int
+	Page    int // 1-indexed; must be non-negative (0 = unset = first page); negatives are rejected before any request — a negative drops the param and the server silently returns page 1
 	// Sorting (empirically verified).
 	SortBy        string // publication_date, likes, reposts, comments, views, involvement
 	SortDirection string // desc (default) or asc
-	// Metric filters (empirically verified).
+	// Metric thresholds — NOT server-side filters (#63); a non-zero value
+	// errors before the request. Use SortBy (likes|views|reposts|comments|
+	// involvement) instead, which does work server-side.
 	MinLikes       int
 	MinViews       int
 	MinComments    int

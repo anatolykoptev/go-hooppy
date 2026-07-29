@@ -239,6 +239,7 @@ paths:
           schema:
             type: integer
           example: 33125
+          # measured no-op, see #67/#73 — the API accepts account_id on /posts and silently drops it
         - name: page_id
           in: query
           description: Фильтр по группе в соц сети
@@ -246,6 +247,7 @@ paths:
           schema:
             type: integer
           example: 44567
+          # measured no-op, see #67/#73 — the API accepts page_id on /posts and silently drops it
         - name: schedule_id
           in: query
           description: Фильтр по расписанию

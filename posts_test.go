@@ -86,21 +86,26 @@ func TestListPosts_ZeroValuesSkipped(t *testing.T) {
 }
 
 // TestListPosts_NegativeRejected covers issue #65 item 1: the ListPosts
-// ID/page filters (SourceID, AccountID, PageID, ScheduleID, ProjectID,
-// Page) were gated on `> 0` — the same silent-negative hole this PR closed
-// across the search/accounts/pages filters. A negative took neither
-// branch: no error, no parameter, an unfiltered result that looks
-// filtered. Reachable from the shipped CLI (cmd/hooppy binds these with
-// IntVar; pflag accepts negatives). The guard now rejects negatives
+// ID/page filters that are still WORKING filters (SourceID, ScheduleID,
+// ProjectID, Page) were gated on `> 0` — the same silent-negative hole
+// this PR closed across the search/accounts/pages filters. A negative
+// took neither branch: no error, no parameter, an unfiltered result that
+// looks filtered. Reachable from the shipped CLI (cmd/hooppy binds these
+// with IntVar; pflag accepts negatives). The guard now rejects negatives
 // before any request; zero stays the unset sentinel.
+//
+// AccountID and PageID are NOT here: they are phantom parameters (issues
+// #67, #73) whose non-zero guard fires on != 0 (so a negative is refused
+// by the phantom guard, not the negative guard). Their negative path is
+// covered by TestPhantomFilterSweep, which sets a positive value — the
+// same guard fires for both signs. Keeping them here would read as
+// negative-path coverage while exercising only the phantom guard.
 func TestListPosts_NegativeRejected(t *testing.T) {
 	cases := []struct {
 		name string
 		f    ListPostsFilter
 	}{
 		{"SourceID negative", ListPostsFilter{SourceID: -1}},
-		{"AccountID negative", ListPostsFilter{AccountID: -1}},
-		{"PageID negative", ListPostsFilter{PageID: -1}},
 		{"ScheduleID negative", ListPostsFilter{ScheduleID: -1}},
 		{"ProjectID negative", ListPostsFilter{ProjectID: -1}},
 		{"Page negative", ListPostsFilter{Page: -1}},

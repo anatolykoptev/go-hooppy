@@ -283,24 +283,28 @@ func TestListSearchPosts_PhotosAmountPassThrough(t *testing.T) {
 	}
 }
 
-// TestListSearchPosts_IDPageNegative covers issue #65 item 1: the five
-// ID/page filters (SourceType, SourceID, SourceResourceID, OwnerID,
-// Page) were gated on `> 0` — the same silent-negative hole this PR closed
-// for the min_* and bucket-key fields. A negative took neither branch:
-// no error, no parameter, an unfiltered result that looks filtered.
-// Reachable from the shipped CLI (--source-id -1, --page -1 via pflag's
-// signed IntVar). The guard now rejects negatives before any request;
-// zero stays the unset sentinel. Each case is isolated to one field so a
-// regression in any single guard is visible.
+// TestListSearchPosts_IDPageNegative covers issue #65 item 1: the
+// ID/page filters that are still WORKING filters (SourceType, Page) were
+// gated on `> 0` — the same silent-negative hole this PR closed for the
+// min_* and bucket-key fields. A negative took neither branch: no error,
+// no parameter, an unfiltered result that looks filtered. Reachable from
+// the shipped CLI (--source-type -1, --page -1 via pflag's signed IntVar).
+// The guard now rejects negatives before any request; zero stays the
+// unset sentinel. Each case is isolated to one field so a regression in
+// any single guard is visible.
+//
+// SourceID, SourceResourceID, and OwnerID are NOT here: they are phantom
+// parameters (issues #67, #73) whose non-zero guard fires on != 0 (so a
+// negative is refused by the phantom guard, not the negative guard). Their
+// negative path is covered by TestPhantomFilterSweep, which sets a positive
+// value — the same guard fires for both signs. Keeping them here would
+// read as negative-path coverage while exercising only the phantom guard.
 func TestListSearchPosts_IDPageNegative(t *testing.T) {
 	cases := []struct {
 		name string
 		f    SearchPostsFilter
 	}{
 		{"SourceType negative", SearchPostsFilter{SourceType: -1}},
-		{"SourceID negative", SearchPostsFilter{SourceID: -1}},
-		{"SourceResourceID negative", SearchPostsFilter{SourceResourceID: -1}},
-		{"OwnerID negative", SearchPostsFilter{OwnerID: -1}},
 		{"Page negative", SearchPostsFilter{Page: -1}},
 	}
 	reached := false
