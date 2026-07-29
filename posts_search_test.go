@@ -1015,6 +1015,69 @@ func TestCopySearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
 	}
 }
 
+// TestCopySearchPost_RejectsBatchSlice verifies the BLOCKER fix at the library
+// surface: CopySearchPost REFUSES a non-empty SearchPostIDs before any request.
+// PUT /posts/copy takes a singular search_post_id int and silently ignores
+// search_post_ids; this method marshals the payload wholesale, so without the
+// guard a library consumer that sets SearchPostIDs gets the slice on the wire
+// (json:"search_post_ids,omitempty") with err == nil — a phantom batch. The
+// CLI --post-ids removal closed one caller; this closes the published module
+// surface (the CLI is one of several). The error must name the batch-capable
+// endpoints (RewriteSearchPost/ImportSearchPost) so the consumer reaches them.
+//
+// RED-on-revert: drop the `len(payload.SearchPostIDs) > 0` guard from
+// CopySearchPost and the stub is reached (requestMade=true) with err == nil →
+// both assertions fail.
+func TestCopySearchPost_RejectsBatchSlice(t *testing.T) {
+	requestMade := false
+	var capturedBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Write([]byte(`{"id":7006}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        1001,
+		SearchPostIDs:       []int{2001, 2002, 2003},
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+	})
+	if err == nil {
+		t.Fatal("CopySearchPost with SearchPostIDs: expected an error refusing the batch slice, got nil — PUT /posts/copy takes a singular search_post_id and silently ignores search_post_ids (phantom batch)")
+	}
+	if requestMade {
+		t.Fatal("CopySearchPost issued a request despite a non-empty SearchPostIDs — must fail before any request (the slice would otherwise marshal onto the wire with err == nil)")
+	}
+	if !contains(err.Error(), "RewriteSearchPost") || !contains(err.Error(), "ImportSearchPost") {
+		t.Errorf("error must name the batch-capable endpoints RewriteSearchPost/ImportSearchPost, got: %v", err)
+	}
+	// The scalar must stay valid on its own (no batch slice) — sanity-check
+	// the guard does not over-fire on the legacy single-post path.
+	requestMade = false
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":7007}`))
+	}))
+	defer srv2.Close()
+	c2 := newTestClient(t, srv2)
+	if _, err := c2.CopySearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        1001,
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+	}); err != nil {
+		t.Fatalf("CopySearchPost scalar path broke: %v", err)
+	}
+	if !requestMade {
+		t.Fatal("CopySearchPost scalar path did not issue a request — the batch guard must not over-fire when SearchPostIDs is empty")
+	}
+}
+
 // TestRewriteSearchPost_ScheduleDrivenNoSchedules mirrors the guard for the
 // rewrite endpoint: when_type=3 + empty schedules must fail closed.
 func TestRewriteSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
@@ -1331,6 +1394,44 @@ func TestCopySearchPostIDs_NonPositiveRejects(t *testing.T) {
 				t.Errorf("error %q does not name the offending index %q", err.Error(), want)
 			}
 		})
+	}
+}
+
+// TestCopySearchPostIDs_ScalarNegativeRejects verifies finding 5a: the scalar
+// arm of copySearchPostIDs previously sent a negative SearchPostID straight
+// onto the wire (the old `if payload.SearchPostID != 0` took any non-zero,
+// including -5), while the batch arm rejected id <= 0. The doc claimed the
+// batch matched "the scalar path which rejects SearchPostID == 0" — a guard
+// that did not exist (0 is the unset sentinel, not a rejection). The scalar
+// arm now rejects a negative; 0 stays the unset sentinel (the both-empty
+// guard fires when both fields are 0/empty).
+//
+// RED-on-revert: drop the `payload.SearchPostID < 0` guard and the stub is
+// reached (requestMade=true) with err == nil → both assertions fail.
+func TestCopySearchPostIDs_ScalarNegativeRejects(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":6010}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        -5,
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected error for negative scalar SearchPostID, got nil — a negative scraped-post id is never real and must be rejected before any request")
+	}
+	if requestMade {
+		t.Fatal("RewriteSearchPost issued a request despite a negative SearchPostID — must fail before any request")
+	}
+	if !strings.Contains(err.Error(), "SearchPostID = -5") {
+		t.Errorf("error must name the offending scalar value, got: %v", err)
 	}
 }
 

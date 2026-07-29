@@ -141,6 +141,13 @@ func parseOrderedIDListStr(s string) ([]int, error) {
 		if err != nil {
 			return nil, fmt.Errorf("search_post_ids: invalid ID %q: %v", p, err)
 		}
+		// The error text below promises "positive IDs" — enforce it: a 0 or
+		// negative id in an order-significant list is never a real scraped
+		// post id, and accepting it would let a bad entry through that the
+		// CLI batch path (copySearchPostIDs) already rejects (id <= 0).
+		if n <= 0 {
+			return nil, fmt.Errorf("search_post_ids: %q is not a positive ID — expected a comma-separated list of positive IDs", p)
+		}
 		ids = append(ids, n)
 	}
 	return ids, nil
@@ -1260,7 +1267,7 @@ func registerCopySearchPost(server *mcp.Server) {
 type rewriteSearchPostInput struct {
 	SearchPostID        int    `json:"search_post_id,omitempty" jsonschema:"ID of a single scraped post (from list_search_posts). Mutually exclusive with search_post_ids; pass exactly one."`
 	SearchPostIDs       string `json:"search_post_ids,omitempty" jsonschema:"Comma-separated IDs of scraped posts (from list_search_posts) for a batch rewrite. Mutually exclusive with search_post_id; pass exactly one. The server assigns schedule slots in the given order."`
-	Text                string `json:"text" jsonschema:"New text for the post(s). REQUIRED."`
+	Text                string `json:"text,omitempty" jsonschema:"New text overriding the original. REQUIRED with search_post_id; NOT allowed with search_post_ids — batch rewrite cannot express per-post text (omit text to keep each post's original text, like import)."`
 	PublicationWhenType int    `json:"publication_when_type" jsonschema:"1=publish now, 2=at specific time, 3=by schedule."`
 	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default)."`
 	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
@@ -1270,65 +1277,95 @@ type rewriteSearchPostInput struct {
 	PublishMinutes      string `json:"publish_minutes,omitempty" jsonschema:"Publication minutes MM (for when_type 2)."`
 }
 
+// buildRewriteSearchPostPayload validates a rewriteSearchPostInput and builds
+// the payload — the testable analogue of the CLI buildRewritePayload. It is
+// extracted so the strict-parse call site (search_post_ids) is guarded by a
+// test: reverting the call site to the lenient parseIntListStr left the MCP
+// suite green under the old inline form, because only the parser (not its
+// use) was tested. Mirrors the CLI's form-dependent text rule (finding 4):
+// single-post requires text; batch rejects text and sends an empty Texts
+// slice (the server keeps each post's original text, like import).
+func buildRewriteSearchPostPayload(in rewriteSearchPostInput) (hooppy.CopySearchPostPayload, error) {
+	if in.SearchPostID != 0 && in.SearchPostIDs != "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id and search_post_ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
+	}
+	if in.SearchPostID == 0 && in.SearchPostIDs == "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id or search_post_ids is required (use list_search_posts to find IDs)")
+	}
+	batch := in.SearchPostIDs != ""
+	// Batch rewrite cannot express per-post text through this payload shape
+	// (one texts array for N ids is a broadcast or a positional pairing that
+	// blanks posts 2..N). Refuse the combination; batch alone keeps each
+	// post's original text (an empty Texts slice, like import). Single-post
+	// requires text (the override).
+	if batch && in.Text != "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("text is not allowed with search_post_ids — batch rewrite cannot express per-post text through this payload shape (one texts array for N ids is a broadcast or a positional pairing that blanks posts 2..N); omit text to keep each post's original text, or rewrite one post at a time with search_post_id")
+	}
+	if !batch && in.Text == "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("text is required for search_post_id (rewrite overrides the single post's text)")
+	}
+	if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
+	}
+	// search_post_ids is ORDER-SIGNIFICANT (the server assigns schedule
+	// slots in the given order), so parse it STRICTLY: a lenient parse that
+	// skips a bad entry ("2001,abc,2003" → [2001,2003]) silently drops one
+	// post and shifts every later slot by one. The fully-invalid case errors
+	// via the both-empty guard above; the partial drop is the worse half and
+	// must error too, naming the bad token.
+	var batchIDs []int
+	if batch {
+		ids, err := parseOrderedIDListStr(in.SearchPostIDs)
+		if err != nil {
+			return hooppy.CopySearchPostPayload{}, err
+		}
+		batchIDs = ids
+	}
+	payload := hooppy.CopySearchPostPayload{
+		PublicationWhenType: in.PublicationWhenType,
+		PublicationHowType:  in.PublicationHowType,
+	}
+	if batch {
+		payload.SearchPostIDs = batchIDs
+		// Empty (non-nil) slice: RewriteSearchPost only replaces a nil slice,
+		// so this passes through as `[]` on the wire and the server keeps each
+		// post's original text (same shape as batch import). NOT
+		// []PostText{{Text: ""}} — that risks publishing blank across the batch.
+		payload.Texts = []hooppy.PostText{}
+	} else {
+		payload.SearchPostID = in.SearchPostID
+		payload.Texts = []hooppy.PostText{{Text: in.Text, SourceID: 0}}
+	}
+	switch in.PublicationWhenType {
+	case 3:
+		payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
+	case 2:
+		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
+		payload.PublicationDate = &hooppy.PublicationDate{
+			Date:    in.PublishDate,
+			Hours:   in.PublishHours,
+			Minutes: in.PublishMinutes,
+		}
+	default:
+		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
+	}
+	return payload, nil
+}
+
 func registerRewriteSearchPost(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_rewrite_search_post",
-			Description: "Rewrite one or more scraped posts (from list_search_posts) with custom text and publish to your pages. Pass a single id via search_post_id, or a batch via search_post_ids (comma-separated; the server assigns schedule slots in the given order). To keep original photos for a single-post rewrite, use copy_search_post or upload photos via upload_media first. UNDOCUMENTED endpoint.",
+			Description: "Rewrite one or more scraped posts (from list_search_posts) and publish to your pages. Pass a single id via search_post_id (text overrides the original), or a batch via search_post_ids (comma-separated; the server assigns schedule slots in the given order). Batch rewrite CANNOT override text — the payload shape cannot express per-post text — so text is rejected with search_post_ids and the batch keeps each post's original text (like import_search_post). To keep original photos for a single-post rewrite, use copy_search_post or upload photos via upload_media first. UNDOCUMENTED endpoint.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in rewriteSearchPostInput) (*mcp.CallToolResult, error) {
-			if in.SearchPostID != 0 && in.SearchPostIDs != "" {
-				return errResult("search_post_id and search_post_ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
-			}
-			if in.SearchPostID == 0 && in.SearchPostIDs == "" {
-				return errResult("search_post_id or search_post_ids is required (use list_search_posts to find IDs)")
-			}
-			if in.Text == "" {
-				return errResult("text is required")
-			}
-			if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
-				return errResult("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
-			}
-			// search_post_ids is ORDER-SIGNIFICANT (the server assigns schedule
-			// slots in the given order), so parse it STRICTLY: a lenient parse
-			// that skips a bad entry ("2001,abc,2003" → [2001,2003]) silently
-			// drops one post and shifts every later slot by one. The fully-
-			// invalid case errors via the both-empty guard above; the partial
-			// drop is the worse half and must error too, naming the bad token.
-			var batchIDs []int
-			if in.SearchPostIDs != "" {
-				ids, err := parseOrderedIDListStr(in.SearchPostIDs)
-				if err != nil {
-					return errResult(err.Error())
-				}
-				batchIDs = ids
+			payload, err := buildRewriteSearchPostPayload(in)
+			if err != nil {
+				return errResult(err.Error())
 			}
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
-			}
-			payload := hooppy.CopySearchPostPayload{
-				PublicationWhenType: in.PublicationWhenType,
-				PublicationHowType:  in.PublicationHowType,
-				Texts:               []hooppy.PostText{{Text: in.Text, SourceID: 0}},
-			}
-			if in.SearchPostIDs != "" {
-				payload.SearchPostIDs = batchIDs
-			} else {
-				payload.SearchPostID = in.SearchPostID
-			}
-			switch in.PublicationWhenType {
-			case 3:
-				payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
-			case 2:
-				payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
-				payload.PublicationDate = &hooppy.PublicationDate{
-					Date:    in.PublishDate,
-					Hours:   in.PublishHours,
-					Minutes: in.PublishMinutes,
-				}
-			default:
-				payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
 			}
 			resp, err := c.RewriteSearchPost(ctx, payload)
 			if err != nil {

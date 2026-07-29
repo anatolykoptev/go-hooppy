@@ -941,8 +941,8 @@ func registerSearch(root *cobra.Command) {
 	var rwDate, rwHours, rwMinutes string
 	var rwNoAttachments bool
 	rewriteCmd.Flags().IntVar(&rwPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
-	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). The server assigns schedule slots in the given order. Per-post attachment download is skipped in batch mode — use --post-id for attachment preservation.")
-	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (REQUIRED)")
+	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). The server assigns schedule slots in the given order. Per-post attachment download is skipped in batch mode — use --post-id for attachment preservation. Batch rewrite CANNOT override text (the payload shape cannot express per-post text), so --text is rejected with --post-ids; --post-ids alone keeps each post's original text (like 'search import --post-ids').")
+	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (required for --post-id; NOT allowed with --post-ids — batch rewrite cannot express per-post text; omit --text with --post-ids to keep each post's original text)")
 	rewriteCmd.Flags().StringVar(&rwPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
 	rewriteCmd.Flags().IntVar(&rwWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
 	rewriteCmd.Flags().IntVar(&rwHowType, "how-type", 1, "publication how type (1=default)")
@@ -1059,13 +1059,23 @@ func registerSearch(root *cobra.Command) {
 // parseIntListErr parses a comma-separated int list, returning an error
 // naming the offending token on a parse failure. Unlike parseIntList it does
 // not os.Exit — safe to call from testable builders.
+//
+// An empty string is the unset sentinel and returns (nil, nil). An empty
+// ELEMENT within a non-empty string ("2001,,2003") is a typo and errors — it
+// is NOT silently dropped. This unifies the contract with the MCP strict
+// parser (parseOrderedIDListStr): previously the CLI silently dropped an
+// empty element while the MCP parser errored on the identical input, so the
+// same --post-ids value gave two different results across the two surfaces.
 func parseIntListErr(s string) ([]int, error) {
+	if s == "" {
+		return nil, nil
+	}
 	parts := strings.Split(s, ",")
-	var ids []int
+	ids := make([]int, 0, len(parts))
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if p == "" {
-			continue
+			return nil, fmt.Errorf("empty element in %q — expected a comma-separated list of IDs", s)
 		}
 		n, err := strconv.Atoi(p)
 		if err != nil {
@@ -1128,7 +1138,20 @@ func buildCopyPayload(postID, whenType, howType int, pages, schedules, date, hou
 // buildRewritePayload validates search rewrite flags and builds the payload
 // (without attachments — the per-post photo download is a network step the
 // Run closure performs for the single-post form). --post-id and --post-ids
-// are mutually exclusive; --text is required.
+// are mutually exclusive.
+//
+// Text handling is form-dependent (finding 4): rewrite exists to OVERRIDE
+// text, but the payload shape (a single texts array alongside N ids) cannot
+// express per-post text — one text for N posts is either a broadcast or a
+// positional pairing that blanks posts 2..N, neither of which is what a
+// batch rewrite caller means. So:
+//   - SINGLE-post (--post-id): --text is REQUIRED (the override).
+//   - BATCH (--post-ids): --text is NOT allowed — the combination errors
+//     naming the reason. --post-ids alone behaves like batch import: no
+//     text override, so the server keeps each post's original text (an empty
+//     non-nil Texts slice is sent, matching buildImportPayload's batch form).
+//     A per-post text override for a batch is not expressible through this
+//     payload shape; callers who need it must issue one rewrite per post.
 func buildRewritePayload(postID int, postIDs, text string, whenType, howType int, pages, schedules, date, hours, minutes string) (hooppy.CopySearchPostPayload, error) {
 	if postID != 0 && postIDs != "" {
 		return hooppy.CopySearchPostPayload{}, errors.New("--post-id and --post-ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
@@ -1136,8 +1159,16 @@ func buildRewritePayload(postID int, postIDs, text string, whenType, howType int
 	if postID == 0 && postIDs == "" {
 		return hooppy.CopySearchPostPayload{}, errors.New("--post-id or --post-ids is required (see 'hooppy search posts')")
 	}
-	if text == "" {
-		return hooppy.CopySearchPostPayload{}, errors.New("--text is required")
+	batch := postIDs != ""
+	// Batch rewrite cannot express per-post text through this payload shape
+	// (one texts array for N ids is a broadcast or a positional pairing that
+	// blanks posts 2..N). Refuse the combination; --post-ids alone means no
+	// text override (the server keeps each post's original text, like import).
+	if batch && text != "" {
+		return hooppy.CopySearchPostPayload{}, errors.New("--text is not allowed with --post-ids — batch rewrite cannot express per-post text through this payload shape (one texts array for N ids is a broadcast or a positional pairing that blanks posts 2..N); omit --text to keep each post's original text, or rewrite one post at a time with --post-id")
+	}
+	if !batch && text == "" {
+		return hooppy.CopySearchPostPayload{}, errors.New("--text is required for --post-id (rewrite overrides the single post's text)")
 	}
 	if whenType == 2 && (date == "" || hours == "" || minutes == "") {
 		return hooppy.CopySearchPostPayload{}, errors.New("--date, --hours, --minutes are required for --when-type 2")
@@ -1160,12 +1191,18 @@ func buildRewritePayload(postID int, postIDs, text string, whenType, howType int
 	payload := hooppy.CopySearchPostPayload{
 		PublicationWhenType: whenType,
 		PublicationHowType:  howType,
-		Texts:               []hooppy.PostText{{Text: text, SourceID: 0}},
 	}
-	if postIDs != "" {
+	if batch {
 		payload.SearchPostIDs = idList
+		// Empty (non-nil) slice: RewriteSearchPost only replaces a nil slice,
+		// so this passes through as `[]` on the wire and the server keeps each
+		// post's original text (same shape as batch import). NOT
+		// []PostText{{Text: ""}} — that sends an explicit empty-text entry
+		// which risks publishing blank across the whole batch.
+		payload.Texts = []hooppy.PostText{}
 	} else {
 		payload.SearchPostID = postID
+		payload.Texts = []hooppy.PostText{{Text: text, SourceID: 0}}
 	}
 	switch whenType {
 	case 3:

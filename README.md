@@ -291,6 +291,8 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 | `hooppy_copy_search_post` | Copy a scraped post to your own pages (UNDOCUMENTED) |
 | `hooppy_rewrite_search_post` | Rewrite a scraped post with custom text (UNDOCUMENTED) |
 
+> **Note — batch import is not exposed via MCP.** `ImportSearchPost` (PUT /posts/import) and the `hooppy search import` CLI command support single- and batch-post import (the batch form keeps each post's original text and downloads photos async), but no `hooppy_import_search_post` MCP tool is registered. This is an omission, not a deliberate scoping decision (no comment/issue records the absence). From the MCP surface, use `hooppy_copy_search_post` for a single scraped post or `hooppy_rewrite_search_post` (single or batch) for a text override; the import-specific async-photo-download batch path is reachable only via the library or the CLI today.
+
 ## Social network source IDs
 
 | ID | Network | ID | Network |

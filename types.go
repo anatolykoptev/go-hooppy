@@ -792,7 +792,7 @@ type ParsingStartResponse struct {
 // PUT /posts/import are not in the public OpenAPI spec.
 type CopySearchPostPayload struct {
 	SearchPostID        int              `json:"search_post_id"`             // single scraped post ID (legacy; used by CopySearchPost, and by Rewrite/Import when SearchPostIDs is empty)
-	SearchPostIDs       []int            `json:"search_post_ids,omitempty"`  // batch of scraped post IDs; when non-empty, wins over SearchPostID on Rewrite/Import (comma-joined in caller order). CopySearchPost does NOT send this field — it serializes SearchPostID as the singular search_post_id int (PUT /posts/copy takes one id); the slice is only read by RewriteSearchPost/ImportSearchPost.
+	SearchPostIDs       []int            `json:"search_post_ids,omitempty"`  // batch of scraped post IDs; when non-empty, wins over SearchPostID on Rewrite/Import (comma-joined in caller order). CopySearchPost REFUSES a non-empty slice before any request — PUT /posts/copy takes a singular search_post_id int and silently ignores search_post_ids, so a batch slice on that endpoint is a phantom (it would marshal onto the wire with err == nil); the slice is honoured only by RewriteSearchPost/ImportSearchPost, which join it into the ids wire field.
 	PublicationWhenType int              `json:"publication_when_type"`      // 1=now, 2=at specific time, 3=by schedule
 	PublicationHowType  int              `json:"publication_how_type"`       // 1
 	SelectedPagesIDs    []int            `json:"selected_pages_ids"`         // for when_type=1 or 2

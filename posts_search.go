@@ -230,6 +230,19 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 	if payload.SchedulesIDs == nil {
 		payload.SchedulesIDs = []int{}
 	}
+	// Fail closed: PUT /posts/copy takes a singular search_post_id int and does
+	// NOT read search_post_ids. This method marshals the payload wholesale, so a
+	// library consumer that sets SearchPostIDs would otherwise see the slice on
+	// the wire (json tag "search_post_ids,omitempty") with err == nil — a
+	// phantom batch the server silently ignores. Removing --post-ids from the
+	// CLI closed one caller; this guard closes the published library surface
+	// (the CLI is one of several). The batch-capable endpoints are
+	// RewriteSearchPost (POST /posts with as_copy=1) and ImportSearchPost
+	// (PUT /posts/import), which join SearchPostIDs into the ids wire field.
+	// Refuse here before any request.
+	if len(payload.SearchPostIDs) > 0 {
+		return nil, fmt.Errorf("hooppy: CopySearchPost: SearchPostIDs is not supported on PUT /posts/copy — this endpoint takes a singular search_post_id int and silently ignores search_post_ids (a non-empty slice would marshal onto the wire with err == nil); for a batch use RewriteSearchPost (POST /posts with as_copy=1) or ImportSearchPost (PUT /posts/import), which join SearchPostIDs into the ids wire field")
+	}
 	// Fail closed: a schedule-driven copy (when_type=3) targeted at an empty
 	// schedules list publishes to nothing. Refuse before issuing any request.
 	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
@@ -366,16 +379,18 @@ func TelegramButtonsAttachment(buttons []TelegramButton) Attachment {
 //
 // Validation: every element of SearchPostIDs must be positive (id > 0); a
 // zero or negative id is rejected with the offending index
-// (SearchPostIDs[i] = v — ids must be positive), matching the scalar path
-// which rejects SearchPostID == 0. Duplicates are KEPT — the same source post
-// in two schedule slots may be intentional, and the order contract means the
-// caller is authoritative over the ids list. The function reads the slice
-// only; it does NOT mutate payload.SearchPostIDs (no sort, no dedupe, no
-// reorder) — the slice header shares backing storage with the caller's array.
+// (SearchPostIDs[i] = v — ids must be positive). The scalar path mirrors
+// this: a negative SearchPostID is rejected (a negative scraped-post id is
+// never real); 0 is the unset sentinel, so the both-empty guard handles it.
+// Duplicates are KEPT — the same source post in two schedule slots may be
+// intentional, and the order contract means the caller is authoritative over
+// the ids list. The function reads the slice only; it does NOT mutate
+// payload.SearchPostIDs (no sort, no dedupe, no reorder) — the slice header
+// shares backing storage with the caller's array.
 //
-// CopySearchPost does NOT use this helper — it posts the payload directly and
-// serializes SearchPostID as the singular search_post_id int (different wire
-// shape, different endpoint).
+// CopySearchPost does NOT use this helper — it refuses SearchPostIDs before
+// any request and serializes SearchPostID as the singular search_post_id int
+// (different wire shape, different endpoint).
 func copySearchPostIDs(payload CopySearchPostPayload) (string, error) {
 	if len(payload.SearchPostIDs) > 0 && payload.SearchPostID != 0 {
 		return "", fmt.Errorf("hooppy: SearchPostIDs and SearchPostID are mutually exclusive — pass only one (the slice for a batch, the scalar for a single post)")
@@ -389,6 +404,13 @@ func copySearchPostIDs(payload CopySearchPostPayload) (string, error) {
 			parts[i] = strconv.Itoa(id)
 		}
 		return strings.Join(parts, ","), nil
+	}
+	// Scalar path: 0 is the unset sentinel (the both-empty guard below fires
+	// when both fields are 0/empty). A negative is never a real scraped-post id
+	// — reject it before any request, matching the batch arm's positivity
+	// discipline. The old code sent a negative straight onto the wire.
+	if payload.SearchPostID < 0 {
+		return "", fmt.Errorf("hooppy: SearchPostID = %d — must be a positive id (0 means unset; pass a positive scraped-post id)", payload.SearchPostID)
 	}
 	if payload.SearchPostID != 0 {
 		return strconv.Itoa(payload.SearchPostID), nil
@@ -525,8 +547,22 @@ func SearchPostEditAttachments(editAttachments []Attachment) []Attachment {
 //
 // The server downloads photos async (is_attachments_in_process=1 → 0) when
 // attachments contain photo objects with a `url` field. Videos are stored as
-// VK video references (no download needed). Text must be passed explicitly —
-// the server does NOT auto-copy text from the original post.
+// VK video references (no download needed).
+//
+// Text handling is FORM-DEPENDENT (measured against the live endpoint, not
+// assumed — see the batch-import text note in CHANGELOG):
+//   - SINGLE-id import (SearchPostID): text must be passed explicitly — the
+//     server does NOT auto-copy text from the original post for the single
+//     form. The CLI `search import --post-id` fills Texts from
+//     GetSearchPostEdit; a library caller that sends an empty/nil Texts gets a
+//     post with no text.
+//   - BATCH import (SearchPostIDs): the server DOES auto-copy each post's
+//     original text. A batch import of two scraped posts with an empty texts
+//     slice was measured to create two posts, each carrying its own source
+//     text. The CLI `search import --post-ids` therefore sends an empty
+//     (non-nil) Texts slice and relies on this auto-copy; do NOT send an
+//     explicit empty-text entry ([]PostText{{Text: ""}}) for a batch — that
+//     risks publishing blank across the whole batch.
 //
 // UNDOCUMENTED: PUT /posts/import is not in the public OpenAPI spec.
 func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {

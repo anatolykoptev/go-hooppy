@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -384,63 +385,81 @@ func TestSearchRewriteImport_PostIDsFlagRegistered(t *testing.T) {
 
 // TestSearchBuilders_FlagValidation is a table test over the three search
 // subcommand builders covering flag validation. Each row asserts the builder
-// returns an error for an invalid flag combination — the validation that
-// previously lived inline in the Run closures (untestable because they
-// os.Exit). Findings 1, 5, 6 all live in this previously-untested half.
+// returns an error for an invalid flag combination AND that the error names
+// the intended cause (errSub) — a row that only asserted err == nil could
+// pass on a DIFFERENT error than the one it targets (finding 5d). The
+// validation previously lived inline in the Run closures (untestable because
+// they os.Exit). Findings 1, 4, 5 all live in this previously-untested half.
 func TestSearchBuilders_FlagValidation(t *testing.T) {
 	cases := []struct {
-		name string
-		fn   func() error
+		name   string
+		errSub string
+		fn     func() error
 	}{
-		{"copy: --post-id required", func() error {
+		{"copy: --post-id required", "--post-id is required", func() error {
 			_, err := buildCopyPayload(0, 1, 1, "123", "", "", "", "")
 			return err
 		}},
-		{"copy: when-type 2 needs date", func() error {
+		{"copy: when-type 2 needs date", "--date, --hours, --minutes are required", func() error {
 			_, err := buildCopyPayload(1001, 2, 1, "123", "", "", "", "")
 			return err
 		}},
-		{"copy: when-type 3 needs schedules", func() error {
+		{"copy: when-type 3 needs schedules", "--schedules is required", func() error {
 			_, err := buildCopyPayload(1001, 3, 1, "", "", "", "", "")
 			return err
 		}},
-		{"rewrite: --post-id and --post-ids mutually exclusive", func() error {
+		{"rewrite: --post-id and --post-ids mutually exclusive", "mutually exclusive", func() error {
 			_, err := buildRewritePayload(1001, "2001,2002", "x", 1, 1, "123", "", "", "", "")
 			return err
 		}},
-		{"rewrite: one id required", func() error {
+		{"rewrite: one id required", "--post-id or --post-ids is required", func() error {
 			_, err := buildRewritePayload(0, "", "x", 1, 1, "123", "", "", "", "")
 			return err
 		}},
-		{"rewrite: --text required", func() error {
+		{"rewrite: single-post --text required", "--text is required for --post-id", func() error {
 			_, err := buildRewritePayload(1001, "", "", 1, 1, "123", "", "", "", "")
 			return err
 		}},
-		{"rewrite: when-type 3 needs schedules", func() error {
+		{"rewrite: when-type 3 needs schedules", "--schedules is required", func() error {
 			_, err := buildRewritePayload(1001, "", "x", 3, 1, "", "", "", "", "")
 			return err
 		}},
-		{"import: --post-id and --post-ids mutually exclusive", func() error {
+		// Finding 4: batch rewrite cannot express per-post text.
+		{"rewrite: batch + --text refused", "not allowed with --post-ids", func() error {
+			_, err := buildRewritePayload(0, "2001,2002", "x", 1, 1, "123", "", "", "", "")
+			return err
+		}},
+		{"import: --post-id and --post-ids mutually exclusive", "mutually exclusive", func() error {
 			_, err := buildImportPayload(1001, "2001,2002", 3, 2, "999")
 			return err
 		}},
-		{"import: one id required", func() error {
+		{"import: one id required", "--post-id or --post-ids is required", func() error {
 			_, err := buildImportPayload(0, "", 3, 2, "999")
 			return err
 		}},
-		{"import: when-type 3 needs schedules", func() error {
+		{"import: when-type 3 needs schedules", "--schedules is required", func() error {
 			_, err := buildImportPayload(1001, "", 3, 2, "")
 			return err
 		}},
-		{"import: invalid id token", func() error {
+		{"import: invalid id token", "invalid ID", func() error {
 			_, err := buildImportPayload(0, "2001,abc", 3, 2, "999")
+			return err
+		}},
+		// Finding 5b: empty element is a typo, not a silent drop (unified with
+		// the MCP strict parser).
+		{"import: empty element in id list", "empty element", func() error {
+			_, err := buildImportPayload(0, "2001,,2003", 3, 2, "999")
 			return err
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.fn(); err == nil {
+			err := tc.fn()
+			if err == nil {
 				t.Fatal("expected validation error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.errSub) {
+				t.Errorf("error %q does not name the intended cause %q — a different error passed for this row (finding 5d)", err.Error(), tc.errSub)
 			}
 		})
 	}
@@ -467,8 +486,11 @@ func TestSearchBuilders_PayloadConstruction(t *testing.T) {
 		}
 	})
 
-	t.Run("rewrite batch builds slice payload in caller order", func(t *testing.T) {
-		p, err := buildRewritePayload(0, "2003,2001,2002", "hello", 1, 1, "123", "", "", "", "")
+	t.Run("rewrite batch builds slice payload in caller order, no text override", func(t *testing.T) {
+		// Finding 4: batch rewrite cannot express per-post text, so --text is
+		// rejected with --post-ids and --post-ids alone sends an empty Texts
+		// slice (the server keeps each post's original text, like import).
+		p, err := buildRewritePayload(0, "2003,2001,2002", "", 1, 1, "123", "", "", "", "")
 		if err != nil {
 			t.Fatalf("buildRewritePayload: %v", err)
 		}
@@ -478,8 +500,11 @@ func TestSearchBuilders_PayloadConstruction(t *testing.T) {
 		if got, want := p.SearchPostIDs, []int{2003, 2001, 2002}; !reflect.DeepEqual(got, want) {
 			t.Errorf("SearchPostIDs = %v, want %v (caller order preserved)", got, want)
 		}
-		if len(p.Texts) != 1 || p.Texts[0].Text != "hello" {
-			t.Errorf("Texts = %v, want [{hello 0}]", p.Texts)
+		if p.Texts == nil {
+			t.Fatal("Texts = nil, want []PostText{} (empty non-nil) — nil would be normalised by RewriteSearchPost, but the contract is an explicit empty slice so the server keeps original text (finding 4)")
+		}
+		if len(p.Texts) != 0 {
+			t.Errorf("Texts = %v, want [] (batch rewrite sends no text override; NOT [{\"\"}] which risks publishing blank)", p.Texts)
 		}
 	})
 
