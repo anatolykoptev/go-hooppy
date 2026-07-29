@@ -41,16 +41,34 @@ import (
 // data-integrity bug. Populate SlotLookupError naming both counts and
 // return what we have.
 //
+// Wire-id cross-check (single path only): the server returns {"id": ...}
+// for a single create, so resp.ID carries the authoritative wire id. The
+// diff supplies the slot, not the identity — a non-zero wire id is NEVER
+// overwritten. When the wire id is NOT in the recovered set, that is
+// positive evidence of misattribution (a concurrent create landed between
+// the snapshots while ours was not yet visible, and the count-only guard
+// passed because len(created) == idsSentCount): slot_lookup_error names
+// both the wire id and the recovered ids, the wire id stays in ID, and no
+// slot is attributed. This detects the race the count guard cannot.
+//
+// The batch path has NO wire id to cross-check against (the server returns
+// {"success": true} — measured), so the count guard is the best available
+// check. A concurrent create by another client CAN misattribute on a count
+// match (len(created) == idsSentCount but a stranger's post is in the
+// recovered set); this residual risk is inherent to the batch surface,
+// which returns no identity to verify against.
+//
 // Failure contract: any failure in this recovery leaves the create
 // successful — no error returned, SlotLookupError populated, exit zero.
 // The posts exist; this is reporting.
 //
 // Response shape: for a batch, the recovered ids are emitted in IDs
-// (ordered by the queue's own publication timestamp), and ID is set to the
-// first recovered id so callers reading only ID get a valid id instead of
-// 0. The server does NOT send "ids" in the response — PostIDResponse.IDs
-// is populated by this client from the snapshot diff, not decoded from the
-// wire.
+// (ordered by the queue's own publication timestamp, NOT the order given by
+// the caller), and ID is set to the first recovered id so callers reading
+// only ID get a valid id instead of 0. For a single create, ID is the wire
+// id returned by the server (never overwritten by the diff). The server
+// does NOT send "ids" in the response — PostIDResponse.IDs is populated by
+// this client from the snapshot diff, not decoded from the wire.
 //
 // Date format (batch path): the list surface's PostPublicationDate.Date is
 // a display string ("29 Июля") in the account's timezone, not dd.mm.yyyy.
@@ -139,11 +157,46 @@ func (c *Client) fillBatchSlotsBySnapshotDiff(ctx context.Context, resp *PostIDR
 		for i := range created {
 			resp.IDs = append(resp.IDs, created[i].ID)
 		}
-		if len(resp.IDs) > 0 {
+		// Never overwrite a wire id. The single path carries the
+		// authoritative id on the wire (resp.ID != 0); the diff supplies
+		// the slot, not the identity. Only set ID from the diff on the
+		// batch path, where the server returns {"success": true} (no id).
+		if resp.ID == 0 && len(resp.IDs) > 0 {
 			resp.ID = resp.IDs[0]
 		}
 		resp.SlotLookupError = fmt.Sprintf("slot lookup: snapshot-diff recovered %d created ids, but %d were sent — counts differ (concurrent create suspected); returning recovered ids without slot attribution", len(created), idsSentCount)
 		return
+	}
+
+	// Wire-id cross-check (single path): the server returns {"id": ...} for
+	// a single create, so resp.ID carries the authoritative wire id. The
+	// diff supplies the slot, not the identity — never overwrite a wire id.
+	// When the wire id is NOT in the recovered set, that is positive
+	// evidence of misattribution: a concurrent create by another client
+	// landed between the before and after snapshots while ours was not yet
+	// visible, and the count-only guard above passed because
+	// len(created) == idsSentCount. Do not report the recovered ids as this
+	// caller's — populate slot_lookup_error naming both the wire id and what
+	// the diff recovered, leave the wire id in ID, and return without slot
+	// attribution. This turns the single path from "silently guesses" into
+	// "detects the race it cannot otherwise see".
+	if wireID := resp.ID; wireID != 0 {
+		found := false
+		for i := range created {
+			if created[i].ID == wireID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			recovered := make([]int, len(created))
+			for i := range created {
+				resp.IDs = append(resp.IDs, created[i].ID)
+				recovered[i] = created[i].ID
+			}
+			resp.SlotLookupError = fmt.Sprintf("slot lookup: wire id %d not in snapshot-diff recovered ids %v — misattribution suspected (concurrent create while count matched); keeping wire id, slot not attributed", wireID, recovered)
+			return
+		}
 	}
 
 	// Order created by publication timestamp (ascending — the queue's own
@@ -187,9 +240,13 @@ func (c *Client) fillBatchSlotsBySnapshotDiff(ctx context.Context, resp *PostIDR
 		})
 	}
 
-	// ID = first recovered id (ordered by timestamp) so callers reading
-	// only ID get a valid id instead of 0.
-	if len(resp.IDs) > 0 {
+	// ID assignment: the batch path has no wire id (the server returns
+	// {"success": true}), so ID is set to the first recovered id (ordered by
+	// timestamp) so callers reading only ID get a valid id instead of 0. The
+	// single path keeps the wire id (resp.ID) — the diff supplies the slot,
+	// not the identity, and the wire-id cross-check above already confirmed
+	// it is in the recovered set.
+	if resp.ID == 0 && len(resp.IDs) > 0 {
 		resp.ID = resp.IDs[0]
 	}
 

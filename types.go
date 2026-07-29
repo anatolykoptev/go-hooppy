@@ -565,11 +565,17 @@ const (
 //   - IDs: all created post ids for a batch. The server does NOT send "ids"
 //     in the response — it returns {"success": true} for a batch with no id
 //     or ids. IDs is populated by the client from a schedule snapshot diff
-//     (before vs after the create), not decoded from the wire. Empty for a
-//     single-post create (which returns {"id": ...}).
-//   - ID: for a single-post create, the id from the server. For a batch,
-//     set to the first recovered id (ordered by publication timestamp) so
-//     callers reading only ID get a valid id instead of 0.
+//     (before vs after the create). The json tag "ids,omitempty" is kept so
+//     the recovered ids marshal to output (the CLI prints this struct as
+//     JSON); the tag WOULD decode a server-sent "ids" field, but the server
+//     does not send one (measured on both single and batch paths), so decode
+//     leaves the field empty in practice. Empty for a single-post create
+//     (which returns {"id": ...}).
+//   - ID: for a single-post create, the wire id from the server (never
+//     overwritten by the diff — the diff supplies the slot, not the
+//     identity). For a batch, set to the first recovered id (ordered by
+//     publication timestamp) so callers reading only ID get a valid id
+//     instead of 0.
 //   - Slots: per-id slots for a batch; empty for a single-post create.
 type PostIDResponse struct {
 	ID              int              `json:"id"`

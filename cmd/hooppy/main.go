@@ -1002,7 +1002,7 @@ func registerSearch(root *cobra.Command) {
 	var rwDate, rwHours, rwMinutes string
 	var rwNoAttachments bool
 	rewriteCmd.Flags().IntVar(&rwPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
-	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). The server assigns schedule slots in the given order. Per-post attachment download is skipped in batch mode — use --post-id for attachment preservation. Batch rewrite CANNOT override text (the payload shape cannot express per-post text), so --text is rejected with --post-ids; --post-ids alone keeps each post's original text (like 'search import --post-ids').")
+	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Schedule slots are reported in publication order (the queue's own order), not the order given on the command line. Per-post attachment download is skipped in batch mode — use --post-id for attachment preservation. Batch rewrite CANNOT override text (the payload shape cannot express per-post text), so --text is rejected with --post-ids; --post-ids alone keeps each post's original text (like 'search import --post-ids').")
 	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (required for --post-id; NOT allowed with --post-ids — batch rewrite cannot express per-post text; omit --text with --post-ids to keep each post's original text)")
 	rewriteCmd.Flags().StringVar(&rwPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
 	rewriteCmd.Flags().IntVar(&rwWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
@@ -1080,7 +1080,7 @@ func registerSearch(root *cobra.Command) {
 	var impWhenType, impHowType int
 	var impNoAttachments bool
 	importCmd.Flags().IntVar(&impPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
-	importCmd.Flags().StringVar(&impPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). The server assigns schedule slots in the given order. Batch import keeps each post's ORIGINAL text (no per-post text override) and strips attachments — the server downloads photos async from the ids it receives. Use --post-id for a single post to pull its text/attachments from the edit endpoint.")
+	importCmd.Flags().StringVar(&impPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Schedule slots are reported in publication order (the queue's own order), not the order given on the command line. Batch import keeps each post's ORIGINAL text (no per-post text override) and strips attachments — the server downloads photos async from the ids it receives. Use --post-id for a single post to pull its text/attachments from the edit endpoint.")
 	importCmd.Flags().IntVar(&impWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule")
 	importCmd.Flags().IntVar(&impHowType, "how-type", 2, "publication how type (2=by schedule pages)")
 	importCmd.Flags().StringVar(&impSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")

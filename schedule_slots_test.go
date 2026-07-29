@@ -1350,3 +1350,243 @@ func TestSettings_DecodeCredentialHygiene(t *testing.T) {
 		t.Errorf("marshalled SettingsResponse lost timezone_id:\n%s", got)
 	}
 }
+
+// TestImportSearchPost_SingleWireIDNotInDiff verifies the wire-id cross-check
+// on the single path: the server returns {"id": 92820377} (the authoritative
+// wire id), but the snapshot-diff recovers a DIFFERENT id (88888888 — a
+// concurrent create by another client that landed between the before and
+// after snapshots while ours was not yet visible). len(created)==1==
+// idsSentCount, so the count-only guard PASSES — without the wire-id
+// cross-check a stranger's post id would be reported as this caller's.
+//
+// The cross-check detects the race: ID stays the wire id (92820377),
+// slot_lookup_error names BOTH the wire id and the recovered ids, no slot is
+// attributed, exit zero, no error returned.
+//
+// RED-on-revert: restore the unconditional `resp.ID = resp.IDs[0]` (the
+// pre-fix code that overwrote the wire id with the diff-derived value) and
+// ID becomes 88888888 (the stranger's id) → the ID assertion fails.
+func TestImportSearchPost_SingleWireIDNotInDiff(t *testing.T) {
+	var editCalls int32
+	var createCalled int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			// Single create: server returns the real wire id.
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"id":92820377}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			if atomic.LoadInt32(&createCalled) == 0 {
+				// Before snapshot: empty schedule.
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				// After snapshot: 1 post, but a STRANGER's id (concurrent
+				// create) — NOT the wire id 92820377. len(created)=1=
+				// idsSentCount, so the count guard passes; the wire-id
+				// cross-check is what catches the misattribution.
+				w.Write([]byte(`{"list":[
+					{"id":88888888,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],"total_rows":1,"is_has_more":false,"rows_limit":20}`))
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
+			atomic.AddInt32(&editCalls, 1)
+			t.Errorf("unexpected /posts/92820377/edit call — single path uses the list snapshot-diff")
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        1001,
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost: misattribution must not fail the import, got: %v", err)
+	}
+	// ID is the WIRE id (never overwritten by the diff).
+	if resp.ID != 92820377 {
+		t.Errorf("ID = %d, want 92820377 (the wire id — never overwrite a wire id)", resp.ID)
+	}
+	// SlotLookupError names BOTH the wire id and the recovered ids.
+	if resp.SlotLookupError == "" {
+		t.Fatal("SlotLookupError = empty, want a message naming the wire id and the recovered ids")
+	}
+	if !strings.Contains(resp.SlotLookupError, "92820377") {
+		t.Errorf("SlotLookupError = %q, want it to name the wire id 92820377", resp.SlotLookupError)
+	}
+	if !strings.Contains(resp.SlotLookupError, "88888888") {
+		t.Errorf("SlotLookupError = %q, want it to name the recovered id 88888888", resp.SlotLookupError)
+	}
+	// No slot attribution (misattribution detected → do not report recovered ids as this caller's).
+	if len(resp.Slots) != 0 {
+		t.Errorf("Slots = %d entries, want 0 (misattribution detected → no slot attribution)", len(resp.Slots))
+	}
+	if resp.PublicationDate != nil {
+		t.Errorf("PublicationDate = %+v, want nil (no slot attributed)", resp.PublicationDate)
+	}
+	// No /edit call — the single path uses the list snapshot-diff.
+	if got := atomic.LoadInt32(&editCalls); got != 0 {
+		t.Errorf("GetPostEdit calls = %d, want 0", got)
+	}
+}
+
+// TestImportSearchPost_SingleBeforeSnapshotFails verifies the before-snapshot
+// failure branch (schedule_slots.go:105-108): the before /posts list returns
+// 500, so the diff cannot be computed. The create still succeeds, the wire id
+// is returned (per the wire-id rule), SlotLookupError records the before-
+// snapshot failure, no slot is attributed, exit zero, no error returned.
+//
+// Every sibling failure mode (after-fail, count mismatch, settings fail,
+// malformed time) has a test; this closes the gap on the before-snapshot
+// failure path.
+func TestImportSearchPost_SingleBeforeSnapshotFails(t *testing.T) {
+	var editCalls int32
+	var createCalled int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"id":92820377}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			if atomic.LoadInt32(&createCalled) == 0 {
+				// Before snapshot FAILS (500) — cannot diff.
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"server error"}`))
+			} else {
+				// After snapshot would succeed, but the before failure
+				// short-circuits before the after snapshot is taken.
+				w.Write([]byte(`{"list":[
+					{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],"total_rows":1,"is_has_more":false,"rows_limit":20}`))
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
+			atomic.AddInt32(&editCalls, 1)
+			t.Errorf("unexpected /posts/92820377/edit call — single path uses the list snapshot-diff")
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        1001,
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost: a before-snapshot failure must not fail the import, got: %v", err)
+	}
+	// The wire id is still returned (the create succeeded).
+	if resp.ID != 92820377 {
+		t.Errorf("ID = %d, want 92820377 (the wire id must still be returned)", resp.ID)
+	}
+	// SlotLookupError records the before-snapshot failure.
+	if resp.SlotLookupError == "" {
+		t.Fatal("SlotLookupError = empty, want a message about the before-snapshot failure")
+	}
+	if !strings.Contains(resp.SlotLookupError, "before-snapshot") {
+		t.Errorf("SlotLookupError = %q, want it to mention the before-snapshot failure", resp.SlotLookupError)
+	}
+	// No slot attributed (cannot diff).
+	if resp.PublicationDate != nil {
+		t.Errorf("PublicationDate = %+v, want nil (before-snapshot failed, no diff)", resp.PublicationDate)
+	}
+	if len(resp.Slots) != 0 {
+		t.Errorf("Slots = %d entries, want 0 (no diff → no slot attribution)", len(resp.Slots))
+	}
+	// No /edit call.
+	if got := atomic.LoadInt32(&editCalls); got != 0 {
+		t.Errorf("GetPostEdit calls = %d, want 0", got)
+	}
+}
+
+// TestImportSearchPost_BatchOrderFollowsTimestamps verifies that the reported
+// order of recovered ids follows the publication TIMESTAMP (the queue's own
+// order), NOT the sent order and NOT the ascending-id order. Every other
+// fixture has sent-order, timestamp-order, and ascending-id-order all
+// identical, so no existing test can distinguish them. This one sends
+// [2003, 2001, 2002] and gives the created posts timestamps that put them in
+// a different order than both the sent order and the ascending-id order.
+//
+// The after-snapshot list returns posts in ascending-id order (the server's
+// default). sortPostsByTimestamp reorders them by timestamp ascending.
+//
+// RED-on-revert: remove the sortPostsByTimestamp call (or make the reported
+// order follow the sent/ascending-id order) and the IDs assertion fails —
+// the order would be [92820377, 92820378, 92820379] (list/ascending-id
+// order), not the timestamp order [92820378, 92820379, 92820377].
+func TestImportSearchPost_BatchOrderFollowsTimestamps(t *testing.T) {
+	var createCalled int32
+	// makePost builds a list-row JSON for a created post.
+	makePost := func(id int, ts int64, time string) string {
+		return fmt.Sprintf(`{"id":%d,"publication_date":{"date":"29 Июля","time":%q,"timestamp":%d,"source_timestamp":%d},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}`, id, time, ts, ts+3600)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"success":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			if atomic.LoadInt32(&createCalled) == 0 {
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				// After snapshot: 3 created posts in ASCENDING-ID order
+				// (the server's default list order). The timestamps put
+				// them in a DIFFERENT order:
+				//   92820377 → ts 1753856400 (LATEST)
+				//   92820378 → ts 1753670400 (EARLIEST)
+				//   92820379 → ts 1753770300 (MIDDLE)
+				// Timestamp order: 92820378 < 92820379 < 92820377.
+				w.Write([]byte(`{"list":[` +
+					makePost(92820377, 1753856400, "12:00") + "," +
+					makePost(92820378, 1753670400, "09:00") + "," +
+					makePost(92820379, 1753770300, "14:25") +
+					`],"total_rows":3,"is_has_more":false,"rows_limit":20}`))
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{2003, 2001, 2002}, // sent order != timestamp order
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost batch: %v", err)
+	}
+	if len(resp.IDs) != 3 {
+		t.Fatalf("IDs = %v, want 3 recovered ids", resp.IDs)
+	}
+	// Reported order follows TIMESTAMPS (ascending), not sent order
+	// [2003,2001,2002] and not ascending-id order [92820377,92820378,92820379].
+	want := []int{92820378, 92820379, 92820377}
+	for i, w := range want {
+		if resp.IDs[i] != w {
+			t.Errorf("IDs = %v, want %v (ordered by publication timestamp, not sent/ascending-id order)", resp.IDs, want)
+			break
+		}
+	}
+	if resp.SlotLookupError != "" {
+		t.Errorf("SlotLookupError = %q, want empty", resp.SlotLookupError)
+	}
+}
