@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -463,6 +465,99 @@ func TestSearchBuilders_FlagValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildScheduleTimesOutput_OrderedArray verifies that `schedules times`
+// emits the week as an ORDERED array (Mon..Sun), not a map. A map would be
+// re-sorted alphabetically by encoding/json (Fri,Mon,Sat,Sun,Thu,Tue,Wed) —
+// a structure whose entire meaning is its order, emitted in an order nobody
+// reads a week in. The fix is structural: each element carries its day name,
+// so the ordering cannot be re-sorted by a marshaller.
+//
+// The fixture has slots on days 0 (Mon), 2 (Wed), 3 (Thu) only — days 1,
+// 4, 5, 6 are empty. The test asserts:
+//   - the marshalled output is a 7-element JSON array;
+//   - empty days carry "slots": [] (non-nil), NOT null;
+//   - byte-order: Mon appears before Tue before Wed in the marshalled
+//     string — a byte-order assertion, NOT a decode-into-map comparison
+//     (decoding into a map is exactly what would let this regress unnoticed).
+//
+// RED-on-revert: revert buildScheduleTimesOutput to return
+// map[string][]map[string]int64 and the byte-order assertion fails
+// (encoding/json emits Fri before Mon before Sat…).
+func TestBuildScheduleTimesOutput_OrderedArray(t *testing.T) {
+	edit := &hooppy.ScheduleEditResponse{
+		ID:   42,
+		Name: "S",
+		Times: [][]hooppy.ScheduleTimeSlot{
+			{{Hours: flexInt(12), Minutes: flexInt(25)}, {Hours: flexInt(14), Minutes: flexInt(25)}}, // Mon
+			{}, // Tue (empty)
+			{{Hours: flexInt(9), Minutes: flexInt(0)}},   // Wed
+			{{Hours: flexInt(18), Minutes: flexInt(30)}}, // Thu
+			{}, // Fri (empty)
+			{}, // Sat (empty)
+			{}, // Sun (empty)
+		},
+	}
+	out := buildScheduleTimesOutput(edit)
+	// Marshal via the result directly — Go infers the return type, so a
+	// revert to map[string][]... still compiles, marshals, and fails the
+	// byte-order assertion below (encoding/json sorts map keys). This is
+	// intentional: the test must FAIL on the regression, not fail to compile.
+	marshalled, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(marshalled)
+
+	// The output must be a JSON array (starts with '['), not an object.
+	if len(got) == 0 || got[0] != '[' {
+		t.Fatalf("output is not a JSON array, got:\n%s", got)
+	}
+
+	// 7 day markers must be present.
+	for _, day := range []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"} {
+		if !strings.Contains(got, fmt.Sprintf(`"day":"%s"`, day)) {
+			t.Errorf("day %q missing in output:\n%s", day, got)
+		}
+	}
+
+	// Empty days (Tue, Fri, Sat, Sun) must carry "slots":[] not null.
+	for _, day := range []string{"Tue", "Fri", "Sat", "Sun"} {
+		wantSub := fmt.Sprintf(`"day":"%s","slots":[]`, day)
+		if !strings.Contains(got, wantSub) {
+			t.Errorf("empty day %s: expected %q, got:\n%s", day, wantSub, got)
+		}
+		nullSub := fmt.Sprintf(`"day":"%s","slots":null`, day)
+		if strings.Contains(got, nullSub) {
+			t.Errorf("empty day %s: slots is null, want [] — got:\n%s", day, got)
+		}
+	}
+
+	// Byte-order assertion: Mon must appear before Tue before Wed in the
+	// raw marshalled bytes. A decode-into-map comparison would let a map
+	// regression pass unnoticed (maps have no order); this does not.
+	monPos := strings.Index(got, `"day":"Mon"`)
+	tuePos := strings.Index(got, `"day":"Tue"`)
+	wedPos := strings.Index(got, `"day":"Wed"`)
+	if monPos < 0 || tuePos < 0 || wedPos < 0 {
+		t.Fatalf("missing day markers in output:\n%s", got)
+	}
+	if !(monPos < tuePos && tuePos < wedPos) {
+		t.Errorf("byte-order violation: Mon(%d) < Tue(%d) < Wed(%d) does not hold in:\n%s", monPos, tuePos, wedPos, got)
+	}
+
+	// Sanity: the slots on Mon/Wed/Thu survived.
+	if !strings.Contains(got, `"hours":12`) {
+		t.Errorf("Mon slot hours=12 missing in:\n%s", got)
+	}
+}
+
+// flexInt builds a FlexInt from an int64 for test fixtures.
+func flexInt(v int64) hooppy.FlexInt {
+	var f hooppy.FlexInt
+	_ = json.Unmarshal([]byte(fmt.Sprintf("%d", v)), &f)
+	return f
 }
 
 // TestSearchBuilders_PayloadConstruction is a table test over the three

@@ -521,24 +521,51 @@ func registerSchedules(root *cobra.Command) {
 		c := mustClient()
 		edit, err := c.GetScheduleEdit(context.Background(), id)
 		die(err)
-		weekdays := []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
-		result := make(map[string][]map[string]int64, len(edit.Times))
-		for i, day := range edit.Times {
-			dayName := fmt.Sprintf("day%d", i)
-			if i < len(weekdays) {
-				dayName = weekdays[i]
-			}
-			slots := make([]map[string]int64, 0, len(day))
-			for _, s := range day {
-				slots = append(slots, map[string]int64{
-					"hours":   s.Hours.Int64(),
-					"minutes": s.Minutes.Int64(),
-				})
-			}
-			result[dayName] = slots
-		}
-		printJSON(result)
+		printJSON(buildScheduleTimesOutput(edit))
 	}
+}
+
+// scheduleDaySlot is one posting slot in the `schedules times` output.
+type scheduleDaySlot struct {
+	Hours   int64 `json:"hours"`
+	Minutes int64 `json:"minutes"`
+}
+
+// scheduleDayOutput is one weekday's entry in the `schedules times` output.
+// The array ordering (Mon..Sun) is structural — a map would be re-sorted
+// alphabetically by encoding/json, destroying the week order the command
+// exists to present.
+type scheduleDayOutput struct {
+	Day   string            `json:"day"`
+	Slots []scheduleDaySlot `json:"slots"`
+}
+
+// buildScheduleTimesOutput transforms a ScheduleEditResponse.Times (an
+// ordered 7-element slice, Mon..Sun) into the ordered array shape emitted
+// by `schedules times`. Each element carries the day name and that day's
+// slots, so the ordering cannot be re-sorted by a marshaller. All 7 days
+// are emitted including empty ones (an absent Tuesday and a Tuesday with
+// no slots read identically otherwise). Slots is always a non-nil empty
+// array, never null. If the API returns more than 7 day-arrays, the extra
+// elements keep the day%d fallback name.
+func buildScheduleTimesOutput(edit *hooppy.ScheduleEditResponse) []scheduleDayOutput {
+	weekdays := []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+	out := make([]scheduleDayOutput, 0, len(edit.Times))
+	for i, day := range edit.Times {
+		dayName := fmt.Sprintf("day%d", i)
+		if i < len(weekdays) {
+			dayName = weekdays[i]
+		}
+		slots := make([]scheduleDaySlot, 0, len(day))
+		for _, s := range day {
+			slots = append(slots, scheduleDaySlot{
+				Hours:   s.Hours.Int64(),
+				Minutes: s.Minutes.Int64(),
+			})
+		}
+		out = append(out, scheduleDayOutput{Day: dayName, Slots: slots})
+	}
+	return out
 }
 
 // --- files ---
