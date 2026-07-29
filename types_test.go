@@ -166,3 +166,131 @@ func TestPage_RoundTrip(t *testing.T) {
 		t.Errorf("SocialPageName = %q", decoded.SocialPageName)
 	}
 }
+
+// TestSearchPost_ParseMetrics covers issue #62: the server sends Likes,
+// Reposts, Views, Comments and Involvement as display-formatted strings
+// (e.g. "334,881", "0.520"). The fields stay string (the separator is not
+// guaranteed to be a comma across locales, and a silent parse failure on an
+// unexpected separator would be worse than the current honest string), but
+// parse accessors let callers compute. The table includes a separated
+// integer, a bare integer, a decimal ratio, an empty string and a malformed
+// value — malformed input MUST return an error rather than a silent 0,
+// because a helper that returns 0 on failure recreates the exact
+// silent-wrongness this issue is about ("334,881" < "87,008" is true as a
+// string comparison).
+func TestSearchPost_ParseMetrics(t *testing.T) {
+	intCases := []struct {
+		name  string
+		field string
+		want  int
+	}{
+		{"separated integer", "334,881", 334881},
+		{"bare integer", "864", 864},
+		// 4+ digit ungrouped integers MUST be accepted: the prior regex
+		// capped the ungrouped branch at [1-9]\d{0,2}, rejecting "1000"
+		// and "334881" — legitimate plain integers the function's own doc
+		// comment and error text promise to accept. Without these cases the
+		// false-rejection bug is invisible (issue #65 item 1).
+		{"four-digit ungrouped", "1000", 1000},
+		{"six-digit ungrouped", "334881", 334881},
+		{"zero", "0", 0},
+		{"empty string", "", 0},
+		{"malformed", "12abc", -1}, // -1 sentinel: expect an error, not 0
+		// Signed values are parsed FAITHFULLY on the response side (issue
+		// #65 item 3): the server is the source of truth, so a server-sent
+		// "-5" likes parses to -5 rather than being clamped or rejected.
+		// This is deliberately asymmetric with the request side, which
+		// rejects negative IDs/pages. A caller wanting a domain check
+		// applies it on the returned int.
+		{"signed negative", "-5", -5},
+		{"signed positive", "+864", 864},
+		// Decimal-comma / non-thousands-grouped comma forms MUST error: the
+		// vendor is a Russian-language service where comma is the decimal
+		// separator, and stripping the comma before Atoi would silently turn
+		// "1,2,3" into 123 with no error (issue #65 item 1).
+		{"comma-grouped malformed", "1,2,3", -1},
+	}
+	parsers := []struct {
+		name string
+		fn   func(p SearchPost) (int, error)
+		set  func(p *SearchPost, v string)
+	}{
+		{"ViewsInt", func(p SearchPost) (int, error) { return p.ViewsInt() }, func(p *SearchPost, v string) { p.Views = v }},
+		{"LikesInt", func(p SearchPost) (int, error) { return p.LikesInt() }, func(p *SearchPost, v string) { p.Likes = v }},
+		{"RepostsInt", func(p SearchPost) (int, error) { return p.RepostsInt() }, func(p *SearchPost, v string) { p.Reposts = v }},
+		{"CommentsInt", func(p SearchPost) (int, error) { return p.CommentsInt() }, func(p *SearchPost, v string) { p.Comments = v }},
+	}
+	for _, pc := range parsers {
+		for _, tc := range intCases {
+			t.Run(pc.name+"/"+tc.name, func(t *testing.T) {
+				var p SearchPost
+				pc.set(&p, tc.field)
+				got, err := pc.fn(p)
+				if tc.want == -1 {
+					// malformed: an error is REQUIRED, and it must NOT
+					// silently return 0 (the false-confidence failure mode).
+					if err == nil {
+						t.Fatalf("%s(%q): expected an error, got nil (result=%d) — a silent 0 on malformed input is exactly the wrongness this accessor exists to prevent", pc.name, tc.field, got)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("%s(%q): unexpected error: %v", pc.name, tc.field, err)
+				}
+				if got != tc.want {
+					t.Errorf("%s(%q) = %d, want %d", pc.name, tc.field, got, tc.want)
+				}
+			})
+		}
+	}
+
+	floatCases := []struct {
+		name  string
+		field string
+		want  float64
+	}{
+		{"decimal ratio", "0.520", 0.520},
+		{"separated decimal ratio", "1,234.56", 1234.56},
+		// A 4+-digit integer-part decimal MUST be accepted: the prior regex
+		// capped the ungrouped branch at [1-9]\d{0,2}, so "1234.56" was
+		// rejected — a legitimate value the function's doc comment promises
+		// to accept. Without this case the false-rejection bug is invisible
+		// (issue #65 item 1).
+		{"ungrouped 4-digit-int decimal", "1234.56", 1234.56},
+		{"bare integer ratio", "2", 2.0},
+		{"zero", "0", 0},
+		{"empty string", "", 0},
+		{"malformed", "0.5abc", -1}, // -1 sentinel: expect an error
+		// Signed involvement is parsed FAITHFULLY (issue #65 item 3): a
+		// server-sent negative ratio is returned as-is, not clamped — see
+		// the signed-value asymmetry note on the parse accessors.
+		{"signed negative ratio", "-0.5", -0.5},
+		// Decimal-comma forms MUST error, not silently parse to a 1000×-wrong
+		// value: in the vendor's Russian locale "0,520" is the ratio 0.520,
+		// but stripping the comma yields "0520" → 520.0 with err==nil — the
+		// exact silent-wrongness class this accessor exists to prevent
+		// (issue #65 item 1). A space-separated thousands form is also
+		// rejected (the strip only handles commas).
+		{"decimal comma", "0,520", -1},
+		{"space-separated thousands", "1 234", -1},
+	}
+	for _, tc := range floatCases {
+		t.Run("InvolvementFloat/"+tc.name, func(t *testing.T) {
+			var p SearchPost
+			p.Involvement = tc.field
+			got, err := p.InvolvementFloat()
+			if tc.want == -1 {
+				if err == nil {
+					t.Fatalf("InvolvementFloat(%q): expected an error, got nil (result=%v) — a silent 0 on malformed input is exactly the wrongness this accessor exists to prevent", tc.field, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("InvolvementFloat(%q): unexpected error: %v", tc.field, err)
+			}
+			if got != tc.want {
+				t.Errorf("InvolvementFloat(%q) = %v, want %v", tc.field, got, tc.want)
+			}
+		})
+	}
+}

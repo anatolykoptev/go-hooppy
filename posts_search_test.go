@@ -3,9 +3,11 @@ package hooppy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -72,14 +74,12 @@ func TestListSearchPosts(t *testing.T) {
 	}
 }
 
-func TestListSearchPosts_MetricsAndSorting(t *testing.T) {
-	var gotSortBy, gotSortDir, gotMinLikes, gotMinViews, gotContentTypes string
+func TestListSearchPosts_SortingAndContent(t *testing.T) {
+	var gotSortBy, gotSortDir, gotContentTypes string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		gotSortBy = q.Get("sort_by")
 		gotSortDir = q.Get("sort_direction")
-		gotMinLikes = q.Get("min_likes")
-		gotMinViews = q.Get("min_views")
 		gotContentTypes = q.Get("content_types")
 		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
 	}))
@@ -89,8 +89,6 @@ func TestListSearchPosts_MetricsAndSorting(t *testing.T) {
 	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
 		SortBy:        "likes",
 		SortDirection: "desc",
-		MinLikes:      5000,
-		MinViews:      1000000,
 		ContentTypes:  "photos,videos",
 	})
 	if err != nil {
@@ -102,34 +100,332 @@ func TestListSearchPosts_MetricsAndSorting(t *testing.T) {
 	if gotSortDir != "desc" {
 		t.Errorf("sort_direction = %q, want desc", gotSortDir)
 	}
-	if gotMinLikes != "5000" {
-		t.Errorf("min_likes = %q, want 5000", gotMinLikes)
-	}
-	if gotMinViews != "1000000" {
-		t.Errorf("min_views = %q, want 1000000", gotMinViews)
-	}
 	if gotContentTypes != "photos,videos" {
 		t.Errorf("content_types = %q, want photos,videos", gotContentTypes)
 	}
 }
 
-func TestListSearchPosts_MinInvolvement(t *testing.T) {
-	var gotMinInvolvement string
+// TestListSearchPosts_MetricFiltersRejected covers issue #63 (a): the five
+// min_* metric threshold flags (min_likes, min_views, min_comments,
+// min_reposts, min_involvement) are NOT server-side filters — the API
+// silently ignores them and returns an unfiltered result set. The library
+// refuses them before any request is issued, pointing the caller at
+// --sort-by, which does work server-side. The flags stay registered (a flag
+// that errors with an explanation is strictly better than one that lies),
+// so this is source-compatible but BEHAVIOUR-CHANGING: a caller that
+// previously passed MinViews: 100 got a result set and now gets an error
+// (see CHANGELOG). The guard fires on any non-zero value, including
+// negatives — a computed threshold like avg-stddev going negative must not
+// silently fall through to an unfiltered result (issue #65 item 4).
+//
+// The load-bearing property — refusal happens BEFORE any request is issued
+// — is pinned by a reached flag in the stub handler: a refactor that issues
+// the GET and then errors keeps err != nil but trips the reached assertion
+// (issue #65 item 5).
+func TestListSearchPosts_MetricFiltersRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		f    SearchPostsFilter
+	}{
+		{"MinLikes", SearchPostsFilter{MinLikes: 5000}},
+		{"MinViews", SearchPostsFilter{MinViews: 1000000}},
+		{"MinComments", SearchPostsFilter{MinComments: 10}},
+		{"MinReposts", SearchPostsFilter{MinReposts: 5}},
+		{"MinInvolvement", SearchPostsFilter{MinInvolvement: 10.5}},
+		// Negative thresholds must be refused too: a caller passing -1
+		// (directly, or from a computed threshold like avg-stddev going
+		// negative) took neither branch of the old > 0 guard — no error, no
+		// parameter, an unfiltered result while the help promised the flag
+		// errors. Same shape as the original defect.
+		{"MinLikes negative", SearchPostsFilter{MinLikes: -1}},
+		{"MinViews negative", SearchPostsFilter{MinViews: -100}},
+		{"MinComments negative", SearchPostsFilter{MinComments: -10}},
+		{"MinReposts negative", SearchPostsFilter{MinReposts: -5}},
+		{"MinInvolvement negative", SearchPostsFilter{MinInvolvement: -0.5}},
+	}
+	// A server that, if ever reached, would lie that the filter was applied.
+	// reached MUST stay false for every case — refusal is before any request.
+	reached := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMinInvolvement = r.URL.Query().Get("min_involvement")
+		reached = true
 		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reached = false
+			_, err := c.ListSearchPosts(context.Background(), tc.f)
+			if err == nil {
+				t.Fatalf("ListSearchPosts with %s: expected an error refusing the metric threshold filter, got nil — the API has no such server-side parameter and would silently return an unfiltered result", tc.name)
+			}
+			if reached {
+				t.Fatalf("ListSearchPosts with %s: the refusal guard issued a request before erroring — refusal MUST happen before any request is issued (issue #65 item 5)", tc.name)
+			}
+		})
+	}
+}
+
+// TestListSearchPosts_VideoDurationNegative covers issue #65 item 2:
+// VideoDuration is a bucket-key filter gated on `> 0` — the same hole
+// this PR closed for the min_* fields. A negative value took neither
+// branch: no error, no parameter, an unfiltered result that looks
+// filtered. The guard now rejects negatives before any request; zero
+// stays the unset sentinel. Positive values are passed through verbatim
+// (see TestListSearchPosts_VideoDurationPassThrough) — the prior guard
+// hardcoded a 1..4 enum from a measurement that only tried 1..4, then a
+// wider measurement found keys 5-8 are real, so the enum was removed.
+func TestListSearchPosts_VideoDurationNegative(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{VideoDuration: -1})
+	if err == nil {
+		t.Fatal("ListSearchPosts with VideoDuration=-1: expected an error, got nil — a negative bucket key must be rejected before any request (issue #65 item 2)")
+	}
+	if reached {
+		t.Fatal("ListSearchPosts with VideoDuration=-1: the guard issued a request before erroring — rejection MUST happen before any request is issued")
+	}
+}
+
+// TestListSearchPosts_VideoDurationPassThrough covers issue #65 item 2:
+// the prior guard hardcoded video_duration to a 1..4 enum. A wider live
+// measurement found keys 5-8 are real and each returns a distinct result
+// set (5 → 4128; 6 → 4161; 7 → 644; 8 → 677), so the enum hard-errored
+// on four working filters. The guard now passes any non-negative value
+// through verbatim and lets the server answer — do not re-introduce a
+// hardcoded upper bound (9 and 10 error today, but the vendor may add
+// them). This test asserts each measured-working key (5,6,7,8) reaches
+// the wire as-is; reverting to the 1..4 enum makes it RED.
+func TestListSearchPosts_VideoDurationPassThrough(t *testing.T) {
+	for _, key := range []int{5, 6, 7, 8} {
+		t.Run(fmt.Sprintf("key=%d", key), func(t *testing.T) {
+			var gotVD string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotVD = r.URL.Query().Get("video_duration")
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+
+			_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{VideoDuration: key})
+			if err != nil {
+				t.Fatalf("ListSearchPosts with VideoDuration=%d: expected pass-through, got error: %v — keys 5-8 are measured to work; the 1..4 enum must not be re-introduced (issue #65 item 2)", key, err)
+			}
+			if gotVD != strconv.Itoa(key) {
+				t.Fatalf("ListSearchPosts with VideoDuration=%d: video_duration on wire = %q, want %q — pass-through must send the value verbatim", key, gotVD, strconv.Itoa(key))
+			}
+		})
+	}
+}
+
+// TestListSearchPosts_PhotosAmountNegative covers issue #65 item 2: the
+// pre-existing PhotosAmount `> 0` guard had the same silent-negative hole
+// as VideoDuration — a negative value fell through to an unfiltered result
+// with no error. The guard now rejects negatives before any request; zero
+// stays the unset sentinel and positive values are passed through (the
+// upper bound is not confirmed — 5 was measured to filter).
+func TestListSearchPosts_PhotosAmountNegative(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{PhotosAmount: -1})
+	if err == nil {
+		t.Fatal("ListSearchPosts with PhotosAmount=-1: expected an error, got nil — a negative bucket key must be rejected before any request (issue #65 item 2)")
+	}
+	if reached {
+		t.Fatal("ListSearchPosts with PhotosAmount=-1: the guard issued a request before erroring — rejection MUST happen before any request is issued")
+	}
+}
+
+// TestListSearchPosts_PhotosAmountPassThrough covers issue #65 item 3: the
+// no-hardcoded-enum policy is guarded for VideoDuration (re-adding
+// `|| f.VideoDuration > 4` goes RED), but PhotosAmount had no equivalent
+// pass-through test — adding `|| f.PhotosAmount > 5` stayed GREEN across
+// the full suite. Nothing stopped the same enum mistake being remade on
+// the field whose own measurement table is the proof a ceiling would be
+// wrong. This test asserts keys 6, 10 and 99 reach the wire verbatim;
+// reverting to a `> 5` (or any upper-bound) guard makes it RED. Key 10
+// and 99 return identical counts (saturation — "N or more", not "exactly
+// N"), so both are included to pin the saturation semantics too.
+func TestListSearchPosts_PhotosAmountPassThrough(t *testing.T) {
+	for _, key := range []int{6, 10, 99} {
+		t.Run(fmt.Sprintf("key=%d", key), func(t *testing.T) {
+			var gotPA string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPA = r.URL.Query().Get("photos_amount")
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+
+			_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{PhotosAmount: key})
+			if err != nil {
+				t.Fatalf("ListSearchPosts with PhotosAmount=%d: expected pass-through, got error: %v — the valid key space is not enumerable client-side; a hardcoded upper bound must not be re-introduced (issue #65 item 3)", key, err)
+			}
+			if gotPA != strconv.Itoa(key) {
+				t.Fatalf("ListSearchPosts with PhotosAmount=%d: photos_amount on wire = %q, want %q — pass-through must send the value verbatim", key, gotPA, strconv.Itoa(key))
+			}
+		})
+	}
+}
+
+// TestListSearchPosts_IDPageNegative covers issue #65 item 1: the five
+// ID/page filters (SourceType, SourceID, SourceResourceID, OwnerID,
+// Page) were gated on `> 0` — the same silent-negative hole this PR closed
+// for the min_* and bucket-key fields. A negative took neither branch:
+// no error, no parameter, an unfiltered result that looks filtered.
+// Reachable from the shipped CLI (--source-id -1, --page -1 via pflag's
+// signed IntVar). The guard now rejects negatives before any request;
+// zero stays the unset sentinel. Each case is isolated to one field so a
+// regression in any single guard is visible.
+func TestListSearchPosts_IDPageNegative(t *testing.T) {
+	cases := []struct {
+		name string
+		f    SearchPostsFilter
+	}{
+		{"SourceType negative", SearchPostsFilter{SourceType: -1}},
+		{"SourceID negative", SearchPostsFilter{SourceID: -1}},
+		{"SourceResourceID negative", SearchPostsFilter{SourceResourceID: -1}},
+		{"OwnerID negative", SearchPostsFilter{OwnerID: -1}},
+		{"Page negative", SearchPostsFilter{Page: -1}},
+	}
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reached = false
+			_, err := c.ListSearchPosts(context.Background(), tc.f)
+			if err == nil {
+				t.Fatalf("ListSearchPosts with %s: expected an error, got nil — a negative ID/page value must be rejected before any request (issue #65 item 1)", tc.name)
+			}
+			if reached {
+				t.Fatalf("ListSearchPosts with %s: the guard issued a request before erroring — rejection MUST happen before any request is issued", tc.name)
+			}
+		})
+	}
+}
+
+// TestListSearchPosts_FilterVocabularyPinned covers issue #63 (c): the
+// /posts-search endpoint publishes its real filter vocabulary in every
+// response's filters_plug array (one entry per valid filter, keyed by
+// `slug`). This test captures a realistic filters_plug fixture, drives
+// ListSearchPosts with every VALID filter populated, and asserts that every
+// parameter the function puts on the wire appears as a slug in the
+// descriptor — excepting the three sort/pagination parameters (page,
+// sort_by, sort_direction), which the descriptor does not list but which
+// demonstrably work. This is the test that would have caught the five
+// invented min_* names on the day they were written, and keeps catching a
+// vendor rename.
+//
+// This test asserts SLUGS, not VALUES, on purpose. The descriptor's
+// `values` arrays are advisory, not authoritative: measured against a live
+// response, `documents` is a working content_types value the descriptor
+// omits, and photos_amount/video_duration ship values:[] (empty) yet accept
+// arguments. Asserting values here would couple the test to a non-exhaustive
+// list and force a false "improvement" — do NOT tighten this into a value
+// check. See the content-filters comment in posts_search.go for the measured
+// evidence.
+func TestListSearchPosts_FilterVocabularyPinned(t *testing.T) {
+	// Realistic filters_plug fixture: the complete descriptor measured from
+	// the live API. No account identifiers — only the vendor's filter schema.
+	const filtersPlugFixture = `[
+		{"slug":"text","type":"input","name":"Text"},
+		{"slug":"date_from","type":"date","name":"Date from"},
+		{"slug":"date_to","type":"date","name":"Date to"},
+		{"slug":"source_type","type":"select","name":"Source type","values":[{"key":"1","name":"Social"},{"key":"2","name":"RSS"}]},
+		{"slug":"source_id","type":"select","name":"Source","values":[{"key":"1","name":"VK"},{"key":"7","name":"Instagram"}]},
+		{"slug":"source_resource_id","type":"select","name":"Resource","values":[]},
+		{"slug":"owner_id","type":"select","name":"Owner","values":[]},
+		{"slug":"content_types","type":"checkbox","name":"Content types","values":[{"key":"photos","name":"Photos"},{"key":"videos","name":"Videos"},{"key":"audios","name":"Audios"},{"key":"documents","name":"Documents"},{"key":"links","name":"Links"}]},
+		{"slug":"content_types_exclude","type":"checkbox","name":"Exclude content types","values":[{"key":"photos","name":"Photos"},{"key":"videos","name":"Videos"}]},
+		{"slug":"photos_amount","type":"select","name":"Photos amount","values":[{"key":"1","name":"1"},{"key":"2","name":"2"},{"key":"3","name":"3+"}]},
+		{"slug":"video_duration","type":"select","name":"Video duration","values":[{"key":"1","name":"Short"},{"key":"2","name":"Medium"},{"key":"3","name":"Long"}]}
+	]`
+	type plugEntry struct {
+		Slug string `json:"slug"`
+	}
+	var plug []plugEntry
+	if err := json.Unmarshal([]byte(filtersPlugFixture), &plug); err != nil {
+		t.Fatalf("decode filters_plug fixture: %v", err)
+	}
+	validSlugs := make(map[string]bool, len(plug))
+	for _, e := range plug {
+		validSlugs[e.Slug] = true
+	}
+
+	// sort/pagination params the descriptor does NOT list but which work.
+	sortPagParams := map[string]bool{"page": true, "sort_by": true, "sort_direction": true}
+
+	var capturedKeys []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k := range r.URL.Query() {
+			capturedKeys = append(capturedKeys, k)
+		}
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	// Populate every VALID filter (no metric thresholds — those are refused
+	// by the guard and never reach the wire; see TestListSearchPosts_MetricFiltersRejected).
 	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
-		MinInvolvement: 10.5,
+		Text:                "query",
+		DateFrom:            "01.01.2026",
+		DateTo:              "31.01.2026",
+		SourceType:          1,
+		SourceID:            1,
+		SourceResourceID:    123,
+		OwnerID:             100,
+		Page:                2,
+		SortBy:              "likes",
+		SortDirection:       "desc",
+		PhotosAmount:        3,
+		VideoDuration:       2,
+		ContentTypes:        "photos,videos",
+		ContentTypesExclude: "audios",
 	})
 	if err != nil {
 		t.Fatalf("ListSearchPosts: %v", err)
 	}
-	if gotMinInvolvement != "10.5" {
-		t.Errorf("min_involvement = %q, want 10.5", gotMinInvolvement)
+	if len(capturedKeys) == 0 {
+		t.Fatal("no query parameters captured — server handler was not reached or sent no params")
+	}
+
+	seen := make(map[string]bool, len(capturedKeys))
+	for _, k := range capturedKeys {
+		seen[k] = true
+	}
+	// video_duration is the one real filter we previously omitted (issue #63 b).
+	// Asserting it is on the wire makes this test RED if the addition is reverted.
+	if !seen["video_duration"] {
+		t.Errorf("video_duration not on the wire — captured keys: %v", capturedKeys)
+	}
+
+	for _, k := range capturedKeys {
+		if sortPagParams[k] {
+			continue
+		}
+		if !validSlugs[k] {
+			t.Errorf("parameter %q is on the wire but is NOT a slug in the filters_plug descriptor — the API does not recognize this filter and would silently ignore it (false-confidence bug class)", k)
+		}
 	}
 }
 

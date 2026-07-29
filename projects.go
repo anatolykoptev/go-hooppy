@@ -10,6 +10,17 @@ import (
 // ListProjects returns the user's post projects.
 func (c *Client) ListProjects(ctx context.Context, page int) (*ProjectsResponse, error) {
 	params := url.Values{}
+	// Reject negatives before any request: the old `> 0` guard let a
+	// negative take neither branch — no error, no page parameter, the
+	// server returns page 1, and a caller's paging loop silently re-reads
+	// the first page. Same defect class the sweep closed across the
+	// search/posts/accounts/pages filters (see posts_search.go). Reachable
+	// from the shipped CLI (cmd/hooppy binds --page with IntVar; pflag
+	// accepts negatives) and the MCP tool (in.Page, no schema minimum).
+	// Zero stays the unset sentinel.
+	if page < 0 {
+		return nil, fmt.Errorf("hooppy: ListProjects: page must be non-negative (got %d); pass 0 to leave unset", page)
+	}
 	if page > 0 {
 		params.Set("page", strconv.Itoa(page))
 	}
@@ -61,6 +72,17 @@ func (c *Client) DeleteProject(ctx context.Context, id int) (*DeleteResponse, er
 // ListSchedules returns the user's publication schedules.
 func (c *Client) ListSchedules(ctx context.Context, page int) (*SchedulesResponse, error) {
 	params := url.Values{}
+	// Reject negatives before any request: the old `> 0` guard let a
+	// negative take neither branch — no error, no page parameter, the
+	// server returns page 1, and a caller's paging loop silently re-reads
+	// the first page. Same defect class the sweep closed across the
+	// search/posts/accounts/pages filters (see posts_search.go). Reachable
+	// from the shipped CLI (cmd/hooppy binds --page with IntVar; pflag
+	// accepts negatives) and the MCP tool (in.Page, no schema minimum).
+	// Zero stays the unset sentinel.
+	if page < 0 {
+		return nil, fmt.Errorf("hooppy: ListSchedules: page must be non-negative (got %d); pass 0 to leave unset", page)
+	}
 	if page > 0 {
 		params.Set("page", strconv.Itoa(page))
 	}

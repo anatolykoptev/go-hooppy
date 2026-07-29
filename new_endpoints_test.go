@@ -375,3 +375,53 @@ func TestCrossPostWithMode(t *testing.T) {
 		t.Errorf("ID = %d, want 42", resp.ID)
 	}
 }
+
+// TestListWatermarks_NegativePageRejected covers issue #65 item 1: the
+// ListWatermarks page filter was gated on `> 0` — the same silent-negative
+// hole the sweep closed across the search/posts/accounts/pages filters. A
+// negative took neither branch: no error, no page parameter, the server
+// returns page 1, and a caller's paging loop silently re-reads the first
+// page. The guard now rejects negatives before any request; zero stays the
+// unset sentinel.
+func TestListWatermarks_NegativePageRejected(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"list":[]}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListWatermarks(context.Background(), -1)
+	if err == nil {
+		t.Fatal("ListWatermarks with page=-1: expected an error, got nil — a negative page must be rejected before any request (issue #65 item 1)")
+	}
+	if reached {
+		t.Fatal("ListWatermarks with page=-1: the guard issued a request before erroring — rejection MUST happen before any request is issued")
+	}
+}
+
+// TestListNotifications_NegativePageRejected covers issue #65 item 1: the
+// ListNotifications page filter was gated on `> 0` — the same
+// silent-negative hole the sweep closed across the search/posts/accounts/
+// pages filters. A negative took neither branch: no error, no page
+// parameter, the server returns page 1, and a caller's paging loop
+// silently re-reads the first page. The guard now rejects negatives before
+// any request; zero stays the unset sentinel.
+func TestListNotifications_NegativePageRejected(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"list":[]}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListNotifications(context.Background(), -1)
+	if err == nil {
+		t.Fatal("ListNotifications with page=-1: expected an error, got nil — a negative page must be rejected before any request (issue #65 item 1)")
+	}
+	if reached {
+		t.Fatal("ListNotifications with page=-1: the guard issued a request before erroring — rejection MUST happen before any request is issued")
+	}
+}

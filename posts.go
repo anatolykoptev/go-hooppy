@@ -33,6 +33,15 @@ func (c *Client) ListPosts(ctx context.Context, f ListPostsFilter) (*PostsRespon
 	if f.PublicationDate != "" {
 		params.Set("publication_date", f.PublicationDate)
 	}
+	// Reject negatives before any request: the old `> 0` guard let a
+	// negative take neither branch — no error, no parameter, an unfiltered
+	// result that looks filtered. Same defect class as the posts-search
+	// ID/page guards (see posts_search.go). Reachable from the shipped CLI
+	// (cmd/hooppy binds these with IntVar; pflag accepts negatives). Zero
+	// stays the unset sentinel.
+	if f.SourceID < 0 || f.AccountID < 0 || f.PageID < 0 || f.ScheduleID < 0 || f.ProjectID < 0 || f.Page < 0 {
+		return nil, fmt.Errorf("hooppy: ListPosts: source_id/account_id/page_id/schedule_id/project_id/page must be non-negative (got source_id=%d, account_id=%d, page_id=%d, schedule_id=%d, project_id=%d, page=%d); pass 0 to leave any unset", f.SourceID, f.AccountID, f.PageID, f.ScheduleID, f.ProjectID, f.Page)
+	}
 	if f.SourceID > 0 {
 		params.Set("source_id", strconv.Itoa(f.SourceID))
 	}

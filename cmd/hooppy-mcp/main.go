@@ -1014,12 +1014,13 @@ type listSearchPostsInput struct {
 	Page                int     `json:"page,omitempty" jsonschema:"Pagination page number."`
 	SortBy              string  `json:"sort_by,omitempty" jsonschema:"Sort field: publication_date, likes, reposts, comments, views, involvement."`
 	SortDirection       string  `json:"sort_direction,omitempty" jsonschema:"Sort direction: desc (default) or asc."`
-	MinLikes            int     `json:"min_likes,omitempty" jsonschema:"Minimum likes. 0=no filter."`
-	MinViews            int     `json:"min_views,omitempty" jsonschema:"Minimum views. 0=no filter."`
-	MinComments         int     `json:"min_comments,omitempty" jsonschema:"Minimum comments. 0=no filter."`
-	MinReposts          int     `json:"min_reposts,omitempty" jsonschema:"Minimum reposts. 0=no filter."`
-	MinInvolvement      float64 `json:"min_involvement,omitempty" jsonschema:"Minimum engagement (e.g. 10.5). 0=no filter."`
-	PhotosAmount        int     `json:"photos_amount,omitempty" jsonschema:"Exact photo count. 0=no filter."`
+	MinLikes            int     `json:"min_likes,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-likes filter; use sort_by=likes instead. Setting this errors."`
+	MinViews            int     `json:"min_views,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-views filter; use sort_by=views instead. Setting this errors."`
+	MinComments         int     `json:"min_comments,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-comments filter; use sort_by=comments instead. Setting this errors."`
+	MinReposts          int     `json:"min_reposts,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-reposts filter; use sort_by=reposts instead. Setting this errors."`
+	MinInvolvement      float64 `json:"min_involvement,omitempty" jsonschema:"DEPRECATED/no-op: the API has no min-involvement filter; use sort_by=involvement instead. Setting this errors."`
+	PhotosAmount        int     `json:"photos_amount,omitempty" jsonschema:"Photo count bucket (non-negative; 0 = unset). Measured against a live account: 1 -> 9294; 5 -> 566; 6 -> 742; 10 -> 2172; 99 -> 2172 (identical to 10, so the parameter saturates — it means \"N or more\", not \"exactly N\"). The filters_plug values array is empty, so valid keys are not enumerable client-side; any non-negative value is passed through verbatim and the server answers."`
+	VideoDuration       int     `json:"video_duration,omitempty" jsonschema:"Video duration bucket (non-negative; 0 = unset). Measured against a live account (video content only): 1 -> 710; 2 -> 159; 3 -> 3525; 4 -> 4036; 5 -> 4128; 6 -> 4161; 7 -> 644; 8 -> 677; 9 and 10 return a server error. Keys 5-8 are real and each returns a distinct result set — the prior 1..4 guard hard-errored on four working filters. The valid key space is not enumerable client-side (the vendor may add keys); any non-negative value is passed through verbatim and the server answers. The filters_plug values array is empty."`
 	ContentTypes        string  `json:"content_types,omitempty" jsonschema:"Comma-separated content types to include: photos, videos, audios, documents, links (AND filter)."`
 	ContentTypesExclude string  `json:"content_types_exclude,omitempty" jsonschema:"Comma-separated content types to exclude."`
 }
@@ -1028,7 +1029,7 @@ func registerListSearchPosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_search_posts",
-			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. Supports sorting and filtering by metrics (likes, views, comments, reposts, involvement) and content types. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. Supports sorting by metrics (sort_by: likes, views, comments, reposts, involvement) and filtering by content types, photo count, and video duration. Metric THRESHOLD filters (min_likes/min_views/min_comments/min_reposts/min_involvement) are NOT server-side — the API silently ignores them; setting any of them errors, so use sort_by to rank by a metric instead. UNDOCUMENTED endpoint — may change without notice.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listSearchPostsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -1052,6 +1053,7 @@ func registerListSearchPosts(server *mcp.Server) {
 				MinReposts:          in.MinReposts,
 				MinInvolvement:      in.MinInvolvement,
 				PhotosAmount:        in.PhotosAmount,
+				VideoDuration:       in.VideoDuration,
 				ContentTypes:        in.ContentTypes,
 				ContentTypesExclude: in.ContentTypesExclude,
 			})
