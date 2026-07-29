@@ -2,6 +2,9 @@ package hooppy
 
 import (
 	"encoding/json"
+	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -884,11 +887,11 @@ type SearchPostsFilter struct {
 	Text             string
 	DateFrom         string // dd.mm.yyyy
 	DateTo           string // dd.mm.yyyy
-	SourceType       int    // 1=social, 2=RSS
-	SourceID         int    // social network ID (1=VK, 7=Instagram, etc.)
-	SourceResourceID int    // source resource ID (from ListSourceResources)
-	OwnerID          int    // page ID within source
-	Page             int
+	SourceType       int    // 1=social, 2=RSS; must be non-negative (0 = unset); negatives are rejected before any request (see ListSearchPosts)
+	SourceID         int    // social network ID (1=VK, 7=Instagram, etc.); must be non-negative (0 = unset); negatives are rejected before any request
+	SourceResourceID int    // source resource ID (from ListSourceResources); must be non-negative (0 = unset); negatives are rejected before any request
+	OwnerID          int    // page ID within source; must be non-negative (0 = unset); negatives are rejected before any request
+	Page             int    // 1-indexed; must be non-negative (0 = unset = first page); negatives are rejected before any request — a negative drops the param and the server silently returns page 1
 	// Sorting (empirically verified).
 	SortBy        string // publication_date, likes, reposts, comments, views, involvement
 	SortDirection string // desc (default) or asc
@@ -899,7 +902,8 @@ type SearchPostsFilter struct {
 	MinReposts     int
 	MinInvolvement float64
 	// Content filters (empirically verified).
-	PhotosAmount        int    // exact photo count
+	PhotosAmount        int    // photo-count bucket key (video content only is VideoDuration); must be non-negative (0 = unset); negatives are rejected before any request. Pass-through: any positive key is sent verbatim — the valid key space is NOT enumerable client-side (filters_plug values:[] is empty). Saturates: keys 10 and 99 return identical counts, so the semantics are "N or more photos", not "exactly N". See the measured table in ListSearchPosts.
+	VideoDuration       int    // video-duration bucket key (video content only); must be non-negative (0 = unset); negatives are rejected before any request. Pass-through: any positive key is sent verbatim — the valid key space is NOT enumerable client-side (filters_plug values:[] is empty). A prior guard hardcoded a 1..4 enum from a narrow measurement; a wider measurement found keys 5-8 are real and each returns a distinct result set, so the enum was removed. Do NOT re-introduce a hardcoded upper bound. See the measured table in ListSearchPosts.
 	ContentTypes        string // comma-separated: photos, videos, audios, documents, links (AND filter)
 	ContentTypesExclude string // comma-separated — exclude posts with these types
 }
@@ -994,4 +998,125 @@ type SearchPostEditResponse struct {
 	CreatedBy            int              `json:"created_by"`
 	Texts                []PostText       `json:"texts"`
 	Attachments          []Attachment     `json:"attachments"`
+}
+
+// SearchPost metric parse accessors (issue #62).
+//
+// Wire format: the server sends Likes, Reposts, Views, Comments and
+// Involvement as display-formatted STRINGS, not numbers — e.g.
+// {"views": "334,881", "likes": "1", "involvement": "0.520"}. Integer
+// metrics use a thousands separator (comma in the observed locale); the
+// separator is NOT guaranteed to be a comma across the vendor's locales, so
+// the struct fields stay string and these accessors strip the separator and
+// parse. Involvement is a decimal ratio (0.0–100.0-ish), not a percentage
+// string. Malformed input returns an error rather than a silent 0 — a
+// helper that returned 0 on failure would recreate the exact
+// silent-wrongness this accessor exists to prevent (a naive string
+// comparison ranks "334,881" below "87,008").
+//
+// Do NOT retype the fields to numbers with a custom unmarshaller: a silent
+// parse failure on an unexpected separator would be worse than the current
+// honest string.
+//
+// Signed-value asymmetry (issue #65 item 3): metricShapeRe accepts an
+// optional leading sign, so a server-sent "-5" likes parses to -5. This is
+// FAITHFUL parsing on the response side, not a silent wrong value — the
+// server is the source of truth for what it emitted, and clamping or
+// rejecting its data here would mask a vendor bug rather than surface it.
+// This is deliberately asymmetric with the request side (ListSearchPosts /
+// ListPosts / ListAccounts / ListPages reject negative IDs and page
+// numbers before any request): on the request side the CALLER is the
+// source of input and we can validate intent; on the response side the
+// SERVER is the source and we must reflect what it sent. A caller that
+// wants a domain check (e.g. likes must be >= 0) can apply it on the
+// returned int — the accessor does not silently drop the signal.
+func (p SearchPost) ViewsInt() (int, error)    { return parseMetricInt("views", p.Views) }
+func (p SearchPost) LikesInt() (int, error)    { return parseMetricInt("likes", p.Likes) }
+func (p SearchPost) RepostsInt() (int, error)  { return parseMetricInt("reposts", p.Reposts) }
+func (p SearchPost) CommentsInt() (int, error) { return parseMetricInt("comments", p.Comments) }
+func (p SearchPost) InvolvementFloat() (float64, error) {
+	return parseMetricFloat("involvement", p.Involvement)
+}
+
+// metricShapeRe pins the wire format the parse accessors accept BEFORE any
+// comma-stripping. The shape is: an optional sign, then either a plain
+// decimal (0, 864, 1000, 334881, 0.520, 1234.56, 2.0) or a
+// comma-thousands-grouped integer part (1,520 / 334,881 / 1,234.56). A
+// leading-zero head followed by a comma (e.g. "0,520") is REJECTED: the
+// vendor is a Russian-language service where the comma is the decimal
+// separator, so "0,520" is the ratio 0.520, not 520 — and stripping the
+// comma before ParseFloat would yield 520.0 with err==nil, the exact
+// 1000×-wrong silent value this accessor exists to prevent. Thousands
+// grouping never writes a leading zero before the comma, so rejecting this
+// shape costs nothing. Non-thousands-grouped comma forms ("1,2,3", "3,14")
+// and other-locale separators ("1 234", "1.234,56") are rejected too. The
+// ungrouped branch allows any number of digits ([1-9]\d*) so a plain
+// integer of 1000+ or a decimal with a 4+-digit integer part is accepted —
+// the prior [1-9]\d{0,2} cap rejected "1000", "334881", and "1234.56",
+// contradicting the function's own doc comment and error text. See issue
+// #65 item 1.
+var metricShapeRe = regexp.MustCompile(`^[+-]?(0(\.\d+)?|[1-9]\d*(\.\d+)?|[1-9]\d{0,2}(,\d{3})+(\.\d+)?)$`)
+
+// validateAndStripMetric validates that v is a well-formed metric string
+// (per metricShapeRe) and returns it with thousands-separator commas
+// removed, ready for strconv.Atoi/ParseFloat. The bool is true iff v was
+// non-empty and matched the shape — callers use it (not an empty-string
+// re-test) to decide "no value → 0", so a future regex edit that admits
+// the empty string cannot silently turn a present value into a 0. A shape
+// failure returns (false, error) naming the field — the shared gate for
+// parseMetricInt and parseMetricFloat so the regex fix lives in one
+// place, not two.
+func validateAndStripMetric(name, v string) (string, bool, error) {
+	if v == "" {
+		return "", false, nil
+	}
+	if !metricShapeRe.MatchString(v) {
+		return "", false, fmt.Errorf("hooppy: SearchPost.%s: parse %q: not a well-formed metric (expected a plain or comma-thousands-grouped number; a decimal comma is not accepted — the vendor's locale uses comma as the decimal separator)", name, v)
+	}
+	return strings.ReplaceAll(v, ",", ""), true, nil
+}
+
+// parseMetricInt strips the observed thousands separator (comma) and parses
+// an integer metric string as sent by the server (e.g. "334,881" → 334881).
+// An empty string is treated as 0 (the server sends "" for absent metrics).
+// The shape is validated BEFORE stripping so a decimal-comma form (which the
+// Russian-language vendor uses as its decimal separator) is rejected rather
+// than silently parsed to a wrong value. Any other unparseable form —
+// including an unexpected separator from a different locale — returns an
+// error rather than a silent 0, so a caller cannot accidentally rank on a
+// wrong value.
+func parseMetricInt(name, v string) (int, error) {
+	s, present, err := validateAndStripMetric(name, v)
+	if err != nil {
+		return 0, err
+	}
+	if !present {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("hooppy: SearchPost.%s: parse %q: %w", name, v, err)
+	}
+	return n, nil
+}
+
+// parseMetricFloat strips the observed thousands separator (comma) and parses
+// a decimal metric string (involvement is a ratio, e.g. "0.520" or "1,234.56").
+// The shape is validated BEFORE stripping so a decimal-comma form (e.g.
+// "0,520", which the Russian-language vendor emits as the ratio 0.520) is
+// rejected rather than silently parsed to 520.0 — a 1000×-wrong value with
+// err==nil. Same error discipline as parseMetricInt.
+func parseMetricFloat(name, v string) (float64, error) {
+	s, present, err := validateAndStripMetric(name, v)
+	if err != nil {
+		return 0, err
+	}
+	if !present {
+		return 0, nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("hooppy: SearchPost.%s: parse %q: %w", name, v, err)
+	}
+	return f, nil
 }

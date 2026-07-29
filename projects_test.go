@@ -529,3 +529,57 @@ func TestListAllSchedules_ZeroRows_EmptyListNotNull(t *testing.T) {
 		t.Errorf("list len = %d, want 0 (zero-row account)", len(list))
 	}
 }
+
+// TestListProjects_NegativePageRejected covers issue #65 item 1: the
+// ListProjects page filter was gated on `> 0` — the same silent-negative
+// hole the sweep closed across the search/posts/accounts/pages filters. A
+// negative took neither branch: no error, no page parameter, the server
+// returns page 1, and a caller's paging loop silently re-reads the first
+// page. Reachable from the shipped CLI (cmd/hooppy binds --page with
+// IntVar; pflag accepts negatives) and the MCP tool (in.Page, no schema
+// minimum). The guard now rejects negatives before any request; zero
+// stays the unset sentinel.
+func TestListProjects_NegativePageRejected(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListProjects(context.Background(), -1)
+	if err == nil {
+		t.Fatal("ListProjects with page=-1: expected an error, got nil — a negative page must be rejected before any request (issue #65 item 1)")
+	}
+	if reached {
+		t.Fatal("ListProjects with page=-1: the guard issued a request before erroring — rejection MUST happen before any request is issued")
+	}
+}
+
+// TestListSchedules_NegativePageRejected covers issue #65 item 1: the
+// ListSchedules page filter was gated on `> 0` — the same silent-negative
+// hole the sweep closed across the search/posts/accounts/pages filters. A
+// negative took neither branch: no error, no page parameter, the server
+// returns page 1, and a caller's paging loop silently re-reads the first
+// page. Reachable from the shipped CLI (cmd/hooppy binds --page with
+// IntVar; pflag accepts negatives) and the MCP tool (in.Page, no schema
+// minimum). The guard now rejects negatives before any request; zero
+// stays the unset sentinel.
+func TestListSchedules_NegativePageRejected(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListSchedules(context.Background(), -1)
+	if err == nil {
+		t.Fatal("ListSchedules with page=-1: expected an error, got nil — a negative page must be rejected before any request (issue #65 item 1)")
+	}
+	if reached {
+		t.Fatal("ListSchedules with page=-1: the guard issued a request before erroring — rejection MUST happen before any request is issued")
+	}
+}

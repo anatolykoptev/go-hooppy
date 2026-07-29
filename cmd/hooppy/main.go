@@ -36,6 +36,7 @@ func main() {
 	registerNotifications(root)
 	registerSearch(root)
 	registerMCPConfig(root)
+	registerDoctor(root)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -791,7 +792,7 @@ func registerSearch(root *cobra.Command) {
 		Short: "List scraped posts from external pages",
 	})
 	var sText, sDateFrom, sDateTo, sSortBy, sSortDir, sContentTypes, sContentTypesExclude string
-	var sSourceType, sSourceID, sSourceResourceID, sOwnerID, sPage, sMinLikes, sMinViews, sMinComments, sMinReposts, sPhotosAmount int
+	var sSourceType, sSourceID, sSourceResourceID, sOwnerID, sPage, sMinLikes, sMinViews, sMinComments, sMinReposts, sPhotosAmount, sVideoDuration int
 	var sMinInvolvement float64
 	postsCmd.Flags().StringVar(&sText, "text", "", "search by text")
 	postsCmd.Flags().StringVar(&sDateFrom, "date-from", "", "filter by date from (dd.mm.yyyy)")
@@ -803,14 +804,15 @@ func registerSearch(root *cobra.Command) {
 	postsCmd.Flags().IntVar(&sPage, "page", 0, "pagination page number")
 	postsCmd.Flags().StringVar(&sSortBy, "sort-by", "", "sort field: publication_date, likes, reposts, comments, views, involvement")
 	postsCmd.Flags().StringVar(&sSortDir, "sort-dir", "desc", "sort direction: desc (default) or asc")
-	postsCmd.Flags().IntVar(&sMinLikes, "min-likes", 0, "minimum likes")
-	postsCmd.Flags().IntVar(&sMinViews, "min-views", 0, "minimum views")
-	postsCmd.Flags().IntVar(&sMinComments, "min-comments", 0, "minimum comments")
-	postsCmd.Flags().IntVar(&sMinReposts, "min-reposts", 0, "minimum reposts")
-	postsCmd.Flags().Float64Var(&sMinInvolvement, "min-involvement", 0, "minimum involvement (e.g. 10.5)")
-	postsCmd.Flags().IntVar(&sPhotosAmount, "photos-amount", 0, "exact photo count")
-	postsCmd.Flags().StringVar(&sContentTypes, "content-types", "", "comma-separated content types to include: photos, videos, audios, documents, links")
-	postsCmd.Flags().StringVar(&sContentTypesExclude, "content-types-exclude", "", "comma-separated content types to exclude")
+	postsCmd.Flags().IntVar(&sMinLikes, "min-likes", 0, "DEPRECATED/no-op: the API has no min-likes filter; use --sort-by likes instead (setting this errors)")
+	postsCmd.Flags().IntVar(&sMinViews, "min-views", 0, "DEPRECATED/no-op: the API has no min-views filter; use --sort-by views instead (setting this errors)")
+	postsCmd.Flags().IntVar(&sMinComments, "min-comments", 0, "DEPRECATED/no-op: the API has no min-comments filter; use --sort-by comments instead (setting this errors)")
+	postsCmd.Flags().IntVar(&sMinReposts, "min-reposts", 0, "DEPRECATED/no-op: the API has no min-reposts filter; use --sort-by reposts instead (setting this errors)")
+	postsCmd.Flags().Float64Var(&sMinInvolvement, "min-involvement", 0, "DEPRECATED/no-op: the API has no min-involvement filter; use --sort-by involvement instead (setting this errors)")
+	postsCmd.Flags().IntVar(&sPhotosAmount, "photos-amount", 0, "photo count bucket (non-negative; 0 = unset). Measured against a live account: 1 → 9294; 5 → 566; 6 → 742; 10 → 2172; 99 → 2172 (identical to 10, so the parameter saturates — it means \"N or more\", not \"exactly N\"). The filters_plug values array is empty, so the valid keys are not enumerable client-side; any non-negative value is passed through verbatim and the server answers.")
+	postsCmd.Flags().IntVar(&sVideoDuration, "video-duration", 0, "video duration bucket (non-negative; 0 = unset). Measured against a live account (video content only): 1 → 710; 2 → 159; 3 → 3525; 4 → 4036; 5 → 4128; 6 → 4161; 7 → 644; 8 → 677; 9 and 10 return a server error. Keys 5-8 are real and each returns a distinct result set — the prior 1..4 guard hard-errored on four working filters. The valid key space is not enumerable client-side (the vendor may add keys); any non-negative value is passed through verbatim and the server answers. The filters_plug values array is empty.")
+	postsCmd.Flags().StringVar(&sContentTypes, "content-types", "", "comma-separated content types to include: text, photos, videos, audios, links, documents (authoritative list is the content_types entry of filters_plug in any /posts-search response; that list may under-report — e.g. `documents` works yet is sometimes omitted)")
+	postsCmd.Flags().StringVar(&sContentTypesExclude, "content-types-exclude", "", "comma-separated content types to exclude: text, photos, videos, audios, links, documents (see --content-types caveat; the filters_plug list may under-report)")
 	postsCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.ListSearchPosts(context.Background(), hooppy.SearchPostsFilter{
@@ -830,6 +832,7 @@ func registerSearch(root *cobra.Command) {
 			MinReposts:          sMinReposts,
 			MinInvolvement:      sMinInvolvement,
 			PhotosAmount:        sPhotosAmount,
+			VideoDuration:       sVideoDuration,
 			ContentTypes:        sContentTypes,
 			ContentTypesExclude: sContentTypesExclude,
 		})
@@ -1138,4 +1141,59 @@ func downloadPhoto(url, dest string) error {
 	defer out.Close()
 	_, err = io.Copy(out, resp.Body)
 	return err
+}
+
+// --- doctor ---
+
+func registerDoctor(root *cobra.Command) {
+	cmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+		Name:  "doctor",
+		Short: "Diagnose broken connections from the notification log (read-only)",
+	})
+	var sinceDays int
+	var exitCode bool
+	cmd.Flags().IntVar(&sinceDays, "since", 7, "only report errors whose operation_date falls within the last N days. 0 = no window (all dated rows included); negative values are rejected. Unparseable-date rows are reported REGARDLESS of --since (they cannot be dated, so the window check does not apply). NOTE: the window is computed in the HOST's local timezone (time.Now), but the vendor renders operation_date in the ACCOUNT's timezone (a user setting on hooppy.ru, not exposed by the API). If the two differ, the window boundary can be off by the offset between them — a row the account considers inside the window may be excluded, or vice versa, by up to that offset.")
+	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error signal is present: grouped errors inside the --since window, unparseable-date rows (reported regardless of --since because they cannot be dated), or a truncated walk (walk_incomplete). Exit 0 otherwise (for cron / pre-flight)")
+	cmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		os.Exit(runDoctor(context.Background(), c, os.Stdout, os.Stderr, sinceDays, exitCode))
+	}
+}
+
+// runDoctor is the testable core of the `hooppy doctor` command. It runs
+// the doctor report, prints it as JSON to out, and returns the process exit
+// code: 1 if exitCode is true AND any error signal is present (grouped
+// errors inside the --since window, unparseable-date rows reported
+// regardless of --since, or a truncated walk), 0 otherwise. A RunDoctor
+// error is printed to errOut and returns 1.
+//
+// The exit-code gate covers THREE error signals, not just grouped errors:
+//   - len(Groups) > 0           — classified errors inside the --since window
+//   - len(UnparseableRows) > 0  — error rows whose operation_date failed to
+//     parse (reported regardless of --since
+//     because they cannot be dated; a vendor
+//     date-format drift puts every error row
+//     here; gating only on Groups would read
+//     exit 0 over undiagnosed publication failures)
+//   - WalkIncomplete            — a truncated notifications or pages walk
+//     (unique id count < first-page total_rows;
+//     a row skipped by a mid-walk offset shift
+//     is invisible; doctor is the one command
+//     whose purpose is not missing a failure)
+func runDoctor(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, sinceDays int, exitCode bool) int {
+	report, err := c.RunDoctor(ctx, sinceDays)
+	if err != nil {
+		fmt.Fprintf(errOut, "error: %v\n", err)
+		return 1
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(report); err != nil {
+		fmt.Fprintf(errOut, "error encoding output: %v\n", err)
+		return 1
+	}
+	if exitCode && (len(report.Groups) > 0 || len(report.UnparseableRows) > 0 || report.WalkIncomplete) {
+		return 1
+	}
+	return 0
 }

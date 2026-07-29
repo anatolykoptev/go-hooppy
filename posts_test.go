@@ -85,6 +85,48 @@ func TestListPosts_ZeroValuesSkipped(t *testing.T) {
 	}
 }
 
+// TestListPosts_NegativeRejected covers issue #65 item 1: the ListPosts
+// ID/page filters (SourceID, AccountID, PageID, ScheduleID, ProjectID,
+// Page) were gated on `> 0` — the same silent-negative hole this PR closed
+// across the search/accounts/pages filters. A negative took neither
+// branch: no error, no parameter, an unfiltered result that looks
+// filtered. Reachable from the shipped CLI (cmd/hooppy binds these with
+// IntVar; pflag accepts negatives). The guard now rejects negatives
+// before any request; zero stays the unset sentinel.
+func TestListPosts_NegativeRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		f    ListPostsFilter
+	}{
+		{"SourceID negative", ListPostsFilter{SourceID: -1}},
+		{"AccountID negative", ListPostsFilter{AccountID: -1}},
+		{"PageID negative", ListPostsFilter{PageID: -1}},
+		{"ScheduleID negative", ListPostsFilter{ScheduleID: -1}},
+		{"ProjectID negative", ListPostsFilter{ProjectID: -1}},
+		{"Page negative", ListPostsFilter{Page: -1}},
+	}
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"total_rows":0,"list":[]}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reached = false
+			_, err := c.ListPosts(context.Background(), tc.f)
+			if err == nil {
+				t.Fatalf("ListPosts with %s: expected an error, got nil — a negative ID/page value must be rejected before any request (issue #65 item 1)", tc.name)
+			}
+			if reached {
+				t.Fatalf("ListPosts with %s: the guard issued a request before erroring — rejection MUST happen before any request is issued", tc.name)
+			}
+		})
+	}
+}
+
 func TestListPosts_PublicationDate(t *testing.T) {
 	var capturedURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

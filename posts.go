@@ -33,6 +33,15 @@ func (c *Client) ListPosts(ctx context.Context, f ListPostsFilter) (*PostsRespon
 	if f.PublicationDate != "" {
 		params.Set("publication_date", f.PublicationDate)
 	}
+	// Reject negatives before any request: the old `> 0` guard let a
+	// negative take neither branch — no error, no parameter, an unfiltered
+	// result that looks filtered. Same defect class as the posts-search
+	// ID/page guards (see posts_search.go). Reachable from the shipped CLI
+	// (cmd/hooppy binds these with IntVar; pflag accepts negatives). Zero
+	// stays the unset sentinel.
+	if f.SourceID < 0 || f.AccountID < 0 || f.PageID < 0 || f.ScheduleID < 0 || f.ProjectID < 0 || f.Page < 0 {
+		return nil, fmt.Errorf("hooppy: ListPosts: source_id/account_id/page_id/schedule_id/project_id/page must be non-negative (got source_id=%d, account_id=%d, page_id=%d, schedule_id=%d, project_id=%d, page=%d); pass 0 to leave any unset", f.SourceID, f.AccountID, f.PageID, f.ScheduleID, f.ProjectID, f.Page)
+	}
 	if f.SourceID > 0 {
 		params.Set("source_id", strconv.Itoa(f.SourceID))
 	}
@@ -69,18 +78,35 @@ func (c *Client) ListPosts(ctx context.Context, f ListPostsFilter) (*PostsRespon
 // Duplicates arising from a mid-walk collection shift are NOT removed: with
 // offset pagination, a row inserted or deleted mid-walk shifts the window
 // and the server re-serves a row already seen. This entry point drops the
-// server's total_rows, so it cannot detect such duplicates. Use
-// ListAllPostsWithTotal with NewAllListEnvelope to detect them (see
-// NewAllListEnvelope for what it does and does not catch).
+// server's total_rows, so it cannot detect such duplicates. To detect a
+// TRUNCATED walk (rows the server initially reported but never served), the
+// rule doctor uses for /notifications applies: flag when the unique-id
+// count is LESS than the first-page total_rows (see RunDoctor for the rule
+// and the gaps it does not close). Do NOT use NewAllListEnvelope here: its
+// equality check (unique == total) is right for low-churn collections but
+// wrong for /posts, a high-churn collection where a post created or
+// published between page fetches makes unique != lastTotal on a healthy
+// account — the equality check would false-alarm on healthy accounts,
+// exactly as it did for /notifications before PR #64. The first-total rule
+// is not yet wired into a /posts entry point; tracked in #70. See
+// NewAllListEnvelope for the per call-site table of which collections that
+// check suits.
 func (c *Client) ListAllPosts(ctx context.Context, f ListPostsFilter) ([]Post, error) {
 	all, _, err := c.ListAllPostsWithTotal(ctx, f)
 	return all, err
 }
 
 // ListAllPostsWithTotal is ListAllPosts but also returns the server's
-// last-seen total_rows. The pair (list, totalRows) is meant to be passed
-// to NewAllListEnvelope. See projects.ListAllSchedulesWithTotal and
-// NewAllListEnvelope for what the envelope catches and what it does not.
+// last-seen total_rows. It exists for symmetry with the other
+// ListAll*WithTotal entry points; for /posts specifically, passing
+// (list, totalRows) to NewAllListEnvelope is NOT suitable. Its equality
+// check (unique == total) false-alarms on every active account: a post
+// created or published mid-walk makes the last-seen total_rows differ from
+// the unique-id count. The right shape is the unique < firstTotal rule
+// doctor uses for /notifications (see RunDoctor), but no /posts entry point
+// exposes the first-page total yet; tracked in #70. See NewAllListEnvelope
+// for the per call-site table of which collections the equality check does
+// suit.
 func (c *Client) ListAllPostsWithTotal(ctx context.Context, f ListPostsFilter) ([]Post, int, error) {
 	all := make([]Post, 0)
 	var totalRows int

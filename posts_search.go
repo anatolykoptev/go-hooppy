@@ -12,7 +12,29 @@ import (
 //
 // UNDOCUMENTED: GET /posts-search is not in the public OpenAPI spec (v0.1.0).
 // Discovered via API probing — may change without notice.
+//
+// Filter vocabulary: the API publishes its real filters in every response's
+// filters_plug array (slug/type/name/values). The five min_* metric threshold
+// fields below (MinLikes, MinViews, MinComments, MinReposts, MinInvolvement)
+// are NOT server-side filters — the API silently ignores them and returns an
+// unfiltered result set that looks filtered (three different thresholds
+// produce byte-identical output). Setting any of them returns an error
+// before any request is issued; use SortBy (likes|views|reposts|comments|
+// involvement) instead, which DOES work server-side. The fields are kept on
+// the struct so callers get a clear error rather than a silent lie — see
+// issue #63.
 func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*SearchPostsResponse, error) {
+	// Refuse the five metric-threshold filters before any request: the API
+	// has no such server-side parameters, so emitting them would silently
+	// return an unfiltered result set that looks filtered. Sorting by the
+	// same metric (SortBy) is the supported path and works server-side.
+	// Guard on != 0 (not > 0) so a negative threshold — passed directly or
+	// produced by a computed threshold like avg-stddev going negative — is
+	// refused too; the old > 0 guard let negatives fall through to an
+	// unfiltered result while the help promised the flag errors.
+	if f.MinLikes != 0 || f.MinViews != 0 || f.MinComments != 0 || f.MinReposts != 0 || f.MinInvolvement != 0 {
+		return nil, fmt.Errorf("hooppy: ListSearchPosts: min_likes/min_views/min_comments/min_reposts/min_involvement are not server-side filters — the API silently ignores them and returns an unfiltered result set; use sort_by (likes|views|reposts|comments|involvement) instead, which does work server-side (issue #63)")
+	}
 	params := url.Values{}
 	if f.Text != "" {
 		params.Set("text", f.Text)
@@ -22,6 +44,20 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	}
 	if f.DateTo != "" {
 		params.Set("date_to", f.DateTo)
+	}
+	// Reject negatives for the five ID/page filters before any request:
+	// the old `> 0` guard let a negative take neither branch — no error, no
+	// parameter, an unfiltered result that looks filtered. This is the
+	// exact defect class the PhotosAmount/VideoDuration guards below and
+	// the min_* guard above close. Reachable from the shipped CLI:
+	// cmd/hooppy binds all five with IntVar and pflag accepts negatives
+	// (--source-id -1 drops the parameter → results from every network
+	// while the caller believes they filtered to one; --page -1, or a
+	// computed page-1 that underflows, drops the parameter → the server
+	// returns page 1, so a paging loop silently re-reads the first page).
+	// Zero stays the unset sentinel.
+	if f.SourceType < 0 || f.SourceID < 0 || f.SourceResourceID < 0 || f.OwnerID < 0 || f.Page < 0 {
+		return nil, fmt.Errorf("hooppy: ListSearchPosts: source_type/source_id/source_resource_id/owner_id/page must be non-negative (got source_type=%d, source_id=%d, source_resource_id=%d, owner_id=%d, page=%d); pass 0 to leave any unset", f.SourceType, f.SourceID, f.SourceResourceID, f.OwnerID, f.Page)
 	}
 	if f.SourceType > 0 {
 		params.Set("source_type", strconv.Itoa(f.SourceType))
@@ -38,32 +74,80 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	if f.Page > 0 {
 		params.Set("page", strconv.Itoa(f.Page))
 	}
-	// Sorting
+	// Sorting (empirically verified — not in filters_plug, which describes
+	// filters only, not sorting or pagination).
 	if f.SortBy != "" {
 		params.Set("sort_by", f.SortBy)
 	}
 	if f.SortDirection != "" {
 		params.Set("sort_direction", f.SortDirection)
 	}
-	// Metric filters
-	if f.MinLikes > 0 {
-		params.Set("min_likes", strconv.Itoa(f.MinLikes))
+	// Content filters. Each slug below is a real filters_plug entry, but
+	// the descriptor is authoritative ONLY for slugs — it is advisory for
+	// values. Measured against a live response:
+	//   - content_types ships values [text, photos, videos, audios, links]
+	//     yet `documents` is a working value the descriptor omits, and
+	//     `text` is accepted (returns the unfiltered count).
+	//   - photos_amount and video_duration ship values: [] (empty), so the
+	//     valid keys are NOT discoverable from the descriptor at all.
+	// A value absent from `values` may still work; an empty `values` array
+	// does NOT mean the filter takes no argument. We therefore pass caller
+	// values through verbatim and never hardcode a value enum — a prior
+	// guard hardcoded video_duration to 1..4 from a measurement that only
+	// tried 1..4, then a wider measurement found keys 5-8 are real and
+	// each returns a distinct result set. Replacing one hardcoded range
+	// with another (9 and 10 error today) would repeat the same mistake
+	// when the vendor adds them. Reject only negatives, send any
+	// non-negative value verbatim, and let the server answer.
+	//
+	// Measured (NOT guessed) against the live API — recorded here so the
+	// pass-through decision is grounded, not assumed:
+	//
+	//   video_duration (unset = unfiltered):
+	//     key  rows
+	//     0    4194  (unfiltered)
+	//     1    710
+	//     2    159
+	//     3    3525
+	//     4    4036
+	//     5    4128
+	//     6    4161
+	//     7    644
+	//     8    677
+	//     9,10 server error (non-JSON)
+	//   Keys 5-8 are real and each returns a distinct result set; the
+	//   prior 1..4 guard would have hard-errored on four working filters.
+	//   9 and 10 erroring today does NOT mean the vendor will not add them
+	//   — do not re-introduce a hardcoded upper bound.
+	//
+	//   photos_amount (unset = unfiltered; saturates — "N or more", not
+	//   "exactly N"):
+	//     key  rows
+	//     1    9294
+	//     5    566
+	//     6    742
+	//     10   2172
+	//     99   2172  (identical to 10 → saturates, not a phantom class)
+	//
+	// PhotosAmount and VideoDuration are bucket-key filters. The old
+	// `> 0` guard reproduced the exact defect this PR closed for the
+	// min_* fields: a negative value took neither branch — no error, no
+	// parameter, an unfiltered result that looks filtered. A negative
+	// bucket key is never valid, so reject it before any request. Zero
+	// stays the unset sentinel; any positive value is passed through
+	// verbatim (the valid key space is not enumerable client-side — see
+	// the measurement tables above).
+	if f.PhotosAmount < 0 {
+		return nil, fmt.Errorf("hooppy: ListSearchPosts: photos_amount must be a non-negative bucket key (got %d); pass 0 to leave unset or a positive key from the filters_plug descriptor", f.PhotosAmount)
 	}
-	if f.MinViews > 0 {
-		params.Set("min_views", strconv.Itoa(f.MinViews))
-	}
-	if f.MinComments > 0 {
-		params.Set("min_comments", strconv.Itoa(f.MinComments))
-	}
-	if f.MinReposts > 0 {
-		params.Set("min_reposts", strconv.Itoa(f.MinReposts))
-	}
-	if f.MinInvolvement > 0 {
-		params.Set("min_involvement", strconv.FormatFloat(f.MinInvolvement, 'f', -1, 64))
-	}
-	// Content filters
 	if f.PhotosAmount > 0 {
 		params.Set("photos_amount", strconv.Itoa(f.PhotosAmount))
+	}
+	if f.VideoDuration < 0 {
+		return nil, fmt.Errorf("hooppy: ListSearchPosts: video_duration must be a non-negative bucket key (got %d); pass 0 to leave unset — keys 1-8 are measured to work (filters_plug values:[] is empty, see issue #63)", f.VideoDuration)
+	}
+	if f.VideoDuration > 0 {
+		params.Set("video_duration", strconv.Itoa(f.VideoDuration))
 	}
 	if f.ContentTypes != "" {
 		params.Set("content_types", f.ContentTypes)

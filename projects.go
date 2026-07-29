@@ -10,6 +10,17 @@ import (
 // ListProjects returns the user's post projects.
 func (c *Client) ListProjects(ctx context.Context, page int) (*ProjectsResponse, error) {
 	params := url.Values{}
+	// Reject negatives before any request: the old `> 0` guard let a
+	// negative take neither branch — no error, no page parameter, the
+	// server returns page 1, and a caller's paging loop silently re-reads
+	// the first page. Same defect class the sweep closed across the
+	// search/posts/accounts/pages filters (see posts_search.go). Reachable
+	// from the shipped CLI (cmd/hooppy binds --page with IntVar; pflag
+	// accepts negatives) and the MCP tool (in.Page, no schema minimum).
+	// Zero stays the unset sentinel.
+	if page < 0 {
+		return nil, fmt.Errorf("hooppy: ListProjects: page must be non-negative (got %d); pass 0 to leave unset", page)
+	}
 	if page > 0 {
 		params.Set("page", strconv.Itoa(page))
 	}
@@ -61,6 +72,17 @@ func (c *Client) DeleteProject(ctx context.Context, id int) (*DeleteResponse, er
 // ListSchedules returns the user's publication schedules.
 func (c *Client) ListSchedules(ctx context.Context, page int) (*SchedulesResponse, error) {
 	params := url.Values{}
+	// Reject negatives before any request: the old `> 0` guard let a
+	// negative take neither branch — no error, no page parameter, the
+	// server returns page 1, and a caller's paging loop silently re-reads
+	// the first page. Same defect class the sweep closed across the
+	// search/posts/accounts/pages filters (see posts_search.go). Reachable
+	// from the shipped CLI (cmd/hooppy binds --page with IntVar; pflag
+	// accepts negatives) and the MCP tool (in.Page, no schema minimum).
+	// Zero stays the unset sentinel.
+	if page < 0 {
+		return nil, fmt.Errorf("hooppy: ListSchedules: page must be non-negative (got %d); pass 0 to leave unset", page)
+	}
 	if page > 0 {
 		params.Set("page", strconv.Itoa(page))
 	}
@@ -209,6 +231,25 @@ type AllListEnvelope struct {
 // idFunc extracts the unique identity of each element. It MUST be non-nil;
 // the unique-count is meaningless without it. This is consistent with the
 // fail-loud choice already made for maxListAllPages.
+//
+// Call sites and whether the collection can change mid-walk (the equality
+// check above is only safe for low-churn collections):
+//   - cmd/hooppy-mcp/main.go:212 — posts (ListAllPostsWithTotal). HIGH-CHURN:
+//     posts are created and published continuously; a post created or
+//     published between page fetches shifts the offset window and makes
+//     unique != total on a healthy account — the equality check
+//     false-alarms here exactly as it did for /notifications before PR #64.
+//     NOT covered by the first-total rule; tracked in #70.
+//   - cmd/hooppy-mcp/main.go:445 — projects. Low-churn; a project created
+//     mid-walk is rare. Equality check is acceptable.
+//   - cmd/hooppy-mcp/main.go:483 — schedules. Low-churn; same reasoning.
+//   - cmd/hooppy/main.go:350 — projects (CLI). Same as the MCP projects site.
+//   - cmd/hooppy/main.go:440 — schedules (CLI). Same as the MCP schedules site.
+//
+// The posts site is the known gap: it walks the highest-churn collection in
+// the API with a check designed for low-churn ones. The fix is to apply the
+// first-total rule (unique < firstTotal) there too, as doctor does for
+// /notifications; see #70.
 func NewAllListEnvelope[T any](list []T, totalRows int, idFunc func(T) int) (AllListEnvelope, error) {
 	if idFunc == nil {
 		return AllListEnvelope{}, fmt.Errorf("hooppy: NewAllListEnvelope requires a non-nil idFunc — the unique-count check is meaningless without it")
