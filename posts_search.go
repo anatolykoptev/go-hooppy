@@ -500,15 +500,14 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	// create so fillScheduleSlots can diff after. The server returns
 	// {"success": true} for a batch (no id/ids), so the created ids are
 	// recovered by diffing the schedule's post list before vs after.
+	// Walk ALL pages — a schedule can hold more than one page of posts
+	// (default page size is 20), and a single-page snapshot would miss
+	// pre-existing posts beyond page 1, causing them to be mis-attributed
+	// as "created" by the diff.
 	var beforeSnapshot []Post
 	var beforeErr error
 	if payload.PublicationWhenType == 3 && len(payload.SearchPostIDs) > 1 && len(payload.SchedulesIDs) > 0 {
-		listResp, err := c.ListPosts(ctx, ListPostsFilter{ScheduleID: payload.SchedulesIDs[0]})
-		if err != nil {
-			beforeErr = err
-		} else {
-			beforeSnapshot = listResp.List
-		}
+		beforeSnapshot, _, beforeErr = c.ListAllPostsWithTotal(ctx, ListPostsFilter{ScheduleID: payload.SchedulesIDs[0]})
 		// A failed before snapshot is NOT fatal — the create proceeds,
 		// and fillScheduleSlots reports the failure in SlotLookupError.
 	}
@@ -657,15 +656,14 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 	// create so fillScheduleSlots can diff after. The server returns
 	// {"success": true} for a batch (no id/ids), so the created ids are
 	// recovered by diffing the schedule's post list before vs after.
+	// Walk ALL pages — a schedule can hold more than one page of posts
+	// (default page size is 20), and a single-page snapshot would miss
+	// pre-existing posts beyond page 1, causing them to be mis-attributed
+	// as "created" by the diff.
 	var beforeSnapshot []Post
 	var beforeErr error
 	if payload.PublicationWhenType == 3 && len(payload.SearchPostIDs) > 1 && len(payload.SchedulesIDs) > 0 {
-		listResp, err := c.ListPosts(ctx, ListPostsFilter{ScheduleID: payload.SchedulesIDs[0]})
-		if err != nil {
-			beforeErr = err
-		} else {
-			beforeSnapshot = listResp.List
-		}
+		beforeSnapshot, _, beforeErr = c.ListAllPostsWithTotal(ctx, ListPostsFilter{ScheduleID: payload.SchedulesIDs[0]})
 		// A failed before snapshot is NOT fatal — the create proceeds,
 		// and fillScheduleSlots reports the failure in SlotLookupError.
 	}

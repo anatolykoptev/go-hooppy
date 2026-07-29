@@ -3,10 +3,12 @@ package hooppy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -787,9 +789,12 @@ func TestPostPubDateToPublicationDate_Conversion(t *testing.T) {
 	// Set timestamp via JSON unmarshal (the normal path).
 	_ = json.Unmarshal([]byte(`1753770300`), &ppd.Timestamp)
 
-	pd := postPubDateToPublicationDate(ppd, 0)
+	pd, malformed := postPubDateToPublicationDate(ppd, 0)
 	if pd == nil {
 		t.Fatal("postPubDateToPublicationDate returned nil")
+	}
+	if malformed != "" {
+		t.Errorf("malformed = %q, want empty (time 14:25 is valid)", malformed)
 	}
 	if pd.Hours != "14" {
 		t.Errorf("Hours = %q, want 14", pd.Hours)
@@ -816,7 +821,7 @@ func TestPostPubDateToPublicationDate_OffsetShift(t *testing.T) {
 	var tsPos FlexInt
 	_ = json.Unmarshal([]byte(`1753831800`), &tsPos)
 	ppdPos := &PostPublicationDate{Time: "23:30", Timestamp: tsPos}
-	pdPos := postPubDateToPublicationDate(ppdPos, 3)
+	pdPos, _ := postPubDateToPublicationDate(ppdPos, 3)
 	if pdPos == nil {
 		t.Fatal("postPubDateToPublicationDate returned nil for offset+3")
 	}
@@ -830,12 +835,175 @@ func TestPostPubDateToPublicationDate_OffsetShift(t *testing.T) {
 	var tsNeg FlexInt
 	_ = json.Unmarshal([]byte(`1753754400`), &tsNeg)
 	ppdNeg := &PostPublicationDate{Time: "02:00", Timestamp: tsNeg}
-	pdNeg := postPubDateToPublicationDate(ppdNeg, -5)
+	pdNeg, _ := postPubDateToPublicationDate(ppdNeg, -5)
 	if pdNeg == nil {
 		t.Fatal("postPubDateToPublicationDate returned nil for offset-5")
 	}
 	if pdNeg.Date != "28.07.2025" {
 		t.Errorf("offset-5: Date = %q, want 28.07.2025 (02:00 UTC - 5h = 21:00 previous day)", pdNeg.Date)
+	}
+}
+
+// TestImportSearchPost_BatchMultiPage verifies that the snapshot-diff walks
+// ALL pages of the schedule's post list, not just the first. The fixture
+// has 25 pre-existing posts (page 1 = 20, page 2 = 5) before the create,
+// and 28 after (page 1 = 20, page 2 = 8). A single-page snapshot would
+// miss 5 pre-existing posts on page 2, mis-attributing them as "created"
+// and recovering 8 ids instead of 3 → the count guard fires.
+//
+// RED-on-revert: if the walk uses single-page ListPosts instead of
+// ListAllPostsWithTotal, the before snapshot sees only 20 of 25 pre-existing
+// posts, the diff recovers 8 (3 real + 5 mis-attributed), the count guard
+// fires (8 != 3), and SlotLookupError is non-empty — the test fails at the
+// SlotLookupError check.
+func TestImportSearchPost_BatchMultiPage(t *testing.T) {
+	var createCalled int32
+
+	// Build fixtures: 25 pre-existing posts (IDs 10000001-10000025), 3
+	// created posts (IDs 92820377-92820379). Page size = 20.
+	makePost := func(id int, ts int64) string {
+		return fmt.Sprintf(`{"id":%d,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":%d,"source_timestamp":%d},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}`, id, ts, ts+3600)
+	}
+
+	buildList := func(ids []int, total int) string {
+		var rows []string
+		for _, id := range ids {
+			rows = append(rows, makePost(id, int64(1753600000+id)))
+		}
+		// is_has_more is true when the page is full (rows_limit=20) —
+		// the server signals "might have more" when the page is at capacity.
+		hasMore := len(ids) == 20
+		return fmt.Sprintf(`{"list":[%s],"total_rows":%d,"is_has_more":%s,"rows_limit":20}`, strings.Join(rows, ","), total, strconv.FormatBool(hasMore))
+	}
+
+	preExisting := make([]int, 25)
+	for i := range preExisting {
+		preExisting[i] = 10000001 + i
+	}
+	created := []int{92820377, 92820378, 92820379}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"success":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			page := r.URL.Query().Get("page")
+			if page == "" {
+				page = "1"
+			}
+			if atomic.LoadInt32(&createCalled) == 0 {
+				// Before: 25 pre-existing posts across 2 pages.
+				if page == "1" {
+					w.Write([]byte(buildList(preExisting[:20], 25)))
+				} else {
+					w.Write([]byte(buildList(preExisting[20:], 25)))
+				}
+			} else {
+				// After: 25 pre-existing + 3 created = 28 across 2 pages.
+				all := append(append([]int{}, preExisting...), created...)
+				if page == "1" {
+					w.Write([]byte(buildList(all[:20], 28)))
+				} else {
+					w.Write([]byte(buildList(all[20:], 28)))
+				}
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{2001, 2002, 2003},
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost batch multi-page: %v", err)
+	}
+	// Exactly 3 ids recovered (not 8 — the walk saw all 25 pre-existing).
+	if len(resp.IDs) != 3 {
+		t.Errorf("IDs = %v, want 3 recovered ids (multi-page walk must see all pre-existing)", resp.IDs)
+	}
+	// No count-mismatch error (the walk was complete).
+	if resp.SlotLookupError != "" {
+		t.Errorf("SlotLookupError = %q, want empty (multi-page walk should recover exactly 3)", resp.SlotLookupError)
+	}
+	if len(resp.Slots) != 3 {
+		t.Errorf("Slots = %d entries, want 3", len(resp.Slots))
+	}
+}
+
+// TestImportSearchPost_BatchMalformedTime verifies that a malformed time
+// field on a created post's list row populates SlotLookupError with the
+// malformed value, and the slot's hours/minutes are empty (not silently
+// wrong). The date is still populated from the timestamp.
+func TestImportSearchPost_BatchMalformedTime(t *testing.T) {
+	var createCalled int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"success":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
+			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			if atomic.LoadInt32(&createCalled) == 0 {
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				// One created post with a malformed time field (no colon).
+				w.Write([]byte(`{"list":[
+					{"id":92820377,"publication_date":{"date":"29 Июля","time":"1425","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],"total_rows":1,"is_has_more":false,"rows_limit":20}`))
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{2001},
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost batch malformed time: %v", err)
+	}
+	// The id is recovered.
+	if resp.ID != 92820377 {
+		t.Errorf("ID = %d, want 92820377", resp.ID)
+	}
+	if len(resp.Slots) != 1 {
+		t.Fatalf("Slots = %d entries, want 1", len(resp.Slots))
+	}
+	pd := resp.Slots[0].PublicationDate
+	if pd == nil {
+		t.Fatal("Slots[0].PublicationDate = nil")
+	}
+	// Hours/minutes are empty (malformed time).
+	if pd.Hours != "" || pd.Minutes != "" {
+		t.Errorf("Hours=%q Minutes=%q, want empty (malformed time 1425 has no colon)", pd.Hours, pd.Minutes)
+	}
+	// Date is still populated from the timestamp.
+	if pd.Date == "" {
+		t.Error("Date = empty, want the date from timestamp (malformed time does not affect date)")
+	}
+	// SlotLookupError names the malformed value.
+	if resp.SlotLookupError == "" {
+		t.Error("SlotLookupError = empty, want a message about the malformed time field")
+	}
+	if !strings.Contains(resp.SlotLookupError, "1425") {
+		t.Errorf("SlotLookupError = %q, want it to mention the malformed value 1425", resp.SlotLookupError)
 	}
 }
 

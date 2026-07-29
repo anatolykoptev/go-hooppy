@@ -321,6 +321,13 @@ type UserResponse struct {
 // NONE of them are modelled, so they are dropped at decode and absent from
 // any re-marshal. A credential cannot reach stdout via printJSON. See
 // TestSettings_DecodeCredentialHygiene.
+//
+// TimezoneOffset is an integer count of HOURS from UTC (e.g. 3 for UTC+3,
+// -5 for UTC-5). Fractional offsets (UTC+5:30, UTC+5:45) are NOT supported
+// by the server — confirmed by measurement; the field is a plain int, not
+// a float. The batch slot path (fillScheduleSlots) uses this to format the
+// publication date as dd.mm.yyyy at the account's offset; a fractional
+// offset would require minutes, but the server does not return one.
 type SettingsResponse struct {
 	TimezoneID     int        `json:"timezone_id,omitempty"`
 	TimezoneOffset int        `json:"timezone_offset,omitempty"`
@@ -691,6 +698,13 @@ type Post struct {
 // appears to carry a timezone offset). Both timestamps are kept; they are
 // not collapsed.
 //
+// The time field is ZERO-PADDED on the list surface (e.g. "09:20", not
+// "9:20"). postPubDateToPublicationDate parses it by splitting on ":" — a
+// malformed time string (missing colon, wrong number of parts) leaves
+// Hours/Minutes empty and the batch path populates slot_lookup_error
+// naming the malformed value, rather than silently producing a slot with
+// no time.
+//
 // Timestamp and SourceTimestamp are modelled as FlexInt, not bare int64:
 // measured as a JSON number in all 60 census rows, so this is not a live
 // break today — but on this API the string form of a numeric field has
@@ -699,7 +713,7 @@ type Post struct {
 // Int64() accessor keeps callers unchanged. See issue #74 (the sweep).
 type PostPublicationDate struct {
 	Date            string  `json:"date"`             // "29 Июля"-style display date
-	Time            string  `json:"time"`             // "12:25"-style display time
+	Time            string  `json:"time"`             // "09:20"-style display time (zero-padded HH:MM)
 	Timestamp       FlexInt `json:"timestamp"`        // unix timestamp (number in all 60 rows; FlexInt — a stringified numeric has appeared on this API)
 	SourceTimestamp FlexInt `json:"source_timestamp"` // unix timestamp carrying a tz offset (same polymorphism note as Timestamp)
 }

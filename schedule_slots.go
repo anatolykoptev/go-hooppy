@@ -118,10 +118,15 @@ func (c *Client) fillBatchSlotsBySnapshotDiff(ctx context.Context, resp *PostIDR
 		return
 	}
 
-	// After snapshot: the schedule's posts after the create.
-	listResp, err := c.ListPosts(ctx, ListPostsFilter{ScheduleID: scheduleIDs[0]})
+	// After snapshot: the schedule's posts after the create. Walk ALL
+	// pages — a schedule can hold more than one page of posts (the
+	// default page size is 20), and a single-page ListPosts would miss
+	// created posts beyond the first page, breaking the diff. The before
+	// snapshot (taken by the caller) must also walk all pages for the
+	// same reason — see the caller in posts_search.go.
+	afterList, _, err := c.ListAllPostsWithTotal(ctx, ListPostsFilter{ScheduleID: scheduleIDs[0]})
 	if err != nil {
-		resp.SlotLookupError = fmt.Sprintf("slot lookup: after-snapshot ListPosts(schedule_id=%d) failed (%v) — created ids not recovered (posts exist)", scheduleIDs[0], err)
+		resp.SlotLookupError = fmt.Sprintf("slot lookup: after-snapshot ListAllPostsWithTotal(schedule_id=%d) failed (%v) — created ids not recovered (posts exist)", scheduleIDs[0], err)
 		return
 	}
 
@@ -131,9 +136,9 @@ func (c *Client) fillBatchSlotsBySnapshotDiff(ctx context.Context, resp *PostIDR
 		beforeSet[before[i].ID] = struct{}{}
 	}
 	var created []Post
-	for i := range listResp.List {
-		if _, ok := beforeSet[listResp.List[i].ID]; !ok {
-			created = append(created, listResp.List[i])
+	for i := range afterList {
+		if _, ok := beforeSet[afterList[i].ID]; !ok {
+			created = append(created, afterList[i])
 		}
 	}
 
@@ -170,12 +175,21 @@ func (c *Client) fillBatchSlotsBySnapshotDiff(ctx context.Context, resp *PostIDR
 			resp.Slots = append(resp.Slots, ScheduleSlot{ID: created[i].ID})
 			continue
 		}
-		pd := postPubDateToPublicationDate(ppd, offset)
+		pd, malformedTime := postPubDateToPublicationDate(ppd, offset)
 		if offsetErr != nil {
 			// Offset unavailable — omit the date rather than guessing UTC
 			// (a silently-wrong date is worse than a stated-unknown one).
 			// Hours/minutes are still correct (from the time field).
 			pd.Date = ""
+		}
+		if malformedTime != "" {
+			// Malformed time field — record it in SlotLookupError so the
+			// caller knows the slot's hours/minutes are missing (a slot
+			// with no time is a silent failure).
+			if resp.SlotLookupError != "" {
+				resp.SlotLookupError += "; "
+			}
+			resp.SlotLookupError += fmt.Sprintf("slot lookup: post %d has malformed time field %q (expected HH:MM) — hours/minutes omitted", created[i].ID, malformedTime)
 		}
 		resp.IDs = append(resp.IDs, created[i].ID)
 		resp.Slots = append(resp.Slots, ScheduleSlot{
@@ -220,7 +234,7 @@ func sortPostsByTimestamp(posts []Post) {
 // math.MaxInt64 if absent (sorts after all real timestamps).
 func postTimestamp(p *Post) int64 {
 	if p.PublicationDate == nil || !p.PublicationDate.Timestamp.IsSet() {
-		return 1<<62
+		return 1 << 62
 	}
 	return p.PublicationDate.Timestamp.Int64()
 }
@@ -231,15 +245,29 @@ func postTimestamp(p *Post) int64 {
 // ("14:25" → "14"/"25"); the date is formatted from the timestamp as
 // dd.mm.yyyy at the account's timezone offset (not UTC — see
 // fillScheduleSlots). A zero offset formats in UTC.
-func postPubDateToPublicationDate(ppd *PostPublicationDate, offset int) *PublicationDate {
+//
+// Returns (pd, malformedTime) where malformedTime is the original time
+// string if it could not be parsed (missing colon, wrong number of parts,
+// or empty when a time was expected). The caller populates slot_lookup_error
+// with the malformed value — a slot with no time is a silent failure.
+func postPubDateToPublicationDate(ppd *PostPublicationDate, offset int) (*PublicationDate, string) {
 	if ppd == nil {
-		return nil
+		return nil, ""
 	}
 	pd := &PublicationDate{}
-	// Hours/minutes from the time field ("HH:MM").
-	if parts := strings.Split(ppd.Time, ":"); len(parts) == 2 {
-		pd.Hours = strings.TrimSpace(parts[0])
-		pd.Minutes = strings.TrimSpace(parts[1])
+	// Hours/minutes from the time field ("HH:MM"). The list surface
+	// zero-pads (e.g. "09:20"); a malformed time (missing colon, wrong
+	// number of parts) leaves Hours/Minutes empty and returns the
+	// malformed value so the caller can report it.
+	var malformed string
+	if ppd.Time != "" {
+		parts := strings.Split(ppd.Time, ":")
+		if len(parts) == 2 {
+			pd.Hours = strings.TrimSpace(parts[0])
+			pd.Minutes = strings.TrimSpace(parts[1])
+		} else {
+			malformed = ppd.Time
+		}
 	}
 	// Date from the timestamp, formatted as dd.mm.yyyy at the account's
 	// timezone offset. The offset is in hours (GET /users/settings returns
@@ -255,7 +283,7 @@ func postPubDateToPublicationDate(ppd *PostPublicationDate, offset int) *Publica
 		// differ from dd.mm.yyyy; documented in fillScheduleSlots).
 		pd.Date = ppd.Date
 	}
-	return pd
+	return pd, malformed
 }
 
 // fetchTimezoneOffset returns the account's timezone offset (in hours) via
@@ -337,6 +365,6 @@ var processing403Indicators = []string{
 	"обработк",   // обработка, обработке...
 	"not ready",
 	"still",
-	"загружает",  // загружается (downloading)
-	"загрузк",    // загрузка, загрузке...
+	"загружает", // загружается (downloading)
+	"загрузк",   // загрузка, загрузке...
 }
