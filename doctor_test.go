@@ -458,3 +458,242 @@ func TestSourceID_String_DoctorRelevantIDs(t *testing.T) {
 		}
 	}
 }
+
+// stubDoctorPaginatedServer serves /notifications and /accounts/pages from
+// per-page response maps keyed by the page query parameter ("1", "2", ...).
+// Each map value is the raw JSON body for that page. Pages not in the map
+// fall back to defaultBody (or 404 if empty). This lets a test simulate a
+// multi-page walk where total_rows changes between pages — the scenario
+// WalkIncomplete is designed to detect.
+func stubDoctorPaginatedServer(t *testing.T, notifPages map[string]string, notifDefault string, pagePages map[string]string, pageDefault string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		pg := r.URL.Query().Get("page")
+		if pg == "" {
+			pg = "1"
+		}
+		switch r.URL.Path {
+		case "/notifications":
+			if body, ok := notifPages[pg]; ok {
+				w.Write([]byte(body))
+				return
+			}
+			if notifDefault != "" {
+				w.Write([]byte(notifDefault))
+				return
+			}
+			t.Errorf("unexpected /notifications page=%s", pg)
+			http.NotFound(w, r)
+		case "/accounts/pages":
+			if body, ok := pagePages[pg]; ok {
+				w.Write([]byte(body))
+				return
+			}
+			if pageDefault != "" {
+				w.Write([]byte(pageDefault))
+				return
+			}
+			t.Errorf("unexpected /accounts/pages page=%s", pg)
+			http.NotFound(w, r)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// TestRunDoctor_WalkIncomplete_NotificationsTruncated verifies that a
+// notifications walk where the unique-id count is LESS than the first-page
+// total_rows sets WalkIncomplete=true with a non-empty reason, and that
+// Groups and UnparseableRows are both empty (the walk is incomplete, but
+// no error rows were served). This is the truncation signal: the server
+// said total_rows=5 on page 1 but the walk only collected 4 unique ids.
+//
+// RED-on-revert: if the walk-incomplete check is deleted (or the field
+// forced false), WalkIncomplete stays false and this test fails. If the
+// old NewAllListEnvelope equality check is restored, the benign-insert
+// test below fails instead.
+func TestRunDoctor_WalkIncomplete_NotificationsTruncated(t *testing.T) {
+	// Page 1: 2 rows, total_rows=5, has_more=true.
+	// Page 2: 2 rows (ids 3,4), total_rows=5, has_more=false.
+	// unique = {1,2,3,4} = 4 < firstTotal 5 → truncated.
+	notifPages := map[string]string{
+		"1": `{"list":[
+			{"id":1,"is_error":0,"page_id":100,"source_id":1,"operation_date":"01.01.2026, 00:00","data":"ok"},
+			{"id":2,"is_error":0,"page_id":100,"source_id":1,"operation_date":"01.01.2026, 00:00","data":"ok"}
+		],"total_rows":5,"is_has_more":true,"rows_limit":12}`,
+		"2": `{"list":[
+			{"id":3,"is_error":0,"page_id":100,"source_id":1,"operation_date":"01.01.2026, 00:00","data":"ok"},
+			{"id":4,"is_error":0,"page_id":100,"source_id":1,"operation_date":"01.01.2026, 00:00","data":"ok"}
+		],"total_rows":5,"is_has_more":false,"rows_limit":12}`,
+	}
+	pages := `{"list":[{"id":100,"source_id":1,"social_page_name":"P"}],"total_rows":1,"is_has_more":false,"rows_limit":20}`
+
+	srv := stubDoctorPaginatedServer(t, notifPages, "", nil, pages)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	report, err := c.RunDoctor(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("RunDoctor: %v", err)
+	}
+	if !report.WalkIncomplete {
+		t.Fatalf("WalkIncomplete = false, want true (unique 4 < first-page total_rows 5)")
+	}
+	if report.WalkIncompleteReason == "" {
+		t.Errorf("WalkIncompleteReason = empty, want a non-empty explanation of the truncation")
+	}
+	if !strings.Contains(report.WalkIncompleteReason, "notifications") {
+		t.Errorf("WalkIncompleteReason = %q, want it to mention the notifications walk", report.WalkIncompleteReason)
+	}
+	if len(report.Groups) != 0 {
+		t.Errorf("len(Groups) = %d, want 0 (no error rows served)", len(report.Groups))
+	}
+	if len(report.UnparseableRows) != 0 {
+		t.Errorf("len(UnparseableRows) = %d, want 0 (no unparseable rows)", len(report.UnparseableRows))
+	}
+}
+
+// TestRunDoctor_WalkIncomplete_PagesTruncated verifies that a pages walk
+// where the unique-id count is LESS than the first-page total_rows sets
+// WalkIncomplete=true. The notifications walk is complete (matching
+// totals); only the pages walk is truncated.
+func TestRunDoctor_WalkIncomplete_PagesTruncated(t *testing.T) {
+	notifications := `{"list":[
+		{"id":1,"is_error":0,"page_id":100,"source_id":1,"operation_date":"01.01.2026, 00:00","data":"ok"}
+	],"total_rows":1,"is_has_more":false,"rows_limit":12}`
+	// Page 1: 1 page, total_rows=3, has_more=true.
+	// Page 2: 1 page (id 200), total_rows=3, has_more=false.
+	// unique = {100,200} = 2 < firstTotal 3 → truncated.
+	pagePages := map[string]string{
+		"1": `{"list":[{"id":100,"source_id":1,"social_page_name":"A"}],"total_rows":3,"is_has_more":true,"rows_limit":20}`,
+		"2": `{"list":[{"id":200,"source_id":1,"social_page_name":"B"}],"total_rows":3,"is_has_more":false,"rows_limit":20}`,
+	}
+
+	srv := stubDoctorPaginatedServer(t, nil, notifications, pagePages, "")
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	report, err := c.RunDoctor(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("RunDoctor: %v", err)
+	}
+	if !report.WalkIncomplete {
+		t.Fatalf("WalkIncomplete = false, want true (pages unique 2 < first-page total_rows 3)")
+	}
+	if report.WalkIncompleteReason == "" {
+		t.Errorf("WalkIncompleteReason = empty, want a non-empty explanation of the truncation")
+	}
+	if !strings.Contains(report.WalkIncompleteReason, "pages") {
+		t.Errorf("WalkIncompleteReason = %q, want it to mention the pages walk", report.WalkIncompleteReason)
+	}
+}
+
+// TestRunDoctor_WalkIncomplete_BenignInsertNotFlagged verifies the
+// corrected semantics from finding 2: a mid-walk insert (last-page
+// total_rows > first-page total_rows) is BENIGN and does NOT set
+// WalkIncomplete. /notifications is a high-churn append-only log where a
+// row inserted between page fetches is ordinary, not a sign of data loss.
+// The old NewAllListEnvelope equality check (unique == lastTotal) would
+// false-alarm here: unique=4 != lastTotal=3. The fix compares unique
+// against the FIRST-page total and treats lastTotal > firstTotal as
+// benign growth.
+//
+// RED-on-revert: if the old NewAllListEnvelope check is restored, this
+// test fails (WalkIncomplete would be true for a healthy account).
+func TestRunDoctor_WalkIncomplete_BenignInsertNotFlagged(t *testing.T) {
+	// Page 1: 2 rows, total_rows=2, has_more=true → firstTotal=2.
+	// Page 2: 2 rows (ids 3,4 — a new row was inserted mid-walk, shifting
+	// the offset window), total_rows=3, has_more=false → lastTotal=3.
+	// unique = {1,2,3,4} = 4 >= firstTotal 2 → not truncated.
+	// lastTotal 3 > firstTotal 2 → benign insert, do NOT flag.
+	notifPages := map[string]string{
+		"1": `{"list":[
+			{"id":1,"is_error":0,"page_id":100,"source_id":1,"operation_date":"01.01.2026, 00:00","data":"ok"},
+			{"id":2,"is_error":0,"page_id":100,"source_id":1,"operation_date":"01.01.2026, 00:00","data":"ok"}
+		],"total_rows":2,"is_has_more":true,"rows_limit":12}`,
+		"2": `{"list":[
+			{"id":3,"is_error":0,"page_id":100,"source_id":1,"operation_date":"01.01.2026, 00:00","data":"ok"},
+			{"id":4,"is_error":0,"page_id":100,"source_id":1,"operation_date":"01.01.2026, 00:00","data":"ok"}
+		],"total_rows":3,"is_has_more":false,"rows_limit":12}`,
+	}
+	pages := `{"list":[{"id":100,"source_id":1,"social_page_name":"P"}],"total_rows":1,"is_has_more":false,"rows_limit":20}`
+
+	srv := stubDoctorPaginatedServer(t, notifPages, "", nil, pages)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	report, err := c.RunDoctor(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("RunDoctor: %v", err)
+	}
+	if report.WalkIncomplete {
+		t.Fatalf("WalkIncomplete = true, want false (lastTotal 3 > firstTotal 2 is a benign mid-walk insert, not truncation); reason=%q", report.WalkIncompleteReason)
+	}
+	if report.WalkIncompleteReason != "" {
+		t.Errorf("WalkIncompleteReason = %q, want empty (no truncation)", report.WalkIncompleteReason)
+	}
+}
+
+// TestRunDoctor_SinceZero_NoWindow verifies that --since 0 means "no
+// window": every dated row is included, regardless of how old. The old
+// code clamped sinceDays<0 to 0 and computed windowStart=now, dropping
+// every dated row; the fix makes 0 mean windowStart=zero time (nothing
+// is before the zero time, so nothing is filtered).
+//
+// RED-on-revert: if the old clamp (sinceDays=0 → windowStart=now) is
+// restored, the 30-day-old row is dropped and len(Groups)=0, failing
+// the test.
+func TestRunDoctor_SinceZero_NoWindow(t *testing.T) {
+	old := vendorDate(time.Now().Add(-30 * 24 * time.Hour))
+	notifications := `{"list":[
+		{"id":1,"is_error":1,"page_id":100,"source_id":1,"operation_date":"` + old + `","data":"Устарел ключ доступа"}
+	],"total_rows":1,"is_has_more":false,"rows_limit":12}`
+	pages := `{"list":[{"id":100,"source_id":1,"social_page_name":"P"}],"total_rows":1,"is_has_more":false,"rows_limit":20}`
+
+	srv := stubDoctorServer(t, notifications, pages)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	report, err := c.RunDoctor(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("RunDoctor: %v", err)
+	}
+	if len(report.Groups) != 1 {
+		t.Fatalf("len(Groups) = %d, want 1 (--since 0 = no window, 30-day-old row must be included); got %+v", len(report.Groups), report.Groups)
+	}
+	if report.Groups[0].PageID != 100 {
+		t.Errorf("group page id = %d, want 100", report.Groups[0].PageID)
+	}
+	if !report.WindowStart.IsZero() {
+		t.Errorf("WindowStart = %v, want zero time (--since 0 = no window)", report.WindowStart)
+	}
+}
+
+// TestRunDoctor_SinceNegative_Rejected verifies that a negative --since
+// value is rejected with an error, not silently clamped to 0 (the
+// quietest configuration). The old code clamped sinceDays<0 to 0, which
+// with the old window logic meant windowStart=now → every dated row
+// dropped → "all clear" on a fully broken account.
+//
+// RED-on-revert: if the old clamp (sinceDays<0 → sinceDays=0) is
+// restored, RunDoctor returns nil error and this test fails.
+func TestRunDoctor_SinceNegative_Rejected(t *testing.T) {
+	notifications := `{"list":[
+		{"id":1,"is_error":1,"page_id":100,"source_id":1,"operation_date":"01.01.2026, 00:00","data":"Устарел ключ доступа"}
+	],"total_rows":1,"is_has_more":false,"rows_limit":12}`
+	pages := `{"list":[{"id":100,"source_id":1,"social_page_name":"P"}],"total_rows":1,"is_has_more":false,"rows_limit":20}`
+
+	srv := stubDoctorServer(t, notifications, pages)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.RunDoctor(context.Background(), -1)
+	if err == nil {
+		t.Fatal("RunDoctor(-1) returned nil error, want an error (negative --since must be rejected, not clamped to 0)")
+	}
+	if !strings.Contains(err.Error(), "--since") {
+		t.Errorf("error = %q, want it to mention --since", err.Error())
+	}
+}

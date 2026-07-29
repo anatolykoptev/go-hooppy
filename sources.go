@@ -34,17 +34,23 @@ const (
 	SourceTelegram    SourceID = 9
 	SourceInstagramFB SourceID = 10
 	SourceTelegramAcc SourceID = 11
-	SourceDzen        SourceID = 13
-	SourceTikTok      SourceID = 14
-	SourceViber       SourceID = 16
-	SourceYouTube     SourceID = 17
-	SourceLinkedIn    SourceID = 18
-	SourceWhatsApp    SourceID = 22
-	SourceRutube      SourceID = 23
-	SourceMax         SourceID = 28
-	SourceYappy       SourceID = 32
-	SourceThreads     SourceID = 34
-	SourceVKChats     SourceID = 35
+	// Deprecated: use SourceTelegram. Kept as an alias so consumers
+	// compiled against v1.0.0 (where this constant was the only spelling)
+	// continue to compile. The value is unchanged (9); only the preferred
+	// name and the String() output changed (was "telegram_channel", now
+	// "telegram" — see CHANGELOG).
+	SourceTelegramChan          = SourceTelegram
+	SourceDzen         SourceID = 13
+	SourceTikTok       SourceID = 14
+	SourceViber        SourceID = 16
+	SourceYouTube      SourceID = 17
+	SourceLinkedIn     SourceID = 18
+	SourceWhatsApp     SourceID = 22
+	SourceRutube       SourceID = 23
+	SourceMax          SourceID = 28
+	SourceYappy        SourceID = 32
+	SourceThreads      SourceID = 34
+	SourceVKChats      SourceID = 35
 )
 
 // sourceNames is the single id→name table for the library. Every

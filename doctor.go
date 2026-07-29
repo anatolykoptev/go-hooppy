@@ -142,18 +142,25 @@ type DoctorUnparseable struct {
 // inside the --since window, plus any rows whose operation_date failed to
 // parse. It is the JSON the `hooppy doctor` command prints on stdout.
 //
-// WalkIncomplete is true when NewAllListEnvelope detected a truncated walk
-// (unique id count != server total_rows) for either the notifications or
-// pages walk. Doctor does NOT abort on a truncated walk — its purpose is to
-// surface failures, not hide them behind a hard error — but it flags the
-// walk as incomplete so the operator knows the report may be missing rows,
-// and the CLI exit code reflects it.
+// WalkIncomplete is true when a walk was truncated: the count of unique ids
+// is LESS than the server's first-page total_rows. A last-page total greater
+// than the first-page total is a benign mid-walk insert (the collection grew
+// while doctor was reading it) and does NOT set WalkIncomplete — /notifications
+// is a high-churn append-only log where an insert between page fetches is
+// ordinary, not a sign of data loss. Doctor does NOT abort on a truncated
+// walk — its purpose is to surface failures, not hide them behind a hard
+// error — but it flags the walk as incomplete so the operator knows the
+// report may be missing rows, and the CLI exit code reflects it.
+// WalkIncompleteReason carries a human-readable explanation of which walk
+// was truncated and the counts involved, so the operator can decide what to
+// do — a bare boolean tells them nothing.
 type DoctorReport struct {
-	SinceDays       int                 `json:"since_days"`
-	WindowStart     time.Time           `json:"window_start"`
-	WalkIncomplete  bool                `json:"walk_incomplete,omitempty"`
-	Groups          []DoctorGroup       `json:"groups"`
-	UnparseableRows []DoctorUnparseable `json:"unparseable_rows,omitempty"`
+	SinceDays            int                 `json:"since_days"`
+	WindowStart          time.Time           `json:"window_start"`
+	WalkIncomplete       bool                `json:"walk_incomplete,omitempty"`
+	WalkIncompleteReason string              `json:"walk_incomplete_reason,omitempty"`
+	Groups               []DoctorGroup       `json:"groups"`
+	UnparseableRows      []DoctorUnparseable `json:"unparseable_rows,omitempty"`
 }
 
 // RunDoctor walks the notification log, filters to error rows whose
@@ -163,12 +170,24 @@ type DoctorReport struct {
 // name/photo only, no credential fields). It is read-only and mutates
 // nothing.
 //
-// Both walks (notifications and pages) use the WithTotal variants plus
-// NewAllListEnvelope to detect a truncated walk (unique id count != server
-// total_rows). Doctor does NOT abort on a truncated walk — its purpose is
-// to surface failures, not hide them — but sets WalkIncomplete so the
-// operator knows the report may be missing rows, and the CLI exit code
-// reflects it.
+// sinceDays semantics: 0 means "no window" (window start = zero time, so
+// every dated row is included); a negative value is rejected with an error
+// (never silently clamped — clamping a bad value into the quietest
+// configuration hides exactly the failures doctor exists to surface).
+//
+// Both walks (notifications and pages) use the WithTotals variants to
+// capture the server's first-page and last-page total_rows. A walk is
+// flagged incomplete (WalkIncomplete=true) only when the unique id count
+// is LESS than the first-page total — that is the truncation signal. A
+// last-page total greater than the first-page total is a benign mid-walk
+// insert (the collection grew while doctor was reading it) and does NOT
+// flag — /notifications is a high-churn append-only log where an insert
+// between page fetches is ordinary. Doctor does NOT use NewAllListEnvelope
+// here: its equality check (unique == total) is right for the static
+// collections its other callers walk, but wrong for this high-churn log
+// where it would false-alarm on every active account. The reason is
+// captured in WalkIncompleteReason, not discarded — a bare boolean tells
+// the operator nothing about what to do.
 //
 // Page-name resolution: the notification row embeds a full `page` object
 // that carries live OAuth credentials (access_token, bot_token,
@@ -180,7 +199,8 @@ type DoctorReport struct {
 // See TestRunDoctor_TokensNeverReachOutput for the regression guard.
 //
 // A row whose operation_date fails to parse is reported in
-// UnparseableRows — never silently dropped.
+// UnparseableRows — never silently dropped, and regardless of --since
+// (the date could not be parsed, so the window check cannot be applied).
 //
 // TIMEZONE ASSUMPTION: the --since window is computed against time.Now()
 // in the host's local timezone, while the vendor renders operation_date in
@@ -189,30 +209,50 @@ type DoctorReport struct {
 // offset between them. See parseOperationDate and the --since flag help.
 func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, error) {
 	if sinceDays < 0 {
-		sinceDays = 0
+		return nil, fmt.Errorf("hooppy: doctor: --since must be >= 0 (got %d); use 0 for no window (all dated rows included)", sinceDays)
 	}
-	windowStart := time.Now().AddDate(0, 0, -sinceDays)
+	var windowStart time.Time
+	if sinceDays > 0 {
+		windowStart = time.Now().AddDate(0, 0, -sinceDays)
+	}
+	// sinceDays == 0 → windowStart stays zero time → opDate.Before(zero) is
+	// always false → every dated row is included ("no window").
 
-	notifications, notifTotal, err := c.ListAllNotificationsWithTotal(ctx)
+	notifications, notifFirstTotal, notifLastTotal, err := c.ListAllNotificationsWithTotals(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("hooppy: doctor: walk notifications: %w", err)
 	}
 	walkIncomplete := false
-	if _, envErr := NewAllListEnvelope(notifications, notifTotal, func(n Notification) int { return n.ID }); envErr != nil {
+	walkIncompleteReason := ""
+	notifUnique := uniqueCount(notifications, func(n Notification) int { return n.ID })
+	if notifUnique < notifFirstTotal {
 		walkIncomplete = true
+		walkIncompleteReason = fmt.Sprintf("notifications walk truncated: %d unique ids < first-page total_rows %d (last-page total_rows %d) — the report may be missing rows", notifUnique, notifFirstTotal, notifLastTotal)
 	}
 
 	// Resolve page names via the narrow Page struct (no credential fields).
 	// The embedded `page` object in each notification is NOT decoded —
 	// Notification does not model it, so the vendor's token fields are
 	// dropped at the decode boundary.
-	pages, pagesTotal, err := c.ListAllPagesWithTotal(ctx, ListPagesFilter{})
+	pages, pagesFirstTotal, pagesLastTotal, err := c.ListAllPagesWithTotals(ctx, ListPagesFilter{})
 	if err != nil {
 		return nil, fmt.Errorf("hooppy: doctor: walk pages: %w", err)
 	}
-	if _, envErr := NewAllListEnvelope(pages, pagesTotal, func(p Page) int { return p.ID }); envErr != nil {
+	pagesUnique := uniqueCount(pages, func(p Page) int { return p.ID })
+	if pagesUnique < pagesFirstTotal {
 		walkIncomplete = true
+		reason := fmt.Sprintf("pages walk truncated: %d unique ids < first-page total_rows %d (last-page total_rows %d) — page-name resolution may be incomplete", pagesUnique, pagesFirstTotal, pagesLastTotal)
+		if walkIncompleteReason != "" {
+			walkIncompleteReason = walkIncompleteReason + "; " + reason
+		} else {
+			walkIncompleteReason = reason
+		}
 	}
+	// A last-total > first-total is a benign mid-walk insert (the collection
+	// grew while doctor was reading it). /notifications is a high-churn
+	// append-only log where this is ordinary; we do NOT flag it. Only
+	// unique < firstTotal (rows missing that the server initially said
+	// existed) is a truncation signal.
 	pageByName := make(map[int]string, len(pages))
 	for _, p := range pages {
 		pageByName[p.ID] = p.SocialPageName
@@ -274,11 +314,12 @@ func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, e
 	}
 
 	report := &DoctorReport{
-		SinceDays:       sinceDays,
-		WindowStart:     windowStart,
-		WalkIncomplete:  walkIncomplete,
-		Groups:          make([]DoctorGroup, 0, len(groups)),
-		UnparseableRows: unparseable,
+		SinceDays:            sinceDays,
+		WindowStart:          windowStart,
+		WalkIncomplete:       walkIncomplete,
+		WalkIncompleteReason: walkIncompleteReason,
+		Groups:               make([]DoctorGroup, 0, len(groups)),
+		UnparseableRows:      unparseable,
 	}
 	for key, acc := range groups {
 		report.Groups = append(report.Groups, DoctorGroup{
@@ -295,4 +336,15 @@ func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, e
 	}
 
 	return report, nil
+}
+
+// uniqueCount returns the count of unique ids extracted from list by idFunc.
+// It is the truncation signal doctor uses: unique < first-page total_rows
+// means the walk is missing rows the server initially said existed.
+func uniqueCount[T any](list []T, idFunc func(T) int) int {
+	unique := make(map[int]struct{}, len(list))
+	for _, item := range list {
+		unique[idFunc(item)] = struct{}{}
+	}
+	return len(unique)
 }

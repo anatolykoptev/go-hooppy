@@ -46,6 +46,7 @@ func TestSourceID_AllConstantsHaveNames(t *testing.T) {
 		SourceInstagramFB, SourceTelegramAcc, SourceDzen, SourceTikTok,
 		SourceViber, SourceYouTube, SourceLinkedIn, SourceWhatsApp, SourceRutube,
 		SourceMax, SourceYappy, SourceThreads, SourceVKChats,
+		SourceTelegramChan, // deprecated alias — must still resolve
 	}
 	for _, id := range all {
 		if id.String() == "unknown" {

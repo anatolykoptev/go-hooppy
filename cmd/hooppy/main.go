@@ -1150,8 +1150,8 @@ func registerDoctor(root *cobra.Command) {
 	})
 	var sinceDays int
 	var exitCode bool
-	cmd.Flags().IntVar(&sinceDays, "since", 7, "only report errors whose operation_date falls within the last N days. NOTE: the window is computed in the HOST's local timezone (time.Now), but the vendor renders operation_date in the ACCOUNT's timezone (a user setting on hooppy.ru, not exposed by the API). If the two differ, the window boundary can be off by the offset between them — a row the account considers inside the window may be excluded, or vice versa, by up to that offset.")
-	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error falls inside the --since window (grouped errors, unparseable-date rows, or a truncated walk), 0 otherwise (for cron / pre-flight)")
+	cmd.Flags().IntVar(&sinceDays, "since", 7, "only report errors whose operation_date falls within the last N days. 0 = no window (all dated rows included); negative values are rejected. Unparseable-date rows are reported REGARDLESS of --since (they cannot be dated, so the window check does not apply). NOTE: the window is computed in the HOST's local timezone (time.Now), but the vendor renders operation_date in the ACCOUNT's timezone (a user setting on hooppy.ru, not exposed by the API). If the two differ, the window boundary can be off by the offset between them — a row the account considers inside the window may be excluded, or vice versa, by up to that offset.")
+	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error signal is present: grouped errors inside the --since window, unparseable-date rows (reported regardless of --since because they cannot be dated), or a truncated walk (walk_incomplete). Exit 0 otherwise (for cron / pre-flight)")
 	cmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		os.Exit(runDoctor(context.Background(), c, os.Stdout, os.Stderr, sinceDays, exitCode))
@@ -1161,18 +1161,21 @@ func registerDoctor(root *cobra.Command) {
 // runDoctor is the testable core of the `hooppy doctor` command. It runs
 // the doctor report, prints it as JSON to out, and returns the process exit
 // code: 1 if exitCode is true AND any error signal is present (grouped
-// errors, unparseable-date rows, or a truncated walk), 0 otherwise. A
-// RunDoctor error is printed to errOut and returns 1.
+// errors inside the --since window, unparseable-date rows reported
+// regardless of --since, or a truncated walk), 0 otherwise. A RunDoctor
+// error is printed to errOut and returns 1.
 //
 // The exit-code gate covers THREE error signals, not just grouped errors:
-//   - len(Groups) > 0           — classified errors inside the window
+//   - len(Groups) > 0           — classified errors inside the --since window
 //   - len(UnparseableRows) > 0  — error rows whose operation_date failed to
-//     parse (a vendor date-format drift puts
-//     every error row here; gating only on
-//     Groups would read exit 0 over undiagnosed
-//     publication failures)
+//     parse (reported regardless of --since
+//     because they cannot be dated; a vendor
+//     date-format drift puts every error row
+//     here; gating only on Groups would read
+//     exit 0 over undiagnosed publication failures)
 //   - WalkIncomplete            — a truncated notifications or pages walk
-//     (a row skipped by a mid-walk offset shift
+//     (unique id count < first-page total_rows;
+//     a row skipped by a mid-walk offset shift
 //     is invisible; doctor is the one command
 //     whose purpose is not missing a failure)
 func runDoctor(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, sinceDays int, exitCode bool) int {

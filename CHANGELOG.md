@@ -26,6 +26,7 @@
 * `APIError` struct gains a `RetryAfter time.Duration` field (additive, zero value = no behavior change).
 * `Schedule` struct expanded with `UserID`, `Position`, `State`, `StopDate`, `StartDate`, `IsDeleted`, `PublicationHowType`, `PublicationWhereType` fields (additive, omitempty).
 * `ScheduleResponse` includes `Success` bool field (returned by DELETE).
+* **Source ID corrections** (merged from two vendor web bundles, cross-checked against live accounts): `SourceInstagram` moved 29 → 7, `SourceMax` moved 33 → 28. `SourceTelegram` (id 9) `String()` changed from `"telegram_channel"` → `"telegram"` (the vendor bundle name). `SourceTelegramChan` is kept as a `// Deprecated` alias for `SourceTelegram` (same value 9) so consumers compiled against v1.0.0 continue to compile — the old constant name is removed from the preferred spelling but not from the API surface. No external consumers are known today, but the value changes are breaking for any consumer comparing against the numeric values or matching the `"telegram_channel"` string, so they are recorded here explicitly.
 
 ### Fixed
 

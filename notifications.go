@@ -48,20 +48,38 @@ func (c *Client) ListAllNotifications(ctx context.Context) ([]Notification, erro
 // passed to NewAllListEnvelope. See projects.ListAllSchedulesWithTotal and
 // NewAllListEnvelope for what the envelope catches and what it does not.
 func (c *Client) ListAllNotificationsWithTotal(ctx context.Context) ([]Notification, int, error) {
+	all, _, last, err := c.ListAllNotificationsWithTotals(ctx)
+	return all, last, err
+}
+
+// ListAllNotificationsWithTotals is ListAllNotifications but also returns the
+// server's total_rows from the FIRST page and the LAST page. The triple
+// (list, firstTotalRows, lastTotalRows) lets a caller distinguish a
+// truncated walk (unique count < firstTotalRows) from a benign mid-walk
+// insert (lastTotalRows > firstTotalRows) — the distinction
+// NewAllListEnvelope cannot make because it receives only one total.
+// doctor uses this to avoid false-alarms on the high-churn /notifications
+// log; the static-collection callers (projects, schedules, etc.) do not
+// need it and continue to use ListAllNotificationsWithTotal +
+// NewAllListEnvelope.
+func (c *Client) ListAllNotificationsWithTotals(ctx context.Context) ([]Notification, int, int, error) {
 	all := make([]Notification, 0)
-	var totalRows int
+	var firstTotalRows, lastTotalRows int
 	for page := 1; ; page++ {
 		if page > maxListAllPages {
-			return nil, 0, fmt.Errorf("hooppy: ListAllNotifications exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+			return nil, 0, 0, fmt.Errorf("hooppy: ListAllNotifications exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
 		}
 		resp, err := c.ListNotifications(ctx, page)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
+		}
+		if page == 1 {
+			firstTotalRows = resp.TotalRows
 		}
 		all = append(all, resp.List...)
-		totalRows = resp.TotalRows
+		lastTotalRows = resp.TotalRows
 		if !resp.IsHasMore {
-			return all, totalRows, nil
+			return all, firstTotalRows, lastTotalRows, nil
 		}
 	}
 }
