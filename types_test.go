@@ -2,6 +2,8 @@ package hooppy
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -153,7 +155,7 @@ func TestAccountsResponse_RoundTrip(t *testing.T) {
 // decoded Post, so the struct carrying Text and PublicationDate is what
 // puts them in the output.
 func TestPost_DecodeFullRow(t *testing.T) {
-	// Metrics are json.RawMessage: prove the decode accepts a STRING value
+	// Metrics are Metric: prove the decode accepts a STRING value
 	// (the SearchPost "334,881" thousands-separated shape) AND a NUMBER
 	// value, since the own-post surface's metric type is unverified.
 	row := `{
@@ -174,13 +176,13 @@ func TestPost_DecodeFullRow(t *testing.T) {
 		"source_link": "https://example.com/source",
 		"repost_link": "https://vk.com/wall-3_4",
 		"repost_title": "Оригинал",
-		"photo": "https://hooppy.ru/photo/abc.jpg",
+		"photo": {"id": 10, "owner_id": 20, "post_id": "30", "access_key": "k", "source_id": 1, "type": "video", "title": "T", "description": "", "duration": 383, "preview": "https://example.invalid/x"},
 		"photos_amount": 3,
 		"pages": [{"id": 44567, "source_id": 1, "account_id": 33125, "social_page_id": "999", "social_page_name": "Группа", "social_page_photo": "https://pp.vk.me/p.jpg"}],
 		"post_schedules": [{"id": 101820, "name": "Утро"}],
 		"post_projects": [{"id": 92384, "name": "Рецепты"}],
 		"created_by": 42,
-		"errors_for_source_ids": {"1": "token expired", "6": "rate limited"}
+		"errors_for_source_ids": [{"source_id": 1}]
 	}`
 	var p Post
 	if err := json.Unmarshal([]byte(row), &p); err != nil {
@@ -229,11 +231,11 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	if p.IsRepeated != 0 {
 		t.Errorf("IsRepeated = %d, want 0", p.IsRepeated)
 	}
-	if string(p.Views) != `"1 234,881"` {
-		t.Errorf("Views raw = %s, want the string metric verbatim", p.Views)
+	if !p.Views.IsSet() || p.Views.String() != "1 234,881" {
+		t.Errorf("Views = %+v, want the string metric verbatim", p.Views)
 	}
-	if string(p.Likes) != `"456"` {
-		t.Errorf("Likes raw = %s, want %q", p.Likes, `"456"`)
+	if !p.Likes.IsSet() || p.Likes.String() != "456" {
+		t.Errorf("Likes = %+v, want %q", p.Likes, "456")
 	}
 	if p.Link != "https://vk.com/wall-1_2" {
 		t.Errorf("Link = %q", p.Link)
@@ -247,8 +249,14 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	if p.RepostTitle != "Оригинал" {
 		t.Errorf("RepostTitle = %q", p.RepostTitle)
 	}
-	if p.Photo != "https://hooppy.ru/photo/abc.jpg" {
-		t.Errorf("Photo = %q", p.Photo)
+	if p.Photo == nil {
+		t.Fatal("Photo = nil, want the media-descriptor object")
+	}
+	if p.Photo.PostID != "30" || p.Photo.ID != 10 || p.Photo.OwnerID != 20 {
+		t.Errorf("Photo = %+v, want id 10 / owner_id 20 / post_id \"30\"", p.Photo)
+	}
+	if p.Photo.Type != "video" {
+		t.Errorf("Photo.Type = %q, want %q (not photo-specific)", p.Photo.Type, "video")
 	}
 	if p.PhotosAmount != 3 {
 		t.Errorf("PhotosAmount = %d, want 3", p.PhotosAmount)
@@ -259,25 +267,36 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	if p.CreatedBy != 42 {
 		t.Errorf("CreatedBy = %d, want 42", p.CreatedBy)
 	}
-	if len(p.PostSchedules) == 0 {
-		t.Error("PostSchedules raw is empty, want the nested schedule bytes")
+	if len(p.PostSchedules) != 1 || p.PostSchedules[0].ID != 101820 || p.PostSchedules[0].Name != "Утро" {
+		t.Errorf("PostSchedules = %+v, want one {id:101820,name:Утро}", p.PostSchedules)
 	}
-	if len(p.PostProjects) == 0 {
-		t.Error("PostProjects raw is empty, want the nested project bytes")
+	if len(p.PostProjects) != 1 || p.PostProjects[0].ID != 92384 || p.PostProjects[0].Name != "Рецепты" {
+		t.Errorf("PostProjects = %+v, want one {id:92384,name:Рецепты}", p.PostProjects)
 	}
-	if len(p.ErrorsForSourceIDs) == 0 {
-		t.Error("ErrorsForSourceIDs raw is empty, want the error map bytes")
+	if len(p.ErrorsForSourceIDs) != 1 {
+		t.Errorf("ErrorsForSourceIDs = %d items, want 1 (array with one item)", len(p.ErrorsForSourceIDs))
 	}
 
-	// Metrics as NUMBERS must also decode (json.RawMessage is type-agnostic;
-	// a typed int/string field would fail one of the two shapes).
+	// Metrics as NUMBERS must also decode (Metric tolerates null, string,
+	// AND number — a typed string/int field would fail one of the shapes,
+	// the same bug class as the photo field).
 	numRow := `{"id": 7, "views": 1234, "likes": 56, "comments": 7, "reposts": 1}`
 	var pn Post
 	if err := json.Unmarshal([]byte(numRow), &pn); err != nil {
 		t.Fatalf("unmarshal numeric-metric row: %v", err)
 	}
-	if string(pn.Views) != "1234" {
-		t.Errorf("numeric Views raw = %s, want 1234", pn.Views)
+	if !pn.Views.IsSet() || pn.Views.String() != "1234" {
+		t.Errorf("numeric Views = %+v, want 1234", pn.Views)
+	}
+
+	// Metrics as NULL must decode to an unset Metric (not abort the decode).
+	nullRow := `{"id": 8, "views": null, "likes": null, "comments": null, "reposts": null}`
+	var pnul Post
+	if err := json.Unmarshal([]byte(nullRow), &pnul); err != nil {
+		t.Fatalf("unmarshal null-metric row: %v", err)
+	}
+	if pnul.Views.IsSet() {
+		t.Errorf("null Views = %+v, want unset (null → IsSet false)", pnul.Views)
 	}
 }
 
@@ -302,8 +321,8 @@ func TestPost_DecodeMissingOptionalFields(t *testing.T) {
 	if len(p.Pages) != 0 {
 		t.Errorf("Pages = %d, want empty", len(p.Pages))
 	}
-	if p.Views != nil {
-		t.Errorf("Views = %s, want nil when absent", p.Views)
+	if p.Views.IsSet() {
+		t.Errorf("Views = %+v, want unset when absent", p.Views)
 	}
 }
 
@@ -390,5 +409,88 @@ func TestPage_RoundTrip(t *testing.T) {
 	}
 	if decoded.SocialPageName != "Test Page" {
 		t.Errorf("SocialPageName = %q", decoded.SocialPageName)
+	}
+}
+
+// TestPost_DecodeRealCapture is the regression guard built from a REAL
+// captured GET /posts response shape (testdata/post_list_row.json), not a
+// hand-written fixture. IDs → small integers, names → "A", URLs →
+// example.invalid, but every KEY and every VALUE TYPE is exactly as the
+// server sends them — including the null metrics on an unpublished post and
+// the string post_id inside the numeric-id photo object.
+//
+// This is the RED-on-revert test for the photo-type bug: Post.Photo was
+// typed string but the API sends an object, which aborted the entire
+// unmarshal. A hand-typed fixture encoded the same wrong guess, so the suite
+// was green over a command that could not run. This capture cannot lie about
+// the shape because it was recorded from the wire.
+func TestPost_DecodeRealCapture(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "post_list_row.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var resp PostsResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal real capture: %v\n— a wrong field type aborts the whole decode (the photo=string bug class)", err)
+	}
+	if len(resp.List) != 1 {
+		t.Fatalf("len(List) = %d, want 1", len(resp.List))
+	}
+	p := resp.List[0]
+
+	// The command must return rows with text and the publication slot —
+	// these two are the user-visible requirement.
+	if p.Text != "A" {
+		t.Errorf("Text = %q, want %q", p.Text, "A")
+	}
+	if p.PublicationDate == nil {
+		t.Fatal("PublicationDate = nil, want the slot object")
+	}
+	if p.PublicationDate.Date != "29 Июля" || p.PublicationDate.Time != "12:25" {
+		t.Errorf("PublicationDate = %+v, want date 29 Июля / time 12:25", p.PublicationDate)
+	}
+
+	// photo is an OBJECT — the crash field. Must decode into a struct, not a string.
+	if p.Photo == nil {
+		t.Fatal("Photo = nil, want the media-descriptor object")
+	}
+	if p.Photo.PostID != "5" {
+		t.Errorf("Photo.PostID = %q, want %q (string while id/owner_id are numbers)", p.Photo.PostID, "5")
+	}
+	if p.Photo.ID != 3 || p.Photo.OwnerID != 4 {
+		t.Errorf("Photo.ID/OwnerID = %d/%d, want 3/4 (numbers)", p.Photo.ID, p.Photo.OwnerID)
+	}
+	if p.Photo.Type != "video" {
+		t.Errorf("Photo.Type = %q, want %q (not photo-specific despite the field name)", p.Photo.Type, "video")
+	}
+
+	// Metrics are null on an unpublished post — must not abort the decode.
+	for name, m := range map[string]Metric{
+		"Views": p.Views, "Likes": p.Likes, "Comments": p.Comments, "Reposts": p.Reposts,
+	} {
+		if m.IsSet() {
+			t.Errorf("%s = %+v, want unset (null on unpublished post)", name, m)
+		}
+	}
+
+	// Nested arrays modeled as structs.
+	if len(p.PostSchedules) != 1 || p.PostSchedules[0].ID != 7 || p.PostSchedules[0].Name != "A" {
+		t.Errorf("PostSchedules = %+v, want one {id:7,name:A}", p.PostSchedules)
+	}
+	if len(p.PostProjects) != 1 || p.PostProjects[0].ID != 8 || p.PostProjects[0].Name != "A" {
+		t.Errorf("PostProjects = %+v, want one {id:8,name:A}", p.PostProjects)
+	}
+	// errors_for_source_ids is an array (empty here — a post with no errors).
+	if len(p.ErrorsForSourceIDs) != 0 {
+		t.Errorf("ErrorsForSourceIDs = %d items, want 0 (empty array)", len(p.ErrorsForSourceIDs))
+	}
+
+	// pages[] items carry source_id + page_id. The narrow Page type captures
+	// source_id; page_id is captured via Page.PageID.
+	if len(p.Pages) != 1 || p.Pages[0].SourceID != 1 {
+		t.Errorf("Pages = %+v, want one with source_id 1", p.Pages)
+	}
+	if p.Pages[0].PageID != 6 {
+		t.Errorf("Pages[0].PageID = %d, want 6", p.Pages[0].PageID)
 	}
 }

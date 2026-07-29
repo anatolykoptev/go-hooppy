@@ -1,6 +1,9 @@
 package hooppy
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Types derived from the Hooppy OpenAPI 3.0 specification (openapi.yaml).
 // The live API may return additional undocumented fields; Go's json.Unmarshal
@@ -19,6 +22,12 @@ type Account struct {
 
 // Page represents a group/page within a social network account.
 // Note: social_page_id and social_account_id are strings in the live API.
+//
+// PageID is the page identifier used inside GET /posts rows (pages[] items
+// carry {source_id, page_id}, not the {id, ...} shape the accounts surface
+// uses). It is 0 in the accounts-surface response (where the key is "id",
+// captured by ID above). Narrow: no token fields — see
+// TestPost_DecodeCredentialHygiene.
 type Page struct {
 	ID              int    `json:"id"`
 	SourceID        int    `json:"source_id"`
@@ -26,6 +35,7 @@ type Page struct {
 	SocialPageID    string `json:"social_page_id"`
 	SocialPageName  string `json:"social_page_name"`
 	SocialPagePhoto string `json:"social_page_photo"`
+	PageID          int    `json:"page_id,omitempty"`
 }
 
 // Project groups posts for multi-platform publishing.
@@ -401,17 +411,19 @@ type Post struct {
 	IsPlannedByNetworks int `json:"is_planned_by_networks"`
 	// is_planning_by_networks_needed: 0/1 flag (API boolean convention).
 	IsPlanningByNetworksNeeded int `json:"is_planning_by_networks_needed"`
-	// views, likes, comments, reposts: engagement metrics. SearchPost
-	// (a DIFFERENT, scraped-post surface) receives these as
-	// thousands-separated STRINGS ("334,881"); the own-post list surface
-	// may return numbers or strings — evidence is genuinely absent
-	// (OpenAPI documents only id). Modelled as json.RawMessage so a wrong
-	// guess cannot abort the whole decode; callers parse the bytes
-	// themselves. No parse accessor exists on SearchPost to reuse.
-	Views    json.RawMessage `json:"views"`
-	Likes    json.RawMessage `json:"likes"`
-	Comments json.RawMessage `json:"comments"`
-	Reposts  json.RawMessage `json:"reposts"`
+	// views, likes, comments, reposts: engagement metrics. Measured: null
+	// on unpublished posts (present and null, not absent). On published
+	// posts the value shape is inferred from SearchPost (a different,
+	// scraped surface) which receives thousands-separated STRINGS
+	// ("334,881"); the own-post list surface's metric type is unverified,
+	// so a number is plausible. Metric tolerates null, string, AND number
+	// via a custom UnmarshalJSON so a wrong guess cannot abort the decode —
+	// the same bug class as Post.Photo (string vs object) this fix
+	// addresses. See the Metric type for the accessors.
+	Views    Metric `json:"views"`
+	Likes    Metric `json:"likes"`
+	Comments Metric `json:"comments"`
+	Reposts  Metric `json:"reposts"`
 	// link: URL of the published post (SearchPost.Link is string).
 	Link string `json:"link"`
 	// source_link: URL of the original source (URL convention, same as link/repost_link).
@@ -419,31 +431,38 @@ type Post struct {
 	// repost_link / repost_title: the reposted source (Repost.Link / Repost.Title are strings).
 	RepostLink  string `json:"repost_link"`
 	RepostTitle string `json:"repost_title"`
-	// photo: cover/thumbnail photo URL (SearchPostOwner.Photo, Page.SocialPagePhoto,
-	// Account.SocialAccountPhoto are all string URLs).
-	Photo string `json:"photo"`
+	// photo: a media descriptor OBJECT, not a URL string — measured from a
+	// live GET /posts response. The name is misleading: type was "video"
+	// in the capture, so this field is not photo-specific. post_id is a
+	// STRING while id and owner_id are numbers. See PostPhoto for the
+	// measured shape. A pointer so a text-only post (photo null/absent)
+	// decodes to nil rather than a zero-value struct.
+	Photo *PostPhoto `json:"photo"`
 	// photos_amount: photo count (SearchPostsFilter.PhotosAmount is int).
 	PhotosAmount int `json:"photos_amount"`
 	// pages: the page targets this post publishes to. Reuses the narrow
-	// Page struct (id/source/social-ids/name/photo only) so the OAuth
-	// tokens page objects carry elsewhere CANNOT reach the marshalled
-	// output. See TestPost_DecodeCredentialHygiene.
+	// Page struct (id/source/social-ids/name/photo/page_id only) so the
+	// OAuth tokens page objects carry elsewhere CANNOT reach the
+	// marshalled output. See TestPost_DecodeCredentialHygiene.
 	Pages []Page `json:"pages"`
-	// post_schedules: nested schedule references. Evidence for their
-	// shape in the list response is absent (OpenAPI documents only id);
-	// json.RawMessage so a wrong guess cannot abort the decode. Not
-	// page-shaped, so no credential leak risk through the raw bytes.
-	PostSchedules json.RawMessage `json:"post_schedules"`
-	// post_projects: nested project references. Evidence absent; json.RawMessage.
-	// Not page-shaped, so no credential leak risk.
-	PostProjects json.RawMessage `json:"post_projects"`
+	// post_schedules: nested schedule references. Measured shape:
+	// [{"id":…,"name":…}] — modeled as a struct slice, not RawMessage, so
+	// the values are typed and reachable. Not page-shaped, so no
+	// credential leak risk.
+	PostSchedules []PostSchedule `json:"post_schedules"`
+	// post_projects: nested project references. Measured shape:
+	// [{"id":…,"name":…}] — reuses the narrow Project struct (id/name
+	// only). Not page-shaped, so no credential leak risk.
+	PostProjects []Project `json:"post_projects"`
 	// created_by: user id of the post's author (PostEditResponse.CreatedBy is int).
 	CreatedBy int `json:"created_by"`
-	// errors_for_source_ids: per-post publication failures — the same
-	// signal doctor reconstructs from the account-wide notification log,
-	// attached to the post that failed. Evidence for its shape is absent;
-	// json.RawMessage so a wrong guess cannot abort the decode.
-	ErrorsForSourceIDs json.RawMessage `json:"errors_for_source_ids"`
+	// errors_for_source_ids: per-post publication failures. Measured: an
+	// ARRAY (the server sends [], not the object a prior fixture guessed).
+	// The item shape is NOT measured — modeled as []json.RawMessage so any
+	// array content decodes without aborting, and no struct fields are
+	// inferred from the field name (the rule this whole fix enforces).
+	// OPEN CONCERN: capture a post with non-empty errors to type the items.
+	ErrorsForSourceIDs []json.RawMessage `json:"errors_for_source_ids"`
 }
 
 // PostPublicationDate is the publication_date object returned in a GET
@@ -459,6 +478,92 @@ type PostPublicationDate struct {
 	Time            string `json:"time"`             // "12:25"-style display time
 	Timestamp       int64  `json:"timestamp"`        // unix timestamp
 	SourceTimestamp int64  `json:"source_timestamp"` // unix timestamp (carries a timezone offset)
+}
+
+// PostPhoto is the media descriptor carried in Post.Photo. Despite the
+// field name, it is NOT photo-specific: the measured capture had
+// type:"video". Note the mixed types: id and owner_id are NUMBERS while
+// post_id is a STRING. Measured from a live GET /posts response:
+//
+//	{"id":3,"owner_id":4,"post_id":"5","access_key":"A","source_id":1,
+//	 "type":"video","title":"A","description":"","duration":383,
+//	 "preview":"https://example.invalid/x"}
+type PostPhoto struct {
+	ID          int    `json:"id"`
+	OwnerID     int    `json:"owner_id"`
+	PostID      string `json:"post_id"` // STRING while id/owner_id are numbers
+	AccessKey   string `json:"access_key"`
+	SourceID    int    `json:"source_id"`
+	Type        string `json:"type"` // "video" observed — not photo-specific
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Duration    int    `json:"duration"`
+	Preview     string `json:"preview"`
+}
+
+// PostSchedule is a nested schedule reference inside a GET /posts row's
+// post_schedules array. Measured shape: {"id":…,"name":…}. Narrow — no
+// token fields (unlike the full Schedule type which carries state/position/
+// dates); this is the list-surface projection, not the editable schedule.
+type PostSchedule struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// Metric is an engagement metric (views/likes/comments/reposts) on a Post.
+// Measured: null on unpublished posts (present and null, not absent). On
+// published posts the value shape is inferred from SearchPost (a different,
+// scraped surface) which receives thousands-separated strings ("334,881");
+// the own-post list surface's published metric type is unverified, so a
+// number is plausible. Metric tolerates null, string, AND number via a
+// custom UnmarshalJSON — a typed string/int field would abort the whole
+// decode on the wrong shape, the same bug class as Post.Photo (string vs
+// object) that this fix addresses. The raw JSON bytes are preserved so
+// MarshalJSON round-trips the exact wire value (string stays quoted, number
+// stays bare) and printJSON output stays clean.
+//
+// Accessors: Set reports whether a non-null value was present; String
+// returns the value as a string (the quoted content for a string, the raw
+// digits for a number, "" when unset).
+type Metric struct {
+	raw json.RawMessage
+	set bool
+}
+
+// UnmarshalJSON accepts null (→ unset), a JSON string, or a JSON number.
+func (m *Metric) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if len(s) == 0 || s == "null" {
+		m.raw, m.set = nil, false
+		return nil
+	}
+	m.raw = append(json.RawMessage(nil), b...)
+	m.set = true
+	return nil
+}
+
+// MarshalJSON round-trips the captured wire value, or null when unset.
+func (m Metric) MarshalJSON() ([]byte, error) {
+	if !m.set {
+		return []byte("null"), nil
+	}
+	return m.raw, nil
+}
+
+// Set reports whether a non-null value was present.
+func (m Metric) IsSet() bool { return m.set }
+
+// String returns the metric value as a string: the quoted content for a
+// JSON string, the raw digits for a JSON number, "" when unset/null.
+func (m Metric) String() string {
+	if !m.set {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(m.raw, &s) == nil {
+		return s
+	}
+	return string(m.raw)
 }
 
 // Photo is an uploaded photo attachment.
