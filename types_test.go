@@ -15,12 +15,14 @@ func TestSourceID_String_KnownIDs(t *testing.T) {
 		{SourceFacebook, "facebook"},
 		{SourceTwitter, "twitter"},
 		{SourcePinterest, "pinterest"},
-		{SourceTelegramChan, "telegram_channel"},
-		{SourceTelegramAcc, "telegram_account"},
 		{SourceInstagram, "instagram"},
+		{SourceTelegram, "telegram"},
+		{SourceTelegramAcc, "telegram_account"},
+		{SourceInstagramFB, "instagram_fb"},
 		{SourceYouTube, "youtube"},
 		{SourceLinkedIn, "linkedin"},
 		{SourceTikTok, "tiktok"},
+		{SourceViber, "viber"},
 		{SourceThreads, "threads"},
 		{SourceMax, "max"},
 	}
@@ -40,15 +42,46 @@ func TestSourceID_String_UnknownID(t *testing.T) {
 func TestSourceID_AllConstantsHaveNames(t *testing.T) {
 	all := []SourceID{
 		SourceVK, SourceOK, SourceFacebook, SourceTwitter, SourceMyWorld,
-		SourcePinterest, SourceTumblr, SourceTelegramChan, SourceInstagramFB,
-		SourceTelegramAcc, SourceDzen, SourceTikTok, SourceYouTube, SourceLinkedIn,
-		SourceWhatsApp, SourceRutube, SourceInstagram, SourceYappy, SourceMax,
-		SourceThreads, SourceVKChats,
+		SourcePinterest, SourceInstagram, SourceTumblr, SourceTelegram,
+		SourceInstagramFB, SourceTelegramAcc, SourceDzen, SourceTikTok,
+		SourceViber, SourceYouTube, SourceLinkedIn, SourceWhatsApp, SourceRutube,
+		SourceMax, SourceYappy, SourceThreads, SourceVKChats,
+		SourceTelegramChan, // deprecated alias — must still resolve
 	}
 	for _, id := range all {
 		if id.String() == "unknown" {
 			t.Errorf("SourceID(%d) has no name in sourceNames map", int(id))
 		}
+	}
+}
+
+// TestSourceNames_Bijective enforces that sourceNames is a bijection: no
+// name maps to two different ids, and no id maps to two names. This catches
+// the class of bug where two vendor tables are merged carelessly and a
+// single network name (e.g. "instagram") ends up pointing at two ids
+// (e.g. 7 and 29) — the report would render contradictory network names
+// for the same network depending on which connection method the row used.
+func TestSourceNames_Bijective(t *testing.T) {
+	// id → name: Go maps already enforce that no key appears twice, so the
+	// "no id to two names" direction is structurally guaranteed. We still
+	// check it explicitly for documentation.
+	seenID := make(map[SourceID]string, len(sourceNames))
+	for id, name := range sourceNames {
+		if prev, ok := seenID[id]; ok {
+			t.Errorf("id %d maps to two names: %q and %q", int(id), prev, name)
+		}
+		seenID[id] = name
+	}
+	// name → id: this is the direction that can silently break when two
+	// tables are merged. A name pointing at two ids means the doctor report
+	// would render the same network name for two different source_ids,
+	// hiding that they are distinct connection methods.
+	seenName := make(map[string]SourceID, len(sourceNames))
+	for id, name := range sourceNames {
+		if prev, ok := seenName[name]; ok {
+			t.Errorf("name %q maps to two ids: %d and %d — no name may map to two ids", name, int(prev), int(id))
+		}
+		seenName[name] = id
 	}
 }
 

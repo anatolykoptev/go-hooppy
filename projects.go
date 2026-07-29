@@ -231,6 +231,25 @@ type AllListEnvelope struct {
 // idFunc extracts the unique identity of each element. It MUST be non-nil;
 // the unique-count is meaningless without it. This is consistent with the
 // fail-loud choice already made for maxListAllPages.
+//
+// Call sites and whether the collection can change mid-walk (the equality
+// check above is only safe for low-churn collections):
+//   - cmd/hooppy-mcp/main.go:212 — posts (ListAllPostsWithTotal). HIGH-CHURN:
+//     posts are created and published continuously; a post created or
+//     published between page fetches shifts the offset window and makes
+//     unique != total on a healthy account — the equality check
+//     false-alarms here exactly as it did for /notifications before PR #64.
+//     NOT covered by the first-total rule; tracked in #70.
+//   - cmd/hooppy-mcp/main.go:445 — projects. Low-churn; a project created
+//     mid-walk is rare. Equality check is acceptable.
+//   - cmd/hooppy-mcp/main.go:483 — schedules. Low-churn; same reasoning.
+//   - cmd/hooppy/main.go:350 — projects (CLI). Same as the MCP projects site.
+//   - cmd/hooppy/main.go:440 — schedules (CLI). Same as the MCP schedules site.
+//
+// The posts site is the known gap: it walks the highest-churn collection in
+// the API with a check designed for low-churn ones. The fix is to apply the
+// first-total rule (unique < firstTotal) there too, as doctor does for
+// /notifications; see #70.
 func NewAllListEnvelope[T any](list []T, totalRows int, idFunc func(T) int) (AllListEnvelope, error) {
 	if idFunc == nil {
 		return AllListEnvelope{}, fmt.Errorf("hooppy: NewAllListEnvelope requires a non-nil idFunc — the unique-count check is meaningless without it")
