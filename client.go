@@ -50,7 +50,7 @@ type Config struct {
 	MaxUploadBytes   int64          // max file size for uploads; default 50 MB
 	MaxResponseBytes int64          // max response body size; default 10 MB
 	HTTPClient       *http.Client   // if non-nil, overrides the default *http.Client (caller owns transport config — pool sizing, TLS, proxies). Follows the go-kit WithHTTPClient pattern.
-	RetryOptions     *retry.Options // if non-nil, enables retry for GET, PUT (full-state Update* to a known id), and DELETE requests on transient failures (429/5xx). POST, streaming uploads, and the create-shaped PUT /posts/import (ImportSearchPost) NEVER retry — they are non-idempotent and a retry after a committed write would duplicate created posts. Context is the sole deadline authority. Use OnRetry for observability.
+	RetryOptions     *retry.Options // if non-nil, enables retry for safe (idempotent) requests on transient failures (429/5xx): GET, DELETE, and full-state PUT updates to a known id (Update*). Create-shaped calls NEVER retry regardless of method — POST creates, streaming uploads, and the create-shaped PUTs (PUT /posts/import, /posts/copy, /posts/{mode}) are non-idempotent and a retry after a committed write would duplicate created posts. Retry eligibility is declared per call site (the retryable arg on doGET/doPUT/doDELETE) and enforced by TestRetryPolicySweep. Context is the sole deadline authority. Use OnRetry for observability.
 }
 
 // NewClient creates a new Hooppy API client.
@@ -155,9 +155,16 @@ func checkJWTExpiry(token string) error {
 }
 
 // doGET performs a GET request and decodes the JSON response into out.
-// When retry is enabled (Config.RetryOptions non-nil), transient failures
-// (429/5xx) are retried with exponential backoff.
-func (c *Client) doGET(ctx context.Context, path string, params url.Values, out interface{}) error {
+// retryable declares the call site's retry policy: when true AND
+// Config.RetryOptions is non-nil, transient failures (429/5xx) are retried
+// with exponential backoff; when false the call never retries even with
+// RetryOptions set. Retry eligibility is a property of the ENDPOINT, not the
+// HTTP method — every call site MUST pass an explicit value so a new endpoint
+// is forced to declare its policy rather than silently inheriting the method
+// default. Every current GET is a safe idempotent read, so all doGET call
+// sites pass true. The declaration is enforced by TestRetryPolicySweep, which
+// fails when a request-issuing method exists with no declared policy.
+func (c *Client) doGET(ctx context.Context, path string, params url.Values, out interface{}, retryable bool) error {
 	u := c.baseURL + path
 	if len(params) > 0 {
 		u += "?" + params.Encode()
@@ -170,7 +177,7 @@ func (c *Client) doGET(ctx context.Context, path string, params url.Values, out 
 		c.setAuth(req)
 		return req, nil
 	}
-	if c.retryOpts != nil {
+	if retryable && c.retryOpts != nil {
 		return c.doWithRetry(ctx, buildReq, out)
 	}
 	req, err := buildReq()
@@ -196,9 +203,16 @@ func (c *Client) doPOST(ctx context.Context, path string, body interface{}, out 
 }
 
 // doPUT performs a PUT request with a JSON body and decodes the response.
-// When retry is enabled, transient failures (429/5xx) are retried.
-// PUT is idempotent per RFC 9110 §9.3.4.
-func (c *Client) doPUT(ctx context.Context, path string, body interface{}, out interface{}) error {
+// retryable declares the call site's retry policy (see doGET). PUT is the
+// only verb whose retry eligibility is NOT uniform: a full-state Update* to a
+// known id converges on re-send (retryable=true, safe), but a create-shaped
+// PUT (PUT /posts/import, /posts/copy, /posts/{mode}) creates objects and
+// MUST pass false — a 5xx or timeout arriving after the write committed,
+// retried, would duplicate the created posts in a live publishing queue
+// (issue #87). The per-call-site declaration is enforced by
+// TestRetryPolicySweep; the create-never-retries invariant is pinned
+// behaviourally by TestRetryPolicy_CreateNotRetried.
+func (c *Client) doPUT(ctx context.Context, path string, body interface{}, out interface{}, retryable bool) error {
 	buildReq := func() (*http.Request, error) {
 		var buf bytes.Buffer
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
@@ -212,33 +226,13 @@ func (c *Client) doPUT(ctx context.Context, path string, body interface{}, out i
 		req.Header.Set("Content-Type", "application/json")
 		return req, nil
 	}
-	if c.retryOpts != nil {
+	if retryable && c.retryOpts != nil {
 		return c.doWithRetry(ctx, buildReq, out)
 	}
 	req, err := buildReq()
 	if err != nil {
 		return err
 	}
-	return c.do(req, out)
-}
-
-// doPUTNoRetry performs a PUT request with a JSON body and decodes the
-// response, NEVER retrying even when Config.RetryOptions is set. Used for
-// non-idempotent PUT endpoints (PUT /posts/import creates posts — a 5xx or
-// timeout arriving after the write committed, then retried, would duplicate
-// the created posts in a live publishing queue). The full-state Update* PUTs
-// target a known id and converge on re-send, so they keep the retrying doPUT.
-func (c *Client) doPUTNoRetry(ctx context.Context, path string, body interface{}, out interface{}) error {
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(body); err != nil {
-		return fmt.Errorf("hooppy: encode body: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+path, &buf)
-	if err != nil {
-		return fmt.Errorf("hooppy: build request: %w", err)
-	}
-	c.setAuth(req)
-	req.Header.Set("Content-Type", "application/json")
 	return c.do(req, out)
 }
 
@@ -288,10 +282,12 @@ func (c *Client) doPUTRaw(ctx context.Context, path string, body []byte, out int
 }
 
 // doDELETE performs a DELETE request and decodes the response.
-// When retry is enabled (Config.RetryOptions non-nil), transient failures
-// (429/5xx) are retried with exponential backoff. DELETE is idempotent
-// per RFC 9110 §9.3.2.
-func (c *Client) doDELETE(ctx context.Context, path string, out interface{}) error {
+// retryable declares the call site's retry policy (see doGET). When true AND
+// Config.RetryOptions is non-nil, transient failures (429/5xx) are retried
+// with exponential backoff. DELETE is idempotent per RFC 9110 §9.3.2, so all
+// doDELETE call sites pass true. The declaration is enforced by
+// TestRetryPolicySweep.
+func (c *Client) doDELETE(ctx context.Context, path string, out interface{}, retryable bool) error {
 	buildReq := func() (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+path, nil)
 		if err != nil {
@@ -300,7 +296,7 @@ func (c *Client) doDELETE(ctx context.Context, path string, out interface{}) err
 		c.setAuth(req)
 		return req, nil
 	}
-	if c.retryOpts != nil {
+	if retryable && c.retryOpts != nil {
 		return c.doWithRetry(ctx, buildReq, out)
 	}
 	req, err := buildReq()
