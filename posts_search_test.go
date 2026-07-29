@@ -293,18 +293,28 @@ func TestListSearchPosts_PhotosAmountPassThrough(t *testing.T) {
 // unset sentinel. Each case is isolated to one field so a regression in
 // any single guard is visible.
 //
-// SourceID, SourceResourceID, and OwnerID are NOT here: they are phantom
-// parameters (issues #67, #73) whose non-zero guard fires on != 0 (so a
-// negative is refused by the phantom guard, not the negative guard). Their
-// negative path is covered by TestPhantomFilterSweep, which sets a positive
-// value — the same guard fires for both signs. Keeping them here would
-// read as negative-path coverage while exercising only the phantom guard.
+// SourceID, SourceResourceID, and OwnerID ARE included here even though
+// they are phantom parameters (issues #67, #73): the phantom guard fires
+// on != 0 today, so a negative is refused by it — but that is a property
+// of the CURRENT guard. The observable these cases assert (a negative
+// value errors before any request) stays true and stays worth asserting
+// regardless of which internal guard produces the refusal. They are the
+// only thing that notices if the phantom guard is weakened from != 0 to
+// > 0: a negative would then take neither branch — no error, no
+// parameter, an unfiltered result that looks filtered — which is issue
+// #65 item 1 verbatim and reachable from the shipped CLI. The structural
+// sweep in TestPhantomFilterSweep now also runs both signs on every
+// phantom field (see its negVal arm), so this is belt-and-braces with
+// that gate.
 func TestListSearchPosts_IDPageNegative(t *testing.T) {
 	cases := []struct {
 		name string
 		f    SearchPostsFilter
 	}{
 		{"SourceType negative", SearchPostsFilter{SourceType: -1}},
+		{"SourceID negative", SearchPostsFilter{SourceID: -1}},
+		{"SourceResourceID negative", SearchPostsFilter{SourceResourceID: -1}},
+		{"OwnerID negative", SearchPostsFilter{OwnerID: -1}},
 		{"Page negative", SearchPostsFilter{Page: -1}},
 	}
 	reached := false

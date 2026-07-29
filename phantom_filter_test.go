@@ -103,17 +103,17 @@ func TestPhantomFilterSweep(t *testing.T) {
 			"DateFrom":            {wireParam: "date_from", expectWire: "01.01.2026", setVal: "01.01.2026"},
 			"DateTo":              {wireParam: "date_to", expectWire: "31.01.2026", setVal: "31.01.2026"},
 			"SourceType":          {wireParam: "source_type", expectWire: "1", setVal: 1},
-			"SourceID":            {phantom: true, wireParam: "source_id", setVal: 1},
-			"SourceResourceID":    {phantom: true, wireParam: "source_resource_id", setVal: 1},
-			"OwnerID":             {phantom: true, wireParam: "owner_id", setVal: 1},
+			"SourceID":            {phantom: true, wireParam: "source_id", setVal: 1, negVal: -1},
+			"SourceResourceID":    {phantom: true, wireParam: "source_resource_id", setVal: 1, negVal: -1},
+			"OwnerID":             {phantom: true, wireParam: "owner_id", setVal: 1, negVal: -1},
 			"Page":                {wireParam: "page", expectWire: "2", setVal: 2},
 			"SortBy":              {wireParam: "sort_by", expectWire: "likes", setVal: "likes"},
 			"SortDirection":       {wireParam: "sort_direction", expectWire: "asc", setVal: "asc"},
-			"MinLikes":            {phantom: true, wireParam: "min_likes", setVal: 1},
-			"MinViews":            {phantom: true, wireParam: "min_views", setVal: 1},
-			"MinComments":         {phantom: true, wireParam: "min_comments", setVal: 1},
-			"MinReposts":          {phantom: true, wireParam: "min_reposts", setVal: 1},
-			"MinInvolvement":      {phantom: true, wireParam: "min_involvement", setVal: 1.5},
+			"MinLikes":            {phantom: true, wireParam: "min_likes", setVal: 1, negVal: -1},
+			"MinViews":            {phantom: true, wireParam: "min_views", setVal: 1, negVal: -1},
+			"MinComments":         {phantom: true, wireParam: "min_comments", setVal: 1, negVal: -1},
+			"MinReposts":          {phantom: true, wireParam: "min_reposts", setVal: 1, negVal: -1},
+			"MinInvolvement":      {phantom: true, wireParam: "min_involvement", setVal: 1.5, negVal: -1.5},
 			"PhotosAmount":        {wireParam: "photos_amount", expectWire: "3", setVal: 3},
 			"VideoDuration":       {wireParam: "video_duration", expectWire: "2", setVal: 2},
 			"ContentTypes":        {wireParam: "content_types", expectWire: "photos", setVal: "photos"},
@@ -140,8 +140,8 @@ func TestPhantomFilterSweep(t *testing.T) {
 			"IsPublished":     {wireParam: "is_published", expectWire: "1", setVal: &pub},
 			"PublicationDate": {wireParam: "publication_date", expectWire: "15.06.2026", setVal: "15.06.2026"},
 			"SourceID":        {wireParam: "source_id", expectWire: "6", setVal: 6},
-			"AccountID":       {phantom: true, wireParam: "account_id", setVal: 1},
-			"PageID":          {phantom: true, wireParam: "page_id", setVal: 1},
+			"AccountID":       {phantom: true, wireParam: "account_id", setVal: 1, negVal: -1},
+			"PageID":          {phantom: true, wireParam: "page_id", setVal: 1, negVal: -1},
 			"ScheduleID":      {wireParam: "schedule_id", expectWire: "300", setVal: 300},
 			"ProjectID":       {wireParam: "project_id", expectWire: "400", setVal: 400},
 			"Page":            {wireParam: "page", expectWire: "2", setVal: 2},
@@ -215,6 +215,17 @@ func TestPhantomFilterSweep(t *testing.T) {
 //
 //	non-zero value must produce an error and issue NO
 //	request (the API accepts and silently ignores it).
+//	The phantom arm runs BOTH signs — setVal (positive) and
+//	negVal (negative) — so the gate catches a guard weakened
+//	from != 0 to > 0 for every current and future phantom
+//	field, not just the five hand-written cases in
+//	TestListPosts_NegativeRejected / TestListSearchPosts_IDPageNegative.
+//	A negative taking neither branch (no error, no parameter,
+//	an unfiltered result that looks filtered) is issue #65
+//	item 1 verbatim and reachable from the shipped CLI (pflag
+//	IntVar is signed). negVal must be the negation of setVal
+//	for numeric fields; for non-numeric phantom fields leave
+//	it unset (the arm skips the negative leg when negVal == nil).
 //
 // phantom=false → the field is a working filter: setting it must reach
 //
@@ -225,6 +236,7 @@ type fieldSpec struct {
 	wireParam  string
 	expectWire string
 	setVal     interface{}
+	negVal     interface{}
 }
 
 // assertFilterSweep verifies that every field of the filter struct is
@@ -251,28 +263,57 @@ func assertFilterSweep(t *testing.T, specs map[string]fieldSpec, typ reflect.Typ
 
 	for name, spec := range specs {
 		t.Run(name, func(t *testing.T) {
-			fv := reflect.New(typ).Elem()
-			fv.FieldByName(name).Set(reflect.ValueOf(spec.setVal))
-			filter := fv.Interface()
-
-			q, reached, err := callFn(filter)
-
 			if spec.phantom {
-				if err == nil {
-					t.Fatalf("expected an error refusing the phantom parameter %q, got nil — the API accepts and silently ignores it, returning an unfiltered result set that looks filtered", name)
+				// Run BOTH signs: setVal (positive) and negVal (negative).
+				// The phantom guard fires on != 0 today, so both must error
+				// before any request. The negative leg catches a guard
+				// weakened from != 0 to > 0 — a negative then takes neither
+				// branch (no error, no parameter, an unfiltered result that
+				// looks filtered), which is issue #65 item 1 verbatim and
+				// reachable from the shipped CLI (pflag IntVar is signed).
+				// This makes the coverage structural for every current and
+				// future phantom field, not just the five hand-written
+				// cases in TestListPosts_NegativeRejected /
+				// TestListSearchPosts_IDPageNegative.
+				values := []struct {
+					label string
+					v     interface{}
+				}{
+					{"positive", spec.setVal},
 				}
-				if reached {
-					t.Fatalf("the refusal guard issued a request before erroring for phantom parameter %q — refusal MUST happen before any request is issued", name)
+				if spec.negVal != nil {
+					values = append(values, struct {
+						label string
+						v     interface{}
+					}{"negative", spec.negVal})
 				}
-				// The error must name the field's wire parameter, not just
-				// any error — an unrelated early failure (e.g. a transport
-				// error) would otherwise satisfy the phantom arm.
-				if !contains(err.Error(), spec.wireParam) {
-					t.Fatalf("phantom parameter %q: error does not name the field (want %q in message, got: %v) — an unrelated early failure must not satisfy the phantom arm", name, spec.wireParam, err)
+				for _, vc := range values {
+					t.Run(vc.label, func(t *testing.T) {
+						fv := reflect.New(typ).Elem()
+						fv.FieldByName(name).Set(reflect.ValueOf(vc.v))
+						_, reached, err := callFn(fv.Interface())
+						if err == nil {
+							t.Fatalf("expected an error refusing the phantom parameter %q (%s), got nil — the API accepts and silently ignores it, returning an unfiltered result set that looks filtered", name, vc.label)
+						}
+						if reached {
+							t.Fatalf("the refusal guard issued a request before erroring for phantom parameter %q (%s) — refusal MUST happen before any request is issued", name, vc.label)
+						}
+						// The error must name the field's wire parameter,
+						// not just any error — an unrelated early failure
+						// (e.g. a transport error) would otherwise satisfy
+						// the phantom arm.
+						if !contains(err.Error(), spec.wireParam) {
+							t.Fatalf("phantom parameter %q (%s): error does not name the field (want %q in message, got: %v) — an unrelated early failure must not satisfy the phantom arm", name, vc.label, spec.wireParam, err)
+						}
+					})
 				}
 				return
 			}
 
+			fv := reflect.New(typ).Elem()
+			fv.FieldByName(name).Set(reflect.ValueOf(spec.setVal))
+			filter := fv.Interface()
+			q, reached, err := callFn(filter)
 			if err != nil {
 				t.Fatalf("expected pass-through for working filter %q, got error: %v — this parameter must reach the wire unchanged", name, err)
 			}
