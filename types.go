@@ -25,6 +25,12 @@ type Account struct {
 
 // Page represents a group/page within a social network account.
 // Note: social_page_id and social_account_id are strings in the live API.
+//
+// PageID is the page identifier used inside GET /posts rows (pages[] items
+// carry {source_id, page_id}, not the {id, ...} shape the accounts surface
+// uses). It is 0 in the accounts-surface response (where the key is "id",
+// captured by ID above). Narrow: no token fields — see
+// TestPost_DecodeCredentialHygiene.
 type Page struct {
 	ID              int    `json:"id"`
 	SourceID        int    `json:"source_id"`
@@ -32,6 +38,7 @@ type Page struct {
 	SocialPageID    string `json:"social_page_id"`
 	SocialPageName  string `json:"social_page_name"`
 	SocialPagePhoto string `json:"social_page_photo"`
+	PageID          int    `json:"page_id,omitempty"`
 }
 
 // Project groups posts for multi-platform publishing.
@@ -366,11 +373,432 @@ type PostIDResponse struct {
 	ID int `json:"id"`
 }
 
-// Post is a minimal post representation. The live API returns many more
-// fields depending on context; callers needing them should decode the raw
-// response body directly.
+// Post is a post returned by GET /posts (the user's own posts). The live
+// API returns twenty-four fields per row; they are modelled here so the
+// decode boundary keeps them instead of discarding twenty-three.
+//
+// Field types are derived from the evidence available without calling the
+// live API: the OpenAPI spec (which documents only id), the sibling
+// SearchPost struct (scraped posts — a DIFFERENT API surface), and
+// PostEditResponse (the own-post edit endpoint). Where the evidence for a
+// field's type was genuinely absent, the field is json.RawMessage — the
+// one choice that cannot abort the entire unmarshal on a wrong guess
+// (a JSON number fails to decode into a Go string, and vice versa). Each
+// such field says so in its doc comment.
+//
+// Credential hygiene: Pages reuses the narrow Page struct, which models
+// only id/source/social-ids/name/photo — never the access_token,
+// bot_token, refresh_token, password, wp_app_password, or
+// access_token_secret that page objects carry elsewhere in this API.
+// See TestPost_DecodeCredentialHygiene for the guard.
 type Post struct {
-	ID int `json:"id"`
+	ID   int    `json:"id"`
+	Text string `json:"text"`
+	// PublicationDate is the slot a schedule assigned. It is an OBJECT,
+	// not a string — a different shape from the PublicationDate used by
+	// the publish/edit payloads (date/hours/minutes). See
+	// PostPublicationDate for the measured {date, time, timestamp,
+	// source_timestamp} shape.
+	PublicationDate *PostPublicationDate `json:"publication_date"`
+	// is_published: 0/1 flag (API boolean convention — Schedule.IsDeleted,
+	// SearchPost.IsUsed, ListPostsFilter.is_published all use int 0/1).
+	IsPublished int `json:"is_published"`
+	// is_ad: the vendor's own advertising flag (0/1, API boolean convention).
+	IsAd int `json:"is_ad"`
+	// is_repeated: 0/1 flag (API boolean convention; SchedulePayload.IsPostsRepeated).
+	IsRepeated int `json:"is_repeated"`
+	// is_attachments_in_process: 0/1 flag — direct sibling evidence from
+	// SearchPost.IsAttachmentsInProcess (int).
+	IsAttachmentsInProcess int `json:"is_attachments_in_process"`
+	// is_planned_by_networks: 0/1 flag (API boolean convention; SchedulePayload.PlanByNetwork).
+	IsPlannedByNetworks int `json:"is_planned_by_networks"`
+	// is_planning_by_networks_needed: 0/1 flag (API boolean convention).
+	IsPlanningByNetworksNeeded int `json:"is_planning_by_networks_needed"`
+	// views, likes, comments, reposts: engagement metrics. Measured: null
+	// on unpublished posts (present and null, not absent). On published
+	// posts the value shape is inferred from SearchPost (a different,
+	// scraped surface) which receives thousands-separated STRINGS
+	// ("334,881"); the own-post list surface's metric type is unverified,
+	// so a number is plausible. Metric tolerates null, string, AND number
+	// via a custom UnmarshalJSON so a wrong guess cannot abort the decode —
+	// the same bug class as Post.Photo (string vs object) this fix
+	// addresses. See the Metric type for the accessors.
+	Views    Metric `json:"views"`
+	Likes    Metric `json:"likes"`
+	Comments Metric `json:"comments"`
+	Reposts  Metric `json:"reposts"`
+	// link: URL of the published post (SearchPost.Link is string).
+	Link string `json:"link"`
+	// source_link: URL of the original source (URL convention, same as link/repost_link).
+	SourceLink string `json:"source_link"`
+	// repost_link / repost_title: the reposted source (Repost.Link / Repost.Title are strings).
+	RepostLink  string `json:"repost_link"`
+	RepostTitle string `json:"repost_title"`
+	// photo: a media descriptor OBJECT, not a URL string — measured from a
+	// live GET /posts response. The name is misleading: type was "video"
+	// in the capture, so this field is not photo-specific. Inside the
+	// object, id is an OPAQUE identifier (number ×1, non-numeric string
+	// ×52 — modelled as PhotoID) and updated_date is a NULLABLE timestamp
+	// (null ×2, number ×39, numeric string ×12 — modelled as FlexInt);
+	// every other field is stable. See PostPhoto for the censused shape
+	// and the two opposite representations. A pointer so a text-only post
+	// (photo null/absent) decodes to nil rather than a zero-value struct.
+	Photo *PostPhoto `json:"photo"`
+	// photos_amount: photo count (SearchPostsFilter.PhotosAmount is int).
+	PhotosAmount int `json:"photos_amount"`
+	// pages: the page targets this post publishes to. Reuses the narrow
+	// Page struct (id/source/social-ids/name/photo/page_id only) so the
+	// OAuth tokens page objects carry elsewhere CANNOT reach the
+	// marshalled output. See TestPost_DecodeCredentialHygiene.
+	Pages []Page `json:"pages"`
+	// post_schedules: nested schedule references. Measured shape:
+	// [{"id":…,"name":…}] — modeled as a struct slice, not RawMessage, so
+	// the values are typed and reachable. Not page-shaped, so no
+	// credential leak risk.
+	PostSchedules []PostSchedule `json:"post_schedules"`
+	// post_projects: nested project references. Measured shape:
+	// [{"id":…,"name":…}] — reuses the narrow Project struct (id/name
+	// only). Not page-shaped, so no credential leak risk.
+	PostProjects []Project `json:"post_projects"`
+	// created_by: user id of the post's author (PostEditResponse.CreatedBy is int).
+	CreatedBy int `json:"created_by"`
+	// errors_for_source_ids: the source_ids of the networks a publication
+	// failed on (the same source_id space as sources.go — SourceVK=1,
+	// SourceOK=2, …). Measured on 12 published rows where the field is
+	// populated: an ARRAY in 12 of 12, and its 14 elements are plain
+	// INTEGERS (e.g. [2, 4] — the networks the post failed on). There is
+	// no map form and no abort risk, so []int is the honest model — and
+	// integers cannot carry an opaque token, which closes the credential
+	// concern a []json.RawMessage raised. An empty array (no failures)
+	// decodes to a non-nil zero-length slice.
+	ErrorsForSourceIDs []int `json:"errors_for_source_ids"`
+}
+
+// PostPublicationDate is the publication_date object returned in a GET
+// /posts row. It is a DIFFERENT shape from the PublicationDate used by the
+// publish/edit payloads (which is {date, hours, minutes}): the list row
+// carries {date, time, timestamp, source_timestamp}, where date is a
+// "29 Июля"-style display string, time is a "12:25"-style display string,
+// and the two timestamps are integers that differ from each other (one
+// appears to carry a timezone offset). Both timestamps are kept; they are
+// not collapsed.
+//
+// Timestamp and SourceTimestamp are modelled as FlexInt, not bare int64:
+// measured as a JSON number in all 60 census rows, so this is not a live
+// break today — but on this API the string form of a numeric field has
+// already appeared twice (PostPhoto.UpdatedDate: numeric string ×12 of 53),
+// and a bare int64 aborts the whole list decode when it does. FlexInt's
+// Int64() accessor keeps callers unchanged. See issue #74 (the sweep).
+type PostPublicationDate struct {
+	Date            string  `json:"date"`             // "29 Июля"-style display date
+	Time            string  `json:"time"`             // "12:25"-style display time
+	Timestamp       FlexInt `json:"timestamp"`        // unix timestamp (number in all 60 rows; FlexInt — a stringified numeric has appeared on this API)
+	SourceTimestamp FlexInt `json:"source_timestamp"` // unix timestamp carrying a tz offset (same polymorphism note as Timestamp)
+}
+
+// PostPhoto is the media descriptor carried in Post.Photo. Despite the
+// field name, it is NOT photo-specific: the measured capture had
+// type:"video". Types below are censused across 60 rows on three pages —
+// a field's type is a property of the collection, not of one row, AND the
+// type alone is not the specification: "string" can mean a numeric string
+// or an opaque token, and those demand opposite models. Sample the VALUES
+// before choosing a representation.
+//
+// Two fields are POLYMORPHIC across the collection, and they need OPPOSITE
+// representations:
+//
+//   - id arrives as a JSON number on one row and a JSON string on 52, but
+//     52 of 53 values are NON-NUMERIC tokens ("fakeTokExample01" shape).
+//     It is an opaque identifier that happens to be numeric sometimes, so
+//     it is modelled as PhotoID (a string): a number on the wire is stored
+//     as its decimal text, an opaque token is stored untouched. Never
+//     parsed as an integer — there is nothing numeric about
+//     "fakeTokExample01".
+//   - updated_date arrives as null (×2), a JSON number (×39), or a JSON
+//     numeric string (×12). Every non-null value parses as an integer. It
+//     is a nullable unix timestamp that is sometimes stringified, so it is
+//     modelled as FlexInt (a number-or-numeric-string, nil when null) —
+//     the FlexInt idea applied to the field that actually is one.
+//
+// Every other field is stable across all 60 rows; their types are exactly
+// as censused:
+//
+//	access_key string, description string, duration number, file_path string,
+//	folder string, is_used number, name string, owner_id number,
+//	post_id string, preview string, source_id number, sticker string,
+//	text string, title string, type string
+//
+// Anonymised example (number-form id):
+//
+//	{"id":3,"owner_id":4,"post_id":"5","access_key":"A","source_id":1,
+//	 "type":"video","title":"A","description":"","duration":383,
+//	 "preview":"https://example.invalid/x","is_used":0,"name":"A",
+//	 "sticker":"","file_path":"A","text":"","folder":"A",
+//	 "updated_date":1700000000}
+type PostPhoto struct {
+	ID          PhotoID `json:"id"`           // OPAQUE: number ×1, non-numeric string ×52 — model as string, never parse
+	OwnerID     int     `json:"owner_id"`     // number (stable)
+	PostID      string  `json:"post_id"`      // string (stable, while id is opaque)
+	AccessKey   string  `json:"access_key"`   // string (stable)
+	SourceID    int     `json:"source_id"`    // number (stable)
+	Type        string  `json:"type"`         // "video" observed — not photo-specific
+	Title       string  `json:"title"`        // string (stable)
+	Description string  `json:"description"`  // string (stable)
+	Duration    int     `json:"duration"`     // number (stable)
+	Preview     string  `json:"preview"`      // string (stable)
+	IsUsed      int     `json:"is_used"`      // number (stable)
+	Name        string  `json:"name"`         // string (stable)
+	Sticker     string  `json:"sticker"`      // string (stable)
+	FilePath    string  `json:"file_path"`    // string (stable)
+	Text        string  `json:"text"`         // string (stable)
+	Folder      string  `json:"folder"`       // string (stable)
+	UpdatedDate FlexInt `json:"updated_date"` // NULLABLE TIMESTAMP: null ×2, number ×39, numeric string ×12
+}
+
+// PostSchedule is a nested schedule reference inside a GET /posts row's
+// post_schedules array. Measured shape: {"id":…,"name":…}. Narrow — no
+// token fields (unlike the full Schedule type which carries state/position/
+// dates); this is the list-surface projection, not the editable schedule.
+type PostSchedule struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// Metric is an engagement metric (views/likes/comments/reposts) on a Post.
+// Measured: null on unpublished posts (present and null, not absent), AND
+// null on published posts too — 12 of 12 published rows on the measured
+// account have views: null. The populated metric shape is therefore
+// genuinely UNOBSERVED on this account: no recorded fixture (testdata/)
+// carries a populated Metric, and none can be produced from here without a
+// different account. The string/number shapes are covered only by the
+// hand-written TestPost_DecodeFullRow, INFERRED from SearchPost (a different,
+// scraped surface) which receives thousands-separated strings ("334,881");
+// the own-post list surface's published metric type is unverified, so a
+// number is plausible. Metric tolerates null, string, AND number via a
+// custom UnmarshalJSON — a typed string/int field would abort the whole
+// decode on the wrong shape, the same bug class as Post.Photo (string vs
+// object) that this fix addresses. The raw JSON bytes are preserved so
+// MarshalJSON round-trips the exact wire value (string stays quoted, number
+// stays bare) and printJSON output stays clean.
+//
+// Accessors: Set reports whether a non-null value was present; String
+// returns the value as a string (the quoted content for a string, the raw
+// digits for a number, "" when unset); Int parses the value with the same
+// thousands-separator-stripping rule as SearchPost.ViewsInt (so callers can
+// compare Post metrics without reimplementing the "334,881" parse).
+type Metric struct {
+	raw json.RawMessage
+	set bool
+}
+
+// UnmarshalJSON accepts null (→ unset), a JSON string, or a JSON number.
+// Any other shape (object/array) returns an error rather than silently
+// storing it — same doctrine as FlexInt/PhotoID: a shape change is loud,
+// not silent. (Without this guard {"a":1} would silently round-trip as a
+// string via String().)
+func (m *Metric) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if len(s) == 0 || s == "null" {
+		m.raw, m.set = nil, false
+		return nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		m.raw = append(json.RawMessage(nil), b...)
+		m.set = true
+		return nil
+	}
+	// Bare number — validate via json.Number so an object/array is rejected.
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("Metric: expected string or number, got %s: %w", s, err)
+	}
+	m.raw = append(json.RawMessage(nil), b...)
+	m.set = true
+	return nil
+}
+
+// MarshalJSON round-trips the captured wire value, or null when unset.
+func (m Metric) MarshalJSON() ([]byte, error) {
+	if !m.set {
+		return []byte("null"), nil
+	}
+	return m.raw, nil
+}
+
+// Set reports whether a non-null value was present.
+func (m Metric) IsSet() bool { return m.set }
+
+// String returns the metric value as a string: the quoted content for a
+// JSON string, the raw digits for a JSON number, "" when unset/null.
+func (m Metric) String() string {
+	if !m.set {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(m.raw, &s) == nil {
+		return s
+	}
+	return string(m.raw)
+}
+
+// Int parses the metric value as an integer using the same
+// thousands-separator-stripping rule as SearchPost.ViewsInt (so a Post
+// metric of "334,881" yields 334881, and a bare number "1234" yields 1234).
+// Returns 0 with a nil error when unset/null. A malformed value (an
+// unexpected separator, a decimal-comma form) returns an error rather than
+// a silent 0 — the same discipline as parseMetricInt. Callers can compare
+// Post metrics without reimplementing the parse.
+func (m Metric) Int() (int, error) {
+	if !m.set {
+		return 0, nil
+	}
+	return parseMetricInt("Metric", m.String())
+}
+
+// FlexInt is an integer field the API encodes as EITHER a JSON number or a
+// JSON numeric string ("123"), and may be null. It is the right model for a
+// field whose values are ALL integers but whose wire form varies —
+// PostPhoto.UpdatedDate (null ×2, number ×39, numeric string ×12 across 60
+// rows). It is the WRONG model for PostPhoto.ID, whose string form is
+// usually a NON-NUMERIC opaque token (see PhotoID): a field's type is a
+// property of the collection, not of the row you happened to look at, AND
+// the type alone is not the specification — sample the VALUES before
+// choosing a representation.
+//
+// FlexInt accepts a JSON number, a JSON string holding an integer, or null
+// (→ unset) via a custom UnmarshalJSON. The raw wire bytes are preserved so
+// MarshalJSON round-trips the exact form WHEN SET (string stays quoted,
+// number stays bare) and printJSON output stays clean. NOTE: a null/unset
+// FlexInt marshals as 0 (the int zero-value convention), NOT null — so a
+// null updated_date does NOT round-trip as null. Int64() returns the typed
+// value regardless of the wire form; IsSet() reports whether a non-null
+// value was present.
+//
+// SWEEP: FlexInt is applied here to PostPhoto.UpdatedDate and
+// PostPublicationDate.{Timestamp,SourceTimestamp}. Three sibling sites
+// (MediaItem.UpdatedDate, Photo.{ID,UpdatedDate}, SearchPostPhoto.ID) have
+// the same polymorphism and are confirmed broken today — tracked in
+// issue #74; each needs its own measurement.
+type FlexInt struct {
+	raw json.RawMessage
+	set bool
+}
+
+// UnmarshalJSON accepts null (→ unset), a JSON number, or a JSON string
+// holding an integer. Any other shape returns an error rather than silently
+// coercing — a silent coerce would recreate the wrong-type-hides-bug class
+// this type exists to prevent.
+func (f *FlexInt) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if len(s) == 0 || s == "null" {
+		f.raw, f.set = nil, false
+		return nil
+	}
+	// Validate: must be a number or a quoted string. Reject objects/arrays
+	// outright so a shape change is loud, not silent.
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		if _, err := strconv.ParseInt(strings.TrimSpace(str), 10, 64); err != nil {
+			return fmt.Errorf("FlexInt: string %q is not an integer: %w", str, err)
+		}
+	} else if _, err := strconv.ParseInt(s, 10, 64); err != nil {
+		return fmt.Errorf("FlexInt: expected number or string, got %s: %w", s, err)
+	}
+	f.raw = append(json.RawMessage(nil), b...)
+	f.set = true
+	return nil
+}
+
+// MarshalJSON round-trips the captured wire value, or 0 when unset (a missing
+// FlexInt field marshals as 0, matching the int zero-value convention).
+func (f FlexInt) MarshalJSON() ([]byte, error) {
+	if !f.set {
+		return []byte("0"), nil
+	}
+	return f.raw, nil
+}
+
+// IsSet reports whether a non-null value was present on the wire.
+func (f FlexInt) IsSet() bool { return f.set }
+
+// Int64 returns the integer value whether the wire form was a bare number or
+// a quoted string ("123" → 123). Returns 0 when unset/null. The accessor is
+// the point: callers compare a typed int, never the raw wire form, so a
+// string-vs-number split in the collection cannot reach them.
+func (f FlexInt) Int64() int64 {
+	if !f.set {
+		return 0
+	}
+	// Bare number first (the common case).
+	var n json.Number
+	if json.Unmarshal(f.raw, &n) == nil {
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+	}
+	// Quoted string form.
+	var str string
+	if json.Unmarshal(f.raw, &str) == nil {
+		if i, err := strconv.ParseInt(strings.TrimSpace(str), 10, 64); err == nil {
+			return i
+		}
+	}
+	return 0
+}
+
+// PhotoID is an opaque media identifier that the API encodes as EITHER a
+// JSON number or a JSON string — and, crucially, the string form is usually
+// a NON-NUMERIC token ("fakeTokExample01", "synth_token_ab01cd" shape).
+// Of 53 censused PostPhoto.ID values only one was numeric; the other 52 are
+// opaque tokens. PhotoID is therefore a STRING, not an integer: a number on
+// the wire is stored as its decimal text, and an opaque token is stored
+// untouched. There is nothing numeric to parse — modelling it as an integer
+// (FlexInt) is the bug that shipped four times, because the first real call
+// hit a non-numeric token and FlexInt rejected it with
+// `FlexInt: string "synth_token_ef02gh" is not an integer`.
+//
+// PhotoID is a defined string type, so the accessor is the value itself:
+// number-form 123456789 and string-form "123456789" both yield "123456789",
+// and "fakeTokExample01" survives verbatim. That equivalence is the point.
+//
+// SWEEP: PhotoID is applied here to PostPhoto.ID. Two sibling id sites
+// (MediaItem.ID, Photo.ID) and SearchPostPhoto.ID have the same
+// opaque-token-vs-number split and are confirmed broken today — tracked in
+// issue #74; each needs its own measurement.
+type PhotoID string
+
+// UnmarshalJSON accepts a JSON string (the common, opaque-token form) or a
+// JSON number (stored as its decimal text). null decodes to "". Any other
+// shape returns an error rather than silently coercing — a silent coerce
+// would recreate the wrong-type-hides-bug class this type exists to prevent.
+func (p *PhotoID) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if len(s) == 0 || s == "null" {
+		*p = ""
+		return nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		*p = PhotoID(str)
+		return nil
+	}
+	// Bare number → store its decimal text (e.g. 123456789 → "123456789").
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("PhotoID: expected string or number, got %s: %w", s, err)
+	}
+	*p = PhotoID(string(n))
+	return nil
 }
 
 // Photo is an uploaded photo attachment.
