@@ -1,7 +1,7 @@
-.PHONY: preflight build test lint fmt vet clean install
+.PHONY: preflight build test lint fmt vet clean install py-test
 
-# preflight is the CI gate: gofmt + vet + build + test
-preflight: fmt-check vet build test
+# preflight is the CI gate: gofmt + vet + build + test + python guard tests
+preflight: fmt-check vet build test py-test
 
 build:
 	go build ./...
@@ -41,3 +41,8 @@ clean:
 install: build
 	go install ./cmd/hooppy
 	go install ./cmd/hooppy-mcp
+
+# py-test runs the issue-open-tasks guard tests (stdlib only, no pip install).
+# Part of preflight so the guard is exercised on every PR alongside the Go gate.
+py-test:
+	python3 scripts/test_issue_open_tasks.py
