@@ -81,16 +81,20 @@ func (c *Client) ListAllPages(ctx context.Context, f ListPagesFilter) ([]Page, e
 // to NewAllListEnvelope. See projects.ListAllSchedulesWithTotal and
 // NewAllListEnvelope for what the envelope catches and what it does not.
 func (c *Client) ListAllPagesWithTotal(ctx context.Context, f ListPagesFilter) ([]Page, int, error) {
-	all, _, last, err := c.ListAllPagesWithTotals(ctx, f)
+	all, _, last, err := c.ListAllPagesWithFirstAndLastTotal(ctx, f)
 	return all, last, err
 }
 
-// ListAllPagesWithTotals is ListAllPages but also returns the server's
-// total_rows from the FIRST page and the LAST page. See
-// ListAllNotificationsWithTotals for the rationale (truncated walk vs
-// benign mid-walk insert). doctor uses this; static-collection callers
-// continue to use ListAllPagesWithTotal + NewAllListEnvelope.
-func (c *Client) ListAllPagesWithTotals(ctx context.Context, f ListPagesFilter) ([]Page, int, int, error) {
+// ListAllPagesWithFirstAndLastTotal is ListAllPages but also returns the
+// server's total_rows from the FIRST page and the LAST page. See
+// ListAllNotificationsWithFirstAndLastTotal for the rationale (truncated
+// walk vs benign mid-walk insert). doctor uses this for the pages walk;
+// pages are low-churn (a user connecting or disconnecting a page mid-walk
+// is rare), so the NewAllListEnvelope equality check would be acceptable
+// for /accounts/pages, but no current caller wires it that way — see
+// NewAllListEnvelope for the per call-site table of which collections the
+// envelope does walk.
+func (c *Client) ListAllPagesWithFirstAndLastTotal(ctx context.Context, f ListPagesFilter) ([]Page, int, int, error) {
 	all := make([]Page, 0)
 	var firstTotalRows, lastTotalRows int
 	for page := 1; ; page++ {

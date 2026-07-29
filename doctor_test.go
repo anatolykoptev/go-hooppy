@@ -697,3 +697,61 @@ func TestRunDoctor_SinceNegative_Rejected(t *testing.T) {
 		t.Errorf("error = %q, want it to mention --since", err.Error())
 	}
 }
+
+// TestRunDoctor_SinceZero_WindowStartOmittedFromJSON verifies that with
+// --since 0 ("no window") the window_start field is OMITTED from the JSON
+// output rather than serialised as the sentinel "0001-01-01T00:00:00Z".
+// A zero time.Time is an implicit sentinel a consumer cannot distinguish
+// from a real boundary; the custom MarshalJSON on DoctorReport omits it.
+// It also checks the positive case (--since 7) still emits window_start, so
+// the omission is specific to "no window", not a blanket drop.
+//
+// RED-on-revert: if the MarshalJSON method is removed, the zero-time case
+// serialises "0001-01-01..." and the first assertion fails.
+func TestRunDoctor_SinceZero_WindowStartOmittedFromJSON(t *testing.T) {
+	recent := vendorDate(time.Now().Add(-1 * 24 * time.Hour))
+	notifications := `{"list":[
+		{"id":1,"is_error":1,"page_id":100,"source_id":1,"operation_date":"` + recent + `","data":"Устарел ключ доступа"}
+	],"total_rows":1,"is_has_more":false,"rows_limit":12}`
+	pages := `{"list":[{"id":100,"source_id":1,"social_page_name":"P"}],"total_rows":1,"is_has_more":false,"rows_limit":20}`
+
+	srv := stubDoctorServer(t, notifications, pages)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	// --- since 0: no window → window_start omitted, no sentinel ---
+	zeroReport, err := c.RunDoctor(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("RunDoctor(0): %v", err)
+	}
+	if !zeroReport.WindowStart.IsZero() {
+		t.Fatalf("WindowStart = %v, want zero time (--since 0 = no window)", zeroReport.WindowStart)
+	}
+	zeroJSON, err := json.Marshal(zeroReport)
+	if err != nil {
+		t.Fatalf("json.Marshal(zeroReport): %v", err)
+	}
+	zeroStr := string(zeroJSON)
+	if strings.Contains(zeroStr, "window_start") {
+		t.Errorf("since=0 JSON contains \"window_start\"; want it omitted (no window). JSON:\n%s", zeroStr)
+	}
+	if strings.Contains(zeroStr, "0001-01-01") {
+		t.Errorf("since=0 JSON contains the sentinel date \"0001-01-01\"; want window_start omitted, not a sentinel. JSON:\n%s", zeroStr)
+	}
+
+	// --- since 7: a window IS set → window_start present ---
+	windowedReport, err := c.RunDoctor(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("RunDoctor(7): %v", err)
+	}
+	if windowedReport.WindowStart.IsZero() {
+		t.Fatalf("WindowStart = zero, want a real time (--since 7 sets a window)")
+	}
+	windowedJSON, err := json.Marshal(windowedReport)
+	if err != nil {
+		t.Fatalf("json.Marshal(windowedReport): %v", err)
+	}
+	if !strings.Contains(string(windowedJSON), "window_start") {
+		t.Errorf("since=7 JSON omits \"window_start\"; want it present (a window is set). JSON:\n%s", windowedJSON)
+	}
+}

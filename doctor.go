@@ -2,6 +2,7 @@ package hooppy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -146,8 +147,9 @@ type DoctorUnparseable struct {
 // is LESS than the server's first-page total_rows. A last-page total greater
 // than the first-page total is a benign mid-walk insert (the collection grew
 // while doctor was reading it) and does NOT set WalkIncomplete — /notifications
-// is a high-churn append-only log where an insert between page fetches is
-// ordinary, not a sign of data loss. Doctor does NOT abort on a truncated
+// is a high-churn log where an insert between page fetches is ordinary, not a
+// sign of data loss (whether the vendor prunes old rows is unestablished; see
+// RunDoctor for the gaps this rule does not close). Doctor does NOT abort on a truncated
 // walk — its purpose is to surface failures, not hide them behind a hard
 // error — but it flags the walk as incomplete so the operator knows the
 // report may be missing rows, and the CLI exit code reflects it.
@@ -155,12 +157,37 @@ type DoctorUnparseable struct {
 // was truncated and the counts involved, so the operator can decide what to
 // do — a bare boolean tells them nothing.
 type DoctorReport struct {
-	SinceDays            int                 `json:"since_days"`
+	SinceDays int `json:"since_days"`
+	// WindowStart is the --since window lower bound. It is the zero time
+	// when --since 0 ("no window"); in that case it is OMITTED from the JSON
+	// output (see MarshalJSON) rather than serialised as the sentinel
+	// "0001-01-01T00:00:00Z".
 	WindowStart          time.Time           `json:"window_start"`
 	WalkIncomplete       bool                `json:"walk_incomplete,omitempty"`
 	WalkIncompleteReason string              `json:"walk_incomplete_reason,omitempty"`
 	Groups               []DoctorGroup       `json:"groups"`
 	UnparseableRows      []DoctorUnparseable `json:"unparseable_rows,omitempty"`
+}
+
+// MarshalJSON omits window_start when it is the zero time (--since 0,
+// "no window"). A zero time.Time would otherwise serialise as the sentinel
+// "0001-01-01T00:00:00Z", indistinguishable from a real boundary to a
+// consumer; omitting the field makes "no window" explicit. When a window
+// IS set the struct's normal tags apply via the type alias. This is the
+// only custom marshalling on DoctorReport: the zero-window branch shadows
+// WindowStart with a nil *time.Time (omitempty) so the rest of the struct
+// is marshalled from the embedded alias and stays in sync automatically.
+func (r DoctorReport) MarshalJSON() ([]byte, error) {
+	type alias DoctorReport
+	if r.WindowStart.IsZero() {
+		return json.Marshal(struct {
+			alias
+			WindowStart *time.Time `json:"window_start,omitempty"`
+		}{
+			alias: alias(r),
+		})
+	}
+	return json.Marshal(alias(r))
 }
 
 // RunDoctor walks the notification log, filters to error rows whose
@@ -175,19 +202,34 @@ type DoctorReport struct {
 // (never silently clamped — clamping a bad value into the quietest
 // configuration hides exactly the failures doctor exists to surface).
 //
-// Both walks (notifications and pages) use the WithTotals variants to
-// capture the server's first-page and last-page total_rows. A walk is
-// flagged incomplete (WalkIncomplete=true) only when the unique id count
-// is LESS than the first-page total — that is the truncation signal. A
-// last-page total greater than the first-page total is a benign mid-walk
-// insert (the collection grew while doctor was reading it) and does NOT
-// flag — /notifications is a high-churn append-only log where an insert
+// Both walks (notifications and pages) use the WithFirstAndLastTotal
+// variants to capture the server's first-page and last-page total_rows.
+// A walk is flagged incomplete (WalkIncomplete=true) only when the unique
+// id count is LESS than the first-page total — that is the truncation
+// signal. A last-page total greater than the first-page total is a benign
+// mid-walk insert (the collection grew while doctor was reading it) and
+// does NOT flag — /notifications is a high-churn log where an insert
 // between page fetches is ordinary. Doctor does NOT use NewAllListEnvelope
-// here: its equality check (unique == total) is right for the static
-// collections its other callers walk, but wrong for this high-churn log
-// where it would false-alarm on every active account. The reason is
+// here: its equality check (unique == total) is right for the low-churn
+// collections its other callers walk (projects, schedules), but wrong for
+// this high-churn log where it would false-alarm on every active account.
+// See NewAllListEnvelope for the per call-site table. The reason is
 // captured in WalkIncompleteReason, not discarded — a bare boolean tells
 // the operator nothing about what to do.
+//
+// What the unique < firstTotal rule does NOT catch (it is a directional
+// check for net loss, not a proof of completeness):
+//   - Concurrent growth MASKS truncation. Two rows inserted mid-walk plus
+//     one row skipped by the offset shift gives unique == firstTotal (the
+//     two new ids replace the one missing in the count) and no flag, even
+//     though a row was lost.
+//   - A SHRINKING collection false-positives. A row that ages out or is
+//     pruned mid-walk drops the server's total_rows below the first-page
+//     value, so unique < firstTotal on a walk that missed nothing. Whether
+//     the vendor prunes /notifications rows is NOT documented — the public
+//     OpenAPI spec (v0.1.0) does not cover /notifications at all — and is
+//     otherwise unestablished; if the log is strictly append-only this gap
+//     closes, but that has not been established and is not asserted here.
 //
 // Page-name resolution: the notification row embeds a full `page` object
 // that carries live OAuth credentials (access_token, bot_token,
@@ -218,7 +260,7 @@ func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, e
 	// sinceDays == 0 → windowStart stays zero time → opDate.Before(zero) is
 	// always false → every dated row is included ("no window").
 
-	notifications, notifFirstTotal, notifLastTotal, err := c.ListAllNotificationsWithTotals(ctx)
+	notifications, notifFirstTotal, notifLastTotal, err := c.ListAllNotificationsWithFirstAndLastTotal(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("hooppy: doctor: walk notifications: %w", err)
 	}
@@ -234,7 +276,7 @@ func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, e
 	// The embedded `page` object in each notification is NOT decoded —
 	// Notification does not model it, so the vendor's token fields are
 	// dropped at the decode boundary.
-	pages, pagesFirstTotal, pagesLastTotal, err := c.ListAllPagesWithTotals(ctx, ListPagesFilter{})
+	pages, pagesFirstTotal, pagesLastTotal, err := c.ListAllPagesWithFirstAndLastTotal(ctx, ListPagesFilter{})
 	if err != nil {
 		return nil, fmt.Errorf("hooppy: doctor: walk pages: %w", err)
 	}
@@ -250,7 +292,7 @@ func (c *Client) RunDoctor(ctx context.Context, sinceDays int) (*DoctorReport, e
 	}
 	// A last-total > first-total is a benign mid-walk insert (the collection
 	// grew while doctor was reading it). /notifications is a high-churn
-	// append-only log where this is ordinary; we do NOT flag it. Only
+	// log where this is ordinary; we do NOT flag it. Only
 	// unique < firstTotal (rows missing that the server initially said
 	// existed) is a truncation signal.
 	pageByName := make(map[int]string, len(pages))
