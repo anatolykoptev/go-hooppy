@@ -1,0 +1,68 @@
+name: issue-open-tasks-guard
+
+# Re-opens issues that were closed while their task-list still had unchecked
+# boxes. A closing PR keyword closes the issue even when only part of the work
+# is done; this guard makes that loud instead of silent. Issues closed as
+# not_planned are skipped — a deliberately abandoned issue is not the failure
+# this guards against.
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: issue-open-tasks-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    if: github.event.issue.state_reason != 'not_planned'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: parse open tasks
+        id: parse
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        # issue_open_tasks.py exits 1 when unchecked items are found; that is
+        # the "needs action" signal, not a failure. Continue regardless.
+        continue-on-error: true
+        run: |
+          set +e
+          out=$(python3 scripts/issue_open_tasks.py)
+          code=$?
+          echo "count=$(python3 -c 'import json,os;print(json.loads(os.environ["O"]).get("count",0))' <<<"$out" 2>/dev/null || echo 0)" >>"$GITHUB_OUTPUT"
+          {
+            echo "payload<<EOF"
+            echo "$out"
+            echo "EOF"
+          } >>"$GITHUB_OUTPUT"
+          echo "exit=$code" >>"$GITHUB_OUTPUT"
+      - name: comment and reopen
+        if: steps.parse.outputs.exit == '1'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const payload = JSON.parse(process.env.PAYLOAD);
+            const count = payload.count;
+            const items = payload.unchecked;
+            const issueNumber = context.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const lines = items.map(s => `- [ ] ${s}`).join('\n');
+            const body = [
+              `This issue was closed but ${count} task-list item${count === 1 ? '' : 's'} remain unchecked:`,
+              '',
+              lines,
+              '',
+              'Reopening automatically. Close again only after these are done or no longer wanted.'
+            ].join('\n');
+            await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body });
+            await github.rest.issues.update({ owner, repo, issue_number: issueNumber, state: 'open' });
+          env:
+            PAYLOAD: ${{ steps.parse.outputs.payload }}

@@ -30,3 +30,7 @@ Thumbs.db
 .env
 .env.local
 cover.out
+
+# python
+__pycache__/
+*.pyc
