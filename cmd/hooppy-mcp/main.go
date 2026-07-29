@@ -64,6 +64,7 @@ func registerTools(server *mcp.Server) {
 	registerListNotifications(server)
 	registerDisconnectPage(server)
 	registerUpdatePost(server)
+	registerUpdatePostText(server)
 	// Posts search (scraping external pages) — UNDOCUMENTED
 	registerListSearchPosts(server)
 	registerListSourceResources(server)
@@ -827,8 +828,11 @@ type updatePostInput struct {
 func registerUpdatePost(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
-			Name:        "hooppy_update_post",
-			Description: "Update an existing post on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+			Name: "hooppy_update_post",
+			Description: "Update an existing post on Hooppy by ID by republishing it immediately (publication_when_type=1) to the given page_ids. " +
+				"WARNING: this drops the post out of any schedule it belongs to and clears attachments — it is a full republish, not an in-place edit. " +
+				"To edit only the text of a scheduled post while preserving its schedule, attachments, page selection and per-source text variants, use hooppy_update_post_text instead. " +
+				"UNDOCUMENTED endpoint — may change without notice.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in updatePostInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -842,6 +846,43 @@ func registerUpdatePost(server *mcp.Server) {
 				Texts:               []hooppy.PostText{{Text: in.Text, SourceID: 0}},
 				Attachments:         []hooppy.Attachment{},
 			})
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- update_post_text (undocumented, schedule-safe) ---
+
+type updatePostTextInput struct {
+	ID   int    `json:"id" jsonschema:"Post ID to edit."`
+	Text string `json:"text" jsonschema:"New post text. Replaces the text of every per-network text variant the post currently has, preserving each variant's source_id."`
+}
+
+// registerUpdatePostText wires the schedule-safe text-only edit path. It
+// delegates to hooppy.UpdatePostText, which fetches the current post via
+// GET /posts/{id}/edit and sends the full state back via PUT /posts/{id}
+// with only the text swapped — preserving schedule_id, attachments, page
+// selection (selected_pages_by_source_ids) and per-source text variants.
+// This is the correct tool for "fix the typo in that scheduled post"; the
+// sibling hooppy_update_post republishes immediately and drops the schedule
+// (issue #49).
+func registerUpdatePostText(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name: "hooppy_update_post_text",
+			Description: "Edit ONLY the text of an existing Hooppy post while preserving its schedule (schedule_id), attachments, page selection and per-source text variants. " +
+				"The safe way to fix a typo or reword a SCHEDULED post — unlike hooppy_update_post, this does NOT republish immediately or drop the post out of its schedule. " +
+				"Fetches the current post state and sends the full state back with only the text changed, so nothing else is wiped. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in updatePostTextInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.UpdatePostText(ctx, in.ID, in.Text)
 			if err != nil {
 				return errResult(err.Error())
 			}
