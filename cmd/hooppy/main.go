@@ -1069,7 +1069,22 @@ func registerSearch(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// search import — copy one or more scraped posts via PUT /posts/import with full text + attachments
+	// search import — copy one or more scraped posts via PUT /posts/import with full text + attachments.
+	//
+	// import copies the source post's text VERBATIM (batch: the server
+	// auto-copies; single: the CLI fills from the edit endpoint). The caller
+	// is expected to rewrite the text for the target networks — import does
+	// not rewrite. Two hygiene checks always run and warn to stderr:
+	//   - VK wiki-link markup ([url|text]) — renders as a hyperlink only on
+	//     VK; a schedule targeting other networks publishes literal brackets.
+	//   - Russian advertising disclosures (Erid, Реклама., ИНН) — identify a
+	//     contract between the advertiser and the SOURCE publisher;
+	//     republishing them asserts we are party to a contract we are not.
+	// Advertising markers are NEVER auto-removed: a disclosure that genuinely
+	// IS our advertising must stay, and the tool cannot tell the two apart.
+	// --strip-vk-markup converts [url|text] to text (opt-in: it routes each
+	// post through its own import request — N import calls instead of 1 batch
+	// call — so a flag that changes the cost profile must be asked for).
 	importCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
 		Name:  "import",
 		Short: "Copy a scraped post with full text + photos/videos via PUT /posts/import (server downloads photos async)",
@@ -1078,42 +1093,24 @@ func registerSearch(root *cobra.Command) {
 	var impPostIDs string
 	var impSchedules string
 	var impWhenType, impHowType int
-	var impNoAttachments bool
+	var impNoAttachments, impStripVK bool
 	importCmd.Flags().IntVar(&impPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
 	importCmd.Flags().StringVar(&impPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Schedule slots are reported in publication order (the queue's own order), not the order given on the command line. Batch import keeps each post's ORIGINAL text (no per-post text override) and strips attachments — the server downloads photos async from the ids it receives. Use --post-id for a single post to pull its text/attachments from the edit endpoint.")
 	importCmd.Flags().IntVar(&impWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule")
 	importCmd.Flags().IntVar(&impHowType, "how-type", 2, "publication how type (2=by schedule pages)")
 	importCmd.Flags().StringVar(&impSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
 	importCmd.Flags().BoolVar(&impNoAttachments, "no-attachments", false, "strip all attachments (photos, videos, links, etc.)")
+	importCmd.Flags().BoolVar(&impStripVK, "strip-vk-markup", false, "convert VK wiki-link markup [url|text] to text (opt-in). On a batch this routes each post through its own import request (N import calls instead of 1 batch call) — the cost-profile change is why the flag is opt-in. Advertising disclosures (Erid/Реклама./ИНН) are NEVER auto-removed: a disclosure that genuinely is our advertising must stay, and the tool cannot tell the two apart.")
 	importCmd.Run = func(_ *cobra.Command, _ []string) {
-		payload, err := buildImportPayload(impPostID, impPostIDs, impWhenType, impHowType, impSchedules)
-		die(err)
-		c := mustClient()
-		batch := impPostIDs != ""
-		// Get edit data for text + attachments — only applies to the
-		// single-post form. A batch (--post-ids) spans multiple scraped
-		// posts, so there is no single edit to fetch. In batch mode the
-		// builder sets Texts to an empty (non-nil) slice so the server
-		// keeps each post's original text (ImportSearchPost only replaces
-		// a nil slice, so an empty slice passes through unchanged) and
-		// attachments stay empty (the server downloads photos async from
-		// the ids it receives).
-		if !batch {
-			edit, err := c.GetSearchPostEdit(context.Background(), impPostID)
-			die(err)
-			text := ""
-			if len(edit.Texts) > 0 {
-				text = edit.Texts[0].Text
-			}
-			payload.Texts = []hooppy.PostText{{Text: text, SourceID: 0}}
-			if !impNoAttachments {
-				// Build attachments — photos AND videos grouped into {type: "photos"} (UI behavior)
-				payload.Attachments = hooppy.SearchPostEditAttachments(edit.Attachments)
-			}
-		}
-		resp, err := c.ImportSearchPost(context.Background(), payload)
-		die(err)
-		printJSON(resp)
+		os.Exit(runImport(context.Background(), mustClient(), os.Stdout, os.Stderr, importArgs{
+			postID:        impPostID,
+			postIDs:       impPostIDs,
+			whenType:      impWhenType,
+			howType:       impHowType,
+			schedules:     impSchedules,
+			noAttachments: impNoAttachments,
+			stripVK:       impStripVK,
+		}))
 	}
 }
 
