@@ -462,13 +462,16 @@ type Post struct {
 	PostProjects []Project `json:"post_projects"`
 	// created_by: user id of the post's author (PostEditResponse.CreatedBy is int).
 	CreatedBy int `json:"created_by"`
-	// errors_for_source_ids: per-post publication failures. Measured: an
-	// ARRAY (the server sends [], not the object a prior fixture guessed).
-	// The item shape is NOT measured — modeled as []json.RawMessage so any
-	// array content decodes without aborting, and no struct fields are
-	// inferred from the field name (the rule this whole fix enforces).
-	// OPEN CONCERN: capture a post with non-empty errors to type the items.
-	ErrorsForSourceIDs []json.RawMessage `json:"errors_for_source_ids"`
+	// errors_for_source_ids: the source_ids of the networks a publication
+	// failed on (the same source_id space as sources.go — SourceVK=1,
+	// SourceOK=2, …). Measured on 12 published rows where the field is
+	// populated: an ARRAY in 12 of 12, and its 14 elements are plain
+	// INTEGERS (e.g. [2, 4] — the networks the post failed on). There is
+	// no map form and no abort risk, so []int is the honest model — and
+	// integers cannot carry an opaque token, which closes the credential
+	// concern a []json.RawMessage raised. An empty array (no failures)
+	// decodes to a non-nil zero-length slice.
+	ErrorsForSourceIDs []int `json:"errors_for_source_ids"`
 }
 
 // PostPublicationDate is the publication_date object returned in a GET
@@ -479,11 +482,18 @@ type Post struct {
 // and the two timestamps are integers that differ from each other (one
 // appears to carry a timezone offset). Both timestamps are kept; they are
 // not collapsed.
+//
+// Timestamp and SourceTimestamp are modelled as FlexInt, not bare int64:
+// measured as a JSON number in all 60 census rows, so this is not a live
+// break today — but on this API the string form of a numeric field has
+// already appeared twice (PostPhoto.UpdatedDate: numeric string ×12 of 53),
+// and a bare int64 aborts the whole list decode when it does. FlexInt's
+// Int64() accessor keeps callers unchanged. See issue #74 (the sweep).
 type PostPublicationDate struct {
-	Date            string `json:"date"`             // "29 Июля"-style display date
-	Time            string `json:"time"`             // "12:25"-style display time
-	Timestamp       int64  `json:"timestamp"`        // unix timestamp
-	SourceTimestamp int64  `json:"source_timestamp"` // unix timestamp (carries a timezone offset)
+	Date            string  `json:"date"`             // "29 Июля"-style display date
+	Time            string  `json:"time"`             // "12:25"-style display time
+	Timestamp       FlexInt `json:"timestamp"`        // unix timestamp (number in all 60 rows; FlexInt — a stringified numeric has appeared on this API)
+	SourceTimestamp FlexInt `json:"source_timestamp"` // unix timestamp carrying a tz offset (same polymorphism note as Timestamp)
 }
 
 // PostPhoto is the media descriptor carried in Post.Photo. Despite the
@@ -498,12 +508,12 @@ type PostPublicationDate struct {
 // representations:
 //
 //   - id arrives as a JSON number on one row and a JSON string on 52, but
-//     52 of 53 values are NON-NUMERIC tokens ("gohsHKYeG8pGbbXf" shape).
+//     52 of 53 values are NON-NUMERIC tokens ("fakeTokExample01" shape).
 //     It is an opaque identifier that happens to be numeric sometimes, so
 //     it is modelled as PhotoID (a string): a number on the wire is stored
 //     as its decimal text, an opaque token is stored untouched. Never
 //     parsed as an integer — there is nothing numeric about
-//     "gohsHKYeG8pGbbXf".
+//     "fakeTokExample01".
 //   - updated_date arrives as null (×2), a JSON number (×39), or a JSON
 //     numeric string (×12). Every non-null value parses as an integer. It
 //     is a nullable unix timestamp that is sometimes stringified, so it is
@@ -555,8 +565,13 @@ type PostSchedule struct {
 }
 
 // Metric is an engagement metric (views/likes/comments/reposts) on a Post.
-// Measured: null on unpublished posts (present and null, not absent). On
-// published posts the value shape is inferred from SearchPost (a different,
+// Measured: null on unpublished posts (present and null, not absent), AND
+// null on published posts too — 12 of 12 published rows on the measured
+// account have views: null. The populated metric shape is therefore
+// genuinely UNOBSERVED on this account: no recorded fixture (testdata/)
+// carries a populated Metric, and none can be produced from here without a
+// different account. The string/number shapes are covered only by the
+// hand-written TestPost_DecodeFullRow, INFERRED from SearchPost (a different,
 // scraped surface) which receives thousands-separated strings ("334,881");
 // the own-post list surface's published metric type is unverified, so a
 // number is plausible. Metric tolerates null, string, AND number via a
@@ -568,18 +583,38 @@ type PostSchedule struct {
 //
 // Accessors: Set reports whether a non-null value was present; String
 // returns the value as a string (the quoted content for a string, the raw
-// digits for a number, "" when unset).
+// digits for a number, "" when unset); Int parses the value with the same
+// thousands-separator-stripping rule as SearchPost.ViewsInt (so callers can
+// compare Post metrics without reimplementing the "334,881" parse).
 type Metric struct {
 	raw json.RawMessage
 	set bool
 }
 
 // UnmarshalJSON accepts null (→ unset), a JSON string, or a JSON number.
+// Any other shape (object/array) returns an error rather than silently
+// storing it — same doctrine as FlexInt/PhotoID: a shape change is loud,
+// not silent. (Without this guard {"a":1} would silently round-trip as a
+// string via String().)
 func (m *Metric) UnmarshalJSON(b []byte) error {
 	s := strings.TrimSpace(string(b))
 	if len(s) == 0 || s == "null" {
 		m.raw, m.set = nil, false
 		return nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		m.raw = append(json.RawMessage(nil), b...)
+		m.set = true
+		return nil
+	}
+	// Bare number — validate via json.Number so an object/array is rejected.
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("Metric: expected string or number, got %s: %w", s, err)
 	}
 	m.raw = append(json.RawMessage(nil), b...)
 	m.set = true
@@ -610,6 +645,20 @@ func (m Metric) String() string {
 	return string(m.raw)
 }
 
+// Int parses the metric value as an integer using the same
+// thousands-separator-stripping rule as SearchPost.ViewsInt (so a Post
+// metric of "334,881" yields 334881, and a bare number "1234" yields 1234).
+// Returns 0 with a nil error when unset/null. A malformed value (an
+// unexpected separator, a decimal-comma form) returns an error rather than
+// a silent 0 — the same discipline as parseMetricInt. Callers can compare
+// Post metrics without reimplementing the parse.
+func (m Metric) Int() (int, error) {
+	if !m.set {
+		return 0, nil
+	}
+	return parseMetricInt("Metric", m.String())
+}
+
 // FlexInt is an integer field the API encodes as EITHER a JSON number or a
 // JSON numeric string ("123"), and may be null. It is the right model for a
 // field whose values are ALL integers but whose wire form varies —
@@ -622,10 +671,18 @@ func (m Metric) String() string {
 //
 // FlexInt accepts a JSON number, a JSON string holding an integer, or null
 // (→ unset) via a custom UnmarshalJSON. The raw wire bytes are preserved so
-// MarshalJSON round-trips the exact form (string stays quoted, number stays
-// bare) and printJSON output stays clean. Int64() returns the typed value
-// regardless of the wire form; IsSet() reports whether a non-null value was
-// present.
+// MarshalJSON round-trips the exact form WHEN SET (string stays quoted,
+// number stays bare) and printJSON output stays clean. NOTE: a null/unset
+// FlexInt marshals as 0 (the int zero-value convention), NOT null — so a
+// null updated_date does NOT round-trip as null. Int64() returns the typed
+// value regardless of the wire form; IsSet() reports whether a non-null
+// value was present.
+//
+// SWEEP: FlexInt is applied here to PostPhoto.UpdatedDate and
+// PostPublicationDate.{Timestamp,SourceTimestamp}. Three sibling sites
+// (MediaItem.UpdatedDate, Photo.{ID,UpdatedDate}, SearchPostPhoto.ID) have
+// the same polymorphism and are confirmed broken today — tracked in
+// issue #74; each needs its own measurement.
 type FlexInt struct {
 	raw json.RawMessage
 	set bool
@@ -698,18 +755,23 @@ func (f FlexInt) Int64() int64 {
 
 // PhotoID is an opaque media identifier that the API encodes as EITHER a
 // JSON number or a JSON string — and, crucially, the string form is usually
-// a NON-NUMERIC token ("gohsHKYeG8pGbbXf", "5iwfr17ku4_9nhvcu4gf7" shape).
+// a NON-NUMERIC token ("fakeTokExample01", "synth_token_ab01cd" shape).
 // Of 53 censused PostPhoto.ID values only one was numeric; the other 52 are
 // opaque tokens. PhotoID is therefore a STRING, not an integer: a number on
 // the wire is stored as its decimal text, and an opaque token is stored
 // untouched. There is nothing numeric to parse — modelling it as an integer
 // (FlexInt) is the bug that shipped four times, because the first real call
 // hit a non-numeric token and FlexInt rejected it with
-// `FlexInt: string "dntn8okrta_xk1hsrk7m8" is not an integer`.
+// `FlexInt: string "synth_token_ef02gh" is not an integer`.
 //
 // PhotoID is a defined string type, so the accessor is the value itself:
-// number-form 456254128 and string-form "456254128" both yield "456254128",
-// and "gohsHKYeG8pGbbXf" survives verbatim. That equivalence is the point.
+// number-form 123456789 and string-form "123456789" both yield "123456789",
+// and "fakeTokExample01" survives verbatim. That equivalence is the point.
+//
+// SWEEP: PhotoID is applied here to PostPhoto.ID. Two sibling id sites
+// (MediaItem.ID, Photo.ID) and SearchPostPhoto.ID have the same
+// opaque-token-vs-number split and are confirmed broken today — tracked in
+// issue #74; each needs its own measurement.
 type PhotoID string
 
 // UnmarshalJSON accepts a JSON string (the common, opaque-token form) or a
@@ -730,7 +792,7 @@ func (p *PhotoID) UnmarshalJSON(b []byte) error {
 		*p = PhotoID(str)
 		return nil
 	}
-	// Bare number → store its decimal text (e.g. 456254128 → "456254128").
+	// Bare number → store its decimal text (e.g. 123456789 → "123456789").
 	var n json.Number
 	if err := json.Unmarshal(b, &n); err != nil {
 		return fmt.Errorf("PhotoID: expected string or number, got %s: %w", s, err)

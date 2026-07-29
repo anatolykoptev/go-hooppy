@@ -193,7 +193,7 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	// value, since the own-post surface's metric type is unverified.
 	row := `{
 		"id": 123456,
-		"text": "Весенний салат с редисом",
+		"text": "test post body",
 		"publication_date": {"date": "29 Июля", "time": "12:25", "timestamp": 1753770300, "source_timestamp": 1753773900},
 		"is_published": 1,
 		"is_ad": 0,
@@ -201,21 +201,21 @@ func TestPost_DecodeFullRow(t *testing.T) {
 		"is_attachments_in_process": 0,
 		"is_planned_by_networks": 1,
 		"is_planning_by_networks_needed": 0,
-		"views": "1 234,881",
+		"views": "1,234,881",
 		"likes": "456",
 		"comments": "78",
 		"reposts": "12",
 		"link": "https://vk.com/wall-1_2",
 		"source_link": "https://example.com/source",
 		"repost_link": "https://vk.com/wall-3_4",
-		"repost_title": "Оригинал",
+		"repost_title": "test repost title",
 		"photo": {"id": 10, "owner_id": 20, "post_id": "30", "access_key": "k", "source_id": 1, "type": "video", "title": "T", "description": "", "duration": 383, "preview": "https://example.invalid/x"},
 		"photos_amount": 3,
-		"pages": [{"id": 44567, "source_id": 1, "account_id": 33125, "social_page_id": "999", "social_page_name": "Группа", "social_page_photo": "https://pp.vk.me/p.jpg"}],
-		"post_schedules": [{"id": 101820, "name": "Утро"}],
-		"post_projects": [{"id": 92384, "name": "Рецепты"}],
+		"pages": [{"id": 123456, "source_id": 1, "account_id": 123457, "social_page_id": "999", "social_page_name": "test page name", "social_page_photo": "https://pp.vk.me/p.jpg"}],
+		"post_schedules": [{"id": 123458, "name": "test schedule name"}],
+		"post_projects": [{"id": 123459, "name": "test project name"}],
 		"created_by": 42,
-		"errors_for_source_ids": [{"source_id": 1}]
+		"errors_for_source_ids": [2, 4]
 	}`
 	var p Post
 	if err := json.Unmarshal([]byte(row), &p); err != nil {
@@ -224,7 +224,7 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	if p.ID != 123456 {
 		t.Errorf("ID = %d, want 123456", p.ID)
 	}
-	if p.Text != "Весенний салат с редисом" {
+	if p.Text != "test post body" {
 		t.Errorf("Text = %q, want the post body", p.Text)
 	}
 	if p.PublicationDate == nil {
@@ -236,14 +236,14 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	if p.PublicationDate.Time != "12:25" {
 		t.Errorf("PublicationDate.Time = %q, want %q", p.PublicationDate.Time, "12:25")
 	}
-	if p.PublicationDate.Timestamp != 1753770300 {
-		t.Errorf("PublicationDate.Timestamp = %d, want 1753770300", p.PublicationDate.Timestamp)
+	if got := p.PublicationDate.Timestamp.Int64(); got != 1753770300 {
+		t.Errorf("PublicationDate.Timestamp.Int64() = %d, want 1753770300", got)
 	}
 	// Both timestamps are kept and differ — do not collapse them.
-	if p.PublicationDate.SourceTimestamp != 1753773900 {
-		t.Errorf("PublicationDate.SourceTimestamp = %d, want 1753773900", p.PublicationDate.SourceTimestamp)
+	if got := p.PublicationDate.SourceTimestamp.Int64(); got != 1753773900 {
+		t.Errorf("PublicationDate.SourceTimestamp.Int64() = %d, want 1753773900", got)
 	}
-	if p.PublicationDate.Timestamp == p.PublicationDate.SourceTimestamp {
+	if p.PublicationDate.Timestamp.Int64() == p.PublicationDate.SourceTimestamp.Int64() {
 		t.Error("Timestamp and SourceTimestamp are equal — they should differ (one carries a tz offset)")
 	}
 	if p.IsPublished != 1 {
@@ -264,8 +264,14 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	if p.IsRepeated != 0 {
 		t.Errorf("IsRepeated = %d, want 0", p.IsRepeated)
 	}
-	if !p.Views.IsSet() || p.Views.String() != "1 234,881" {
+	if !p.Views.IsSet() || p.Views.String() != "1,234,881" {
 		t.Errorf("Views = %+v, want the string metric verbatim", p.Views)
+	}
+	// Metric.Int() parses the same thousands-separated shape as
+	// SearchPost.ViewsInt, so callers can compare Post metrics without
+	// reimplementing the "334,881" parse (issue #62 shape).
+	if got, err := p.Views.Int(); err != nil || got != 1234881 {
+		t.Errorf("Views.Int() = %d, %v, want 1234881, nil", got, err)
 	}
 	if !p.Likes.IsSet() || p.Likes.String() != "456" {
 		t.Errorf("Likes = %+v, want %q", p.Likes, "456")
@@ -279,7 +285,7 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	if p.RepostLink != "https://vk.com/wall-3_4" {
 		t.Errorf("RepostLink = %q", p.RepostLink)
 	}
-	if p.RepostTitle != "Оригинал" {
+	if p.RepostTitle != "test repost title" {
 		t.Errorf("RepostTitle = %q", p.RepostTitle)
 	}
 	if p.Photo == nil {
@@ -294,20 +300,23 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	if p.PhotosAmount != 3 {
 		t.Errorf("PhotosAmount = %d, want 3", p.PhotosAmount)
 	}
-	if len(p.Pages) != 1 || p.Pages[0].ID != 44567 || p.Pages[0].SocialPageName != "Группа" {
-		t.Errorf("Pages = %+v, want one page with id 44567", p.Pages)
+	if len(p.Pages) != 1 || p.Pages[0].ID != 123456 || p.Pages[0].SocialPageName != "test page name" {
+		t.Errorf("Pages = %+v, want one page with id 123456", p.Pages)
 	}
 	if p.CreatedBy != 42 {
 		t.Errorf("CreatedBy = %d, want 42", p.CreatedBy)
 	}
-	if len(p.PostSchedules) != 1 || p.PostSchedules[0].ID != 101820 || p.PostSchedules[0].Name != "Утро" {
-		t.Errorf("PostSchedules = %+v, want one {id:101820,name:Утро}", p.PostSchedules)
+	if len(p.PostSchedules) != 1 || p.PostSchedules[0].ID != 123458 || p.PostSchedules[0].Name != "test schedule name" {
+		t.Errorf("PostSchedules = %+v, want one {id:123458,name:test schedule name}", p.PostSchedules)
 	}
-	if len(p.PostProjects) != 1 || p.PostProjects[0].ID != 92384 || p.PostProjects[0].Name != "Рецепты" {
-		t.Errorf("PostProjects = %+v, want one {id:92384,name:Рецепты}", p.PostProjects)
+	if len(p.PostProjects) != 1 || p.PostProjects[0].ID != 123459 || p.PostProjects[0].Name != "test project name" {
+		t.Errorf("PostProjects = %+v, want one {id:123459,name:test project name}", p.PostProjects)
 	}
-	if len(p.ErrorsForSourceIDs) != 1 {
-		t.Errorf("ErrorsForSourceIDs = %d items, want 1 (array with one item)", len(p.ErrorsForSourceIDs))
+	// errors_for_source_ids is a []int: the source_ids of the networks the
+	// post failed on (same space as sources.go). Check the ids, not a raw
+	// length on json.RawMessage — the measurement found plain integers.
+	if len(p.ErrorsForSourceIDs) != 2 || p.ErrorsForSourceIDs[0] != 2 || p.ErrorsForSourceIDs[1] != 4 {
+		t.Errorf("ErrorsForSourceIDs = %v, want [2 4] (the source ids of the failed networks)", p.ErrorsForSourceIDs)
 	}
 
 	// Metrics as NUMBERS must also decode (Metric tolerates null, string,
@@ -330,6 +339,15 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	}
 	if pnul.Views.IsSet() {
 		t.Errorf("null Views = %+v, want unset (null → IsSet false)", pnul.Views)
+	}
+
+	// Metric.UnmarshalJSON has a shape guard (same doctrine as FlexInt/PhotoID):
+	// an object MUST abort the decode loudly, not silently round-trip as a
+	// string via String(). Three types in one diff, one doctrine.
+	badRow := `{"id": 9, "views": {"a": 1}}`
+	var pbad Post
+	if err := json.Unmarshal([]byte(badRow), &pbad); err == nil {
+		t.Error(`unmarshal {"views": {"a":1}}: nil error, want an error (object is not a valid Metric — a silent store is the bug)`)
 	}
 }
 
@@ -374,8 +392,8 @@ func TestPost_DecodeCredentialHygiene(t *testing.T) {
 		"text": "x",
 		"pages": [
 			{
-				"id": 44567, "source_id": 1, "account_id": 33125,
-				"social_page_id": "999", "social_page_name": "Группа",
+				"id": 123456, "source_id": 1, "account_id": 123457,
+				"social_page_id": "999", "social_page_name": "test page name",
 				"social_page_photo": "https://pp.vk.me/p.jpg",
 				"access_token": "SECRET_ACCESS_TOKEN_VALUE",
 				"bot_token": "SECRET_BOT_TOKEN_VALUE",
@@ -413,11 +431,11 @@ func TestPost_DecodeCredentialHygiene(t *testing.T) {
 	}
 	// The modelled page fields must still be present (the narrow struct
 	// kept the safe fields while dropping the tokens).
-	if !strings.Contains(got, `"social_page_name":"Группа"`) {
+	if !strings.Contains(got, `"social_page_name":"test page name"`) {
 		t.Errorf("marshalled Post lost the safe page field social_page_name:\n%s", got)
 	}
-	if len(p.Pages) != 1 || p.Pages[0].ID != 44567 {
-		t.Errorf("Pages = %+v, want one page with id 44567", p.Pages)
+	if len(p.Pages) != 1 || p.Pages[0].ID != 123456 {
+		t.Errorf("Pages = %+v, want one page with id 123456", p.Pages)
 	}
 }
 
@@ -455,8 +473,11 @@ func TestPage_RoundTrip(t *testing.T) {
 // This is the RED-on-revert test for the photo-type bug: Post.Photo was
 // typed string but the API sends an object, which aborted the entire
 // unmarshal. A hand-typed fixture encoded the same wrong guess, so the suite
-// was green over a command that could not run. This capture cannot lie about
-// the shape because it was recorded from the wire.
+// was green over a command that could not run. This SINGLE-ROW capture
+// cannot lie about the shape of one row because it was recorded from the
+// wire. (The multi-row polymorphic fixture used by
+// TestPost_DecodePolymorphicPhoto is CONSTRUCTED from these censused
+// shapes, not a verbatim recording — see that test's comment.)
 func TestPost_DecodeRealCapture(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "post_list_row.json"))
 	if err != nil {
@@ -513,9 +534,10 @@ func TestPost_DecodeRealCapture(t *testing.T) {
 	if len(p.PostProjects) != 1 || p.PostProjects[0].ID != 8 || p.PostProjects[0].Name != "A" {
 		t.Errorf("PostProjects = %+v, want one {id:8,name:A}", p.PostProjects)
 	}
-	// errors_for_source_ids is an array (empty here — a post with no errors).
+	// errors_for_source_ids is a []int (the failed networks' source_ids);
+	// empty here — a published post with no failures.
 	if len(p.ErrorsForSourceIDs) != 0 {
-		t.Errorf("ErrorsForSourceIDs = %d items, want 0 (empty array)", len(p.ErrorsForSourceIDs))
+		t.Errorf("ErrorsForSourceIDs = %v, want empty (no failed networks)", p.ErrorsForSourceIDs)
 	}
 
 	// pages[] items carry source_id + page_id. The narrow Page type captures
@@ -538,21 +560,29 @@ func TestPost_DecodeRealCapture(t *testing.T) {
 //     non-numeric token on the other 52. Model as PhotoID (string): a number
 //     on the wire stores its decimal text; an opaque token stores untouched.
 //     Never parse as an integer — there is nothing numeric about
-//     "gohsHKYeG8pGbbXf".
+//     "fakeTokExample01".
 //   - updated_date is a NULLABLE unix timestamp (null ×2, number ×39, numeric
 //     string ×12). Model as FlexInt: number-or-numeric-string, nil when null.
 //
-// The mixed fixture (testdata/post_list_rows_polymorphic.json) carries five
-// rows that differ in shape — the guard a single-row fixture could never be:
+// The mixed fixture (testdata/post_list_rows_polymorphic.json) is NOT a
+// verbatim multi-row wire recording. It is CONSTRUCTED: the KEY set and the
+// stable-field VALUE TYPES come from the real single-row capture
+// (post_list_row.json), and rows 1-4 vary ONLY photo.id/updated_date (and
+// id/is_published) across the censused polymorphic forms — placed
+// deliberately to exercise the split a single-row fixture could never
+// guard:
 //
 //   - row 0: photo null (text-only post → *PostPhoto decodes to nil)
 //   - row 1: photo.id NUMBER (11), updated_date NUMBER (1700000000)
 //   - row 2: photo.id NUMERIC STRING ("21"), updated_date NUMERIC STRING ("1800000000")
-//   - row 3: photo.id NON-NUMERIC STRING ("gohsHKYeG8pGbbXf"), updated_date NULL
+//   - row 3: photo.id NON-NUMERIC STRING ("fakeTokExample01"), updated_date NULL
 //   - row 4: photo.id NUMERIC STRING ("11" — same value as row 1's number form)
 //
-// Every KEY and every VALUE TYPE is preserved, including the
-// numeric-vs-opaque distinction. That distinction is the entire bug.
+// The null metrics on the published rows (is_published:1, views:null) ARE
+// faithful: measured 12 of 12 published rows have views:null, so the
+// populated metric shape is genuinely unobserved on this account (see the
+// Metric type doc). The numeric-vs-opaque distinction in photo.id is the
+// entire bug, and it is the one shape this constructed fixture guarantees.
 func TestPost_DecodePolymorphicPhoto(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "post_list_rows_polymorphic.json"))
 	if err != nil {
@@ -604,15 +634,15 @@ func TestPost_DecodePolymorphicPhoto(t *testing.T) {
 
 	// Row 3: photo.id is a NON-NUMERIC opaque token, updated_date is NULL.
 	// This is the row that aborted the decode when ID was FlexInt
-	// (`FlexInt: string "dntn8okrta_xk1hsrk7m8" is not an integer`). The
+	// (`FlexInt: string "synth_token_ef02gh" is not an integer`). The
 	// opaque token MUST survive untouched; null updated_date MUST decode
 	// (unset) without error.
 	r3 := resp.List[3]
 	if r3.Photo == nil {
 		t.Fatal("row 3 Photo = nil, want the opaque-token-form object")
 	}
-	if r3.Photo.ID != "gohsHKYeG8pGbbXf" {
-		t.Errorf("row 3 Photo.ID = %q, want \"gohsHKYeG8pGbbXf\" (non-numeric opaque token MUST survive untouched — the bug)", r3.Photo.ID)
+	if r3.Photo.ID != "fakeTokExample01" {
+		t.Errorf("row 3 Photo.ID = %q, want \"fakeTokExample01\" (non-numeric opaque token MUST survive untouched — the bug)", r3.Photo.ID)
 	}
 	if r3.Photo.UpdatedDate.IsSet() {
 		t.Errorf("row 3 Photo.UpdatedDate.IsSet() = true, want false (null → unset)")
