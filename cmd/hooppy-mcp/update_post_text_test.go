@@ -62,11 +62,14 @@ func findTool(t *testing.T, cs *mcp.ClientSession, name string) *mcp.Tool {
 
 // TestUpdatePostTextTool_RegisteredAndReachable verifies the safe text-only
 // tool is wired into registerTools (issue #49: a tool defined but never
-// registered is the failure class this repo has shipped) and that
-// hooppy_update_post's advertised description now warns the LLM that it
-// republishes immediately and drops the schedule, naming the text-only tool
-// as the right choice for editing a scheduled post. The warning must live in
-// the description the LLM reads when choosing, not in a doc comment.
+// registered is the failure class this repo has shipped) and that BOTH tool
+// descriptions carry the LLM-facing mitigation for issue #49 in load-bearing
+// terms an LLM reads when choosing between them. The descriptions are the
+// ONLY thing steering the LLM away from silently unscheduling a post — a
+// future reword that softens the hazard or the safety claim keeps the tool
+// reachable and the generic "schedule" keyword present, but the mitigation is
+// gone. These assertions pin the exact phrasing so such a softening fails the
+// gate, not silently ships.
 func TestUpdatePostTextTool_RegisteredAndReachable(t *testing.T) {
 	cs := newMCPClientSession(t)
 
@@ -74,14 +77,32 @@ func TestUpdatePostTextTool_RegisteredAndReachable(t *testing.T) {
 	if textTool.Description == "" {
 		t.Fatal("hooppy_update_post_text has an empty description — the LLM has nothing to choose it by")
 	}
+	// Safety claim on the text-only tool: it must state it preserves the
+	// schedule and does NOT republish immediately. These are the terms an LLM
+	// reads to pick this tool over the dangerous sibling; dropping either
+	// claim removes the reason to choose it and is an issue #49 regression.
+	if !strings.Contains(textTool.Description, "preserving its schedule") {
+		t.Errorf("hooppy_update_post_text description must state it preserves the schedule — this is the LLM-facing safety claim for issue #49 that steers the model toward this tool; missing \"preserving its schedule\": %q", textTool.Description)
+	}
+	if !strings.Contains(textTool.Description, "does NOT republish immediately") {
+		t.Errorf("hooppy_update_post_text description must state it does NOT republish immediately — this is the LLM-facing safety claim for issue #49 that distinguishes it from the dangerous sibling; missing \"does NOT republish immediately\": %q", textTool.Description)
+	}
 
 	updateTool := findTool(t, cs, "hooppy_update_post")
 	desc := updateTool.Description
-	if !strings.Contains(desc, "schedule") {
-		t.Errorf("hooppy_update_post description does not warn about the schedule: %q", desc)
+	// Hazard on the publish-now tool: it must state in unrecoverable terms
+	// that it republishes immediately AND drops the schedule. A vague
+	// "schedule behaviour may change" mention keeps a generic keyword but
+	// removes the warning an LLM needs to avoid unscheduling a post — an
+	// issue #49 regression. The exact phrasing is pinned, not a keyword.
+	if !strings.Contains(desc, "republishing it immediately") {
+		t.Errorf("hooppy_update_post description must state it republishes immediately — this is the LLM-facing hazard warning for issue #49; softening it lets the model silently unschedule a post; missing \"republishing it immediately\": %q", desc)
+	}
+	if !strings.Contains(desc, "drops the post out of any schedule") {
+		t.Errorf("hooppy_update_post description must state it drops the post out of any schedule — this is the LLM-facing hazard warning for issue #49; softening it lets the model silently unschedule a post; missing \"drops the post out of any schedule\": %q", desc)
 	}
 	if !strings.Contains(desc, "hooppy_update_post_text") {
-		t.Errorf("hooppy_update_post description does not name hooppy_update_post_text as the safe path: %q", desc)
+		t.Errorf("hooppy_update_post description does not name hooppy_update_post_text as the safe path — the redirect to the safe tool is the other half of the issue #49 mitigation: %q", desc)
 	}
 }
 
