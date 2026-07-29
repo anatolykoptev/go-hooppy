@@ -514,6 +514,154 @@ func TestImportSearchPost_SlotLookupFails(t *testing.T) {
 	}
 }
 
+// TestImportSearchPost_Slot403ProcessingRetry verifies that a 403 with a
+// "still processing" body is retried with backoff, and the slot is
+// eventually read back when the server stops returning 403. The stub
+// returns 403 with {"error":"post is still processing"} for the first 2
+// attempts, then 200 with the slot on the 3rd. The retry must succeed
+// without failing the import.
+//
+// RED-on-revert: if the retry is removed (GetPostEdit called directly), the
+// first 403 fails the read-back, SlotLookupError is set, and
+// PublicationDate is nil — the test fails at the PublicationDate check.
+func TestImportSearchPost_Slot403ProcessingRetry(t *testing.T) {
+	var editCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			w.Write([]byte(`{"id":92820377}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
+			n := atomic.AddInt32(&editCalls, 1)
+			if n <= 2 {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"post is still processing"}`))
+				return
+			}
+			w.Write([]byte(`{"id":92820377,"publication_date":{"date":"31.07.2026","hours":"14","minutes":"25"},"schedule_id":55}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        1001,
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost: a processing-403 that later succeeds must not fail the import, got: %v", err)
+	}
+	if resp.ID != 92820377 {
+		t.Errorf("ID = %d, want 92820377", resp.ID)
+	}
+	// The slot was read back after the retry succeeded.
+	if resp.PublicationDate == nil {
+		t.Fatal("PublicationDate = nil, want the slot read back after retry")
+	}
+	if resp.PublicationDate.Hours != "14" || resp.PublicationDate.Minutes != "25" {
+		t.Errorf("PublicationDate: hours=%q minutes=%q, want 14/25", resp.PublicationDate.Hours, resp.PublicationDate.Minutes)
+	}
+	if resp.SlotLookupError != "" {
+		t.Errorf("SlotLookupError = %q, want empty (retry succeeded)", resp.SlotLookupError)
+	}
+	// At least 3 edit calls (2 × 403 + 1 × 200).
+	if got := atomic.LoadInt32(&editCalls); got < 3 {
+		t.Errorf("GetPostEdit calls = %d, want >= 3 (2 processing-403 + 1 success)", got)
+	}
+}
+
+// TestImportSearchPost_Slot403ProcessingRetryExhausted verifies that when
+// the 403-processing condition persists beyond the retry budget, the
+// read-back fails gracefully: SlotLookupError is set, the id is still
+// returned, and the import is NOT failed (exit zero).
+func TestImportSearchPost_Slot403ProcessingRetryExhausted(t *testing.T) {
+	var editCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			w.Write([]byte(`{"id":92820377}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
+			atomic.AddInt32(&editCalls, 1)
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"post is still processing"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        1001,
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost: an exhausted retry must not fail the import, got: %v", err)
+	}
+	if resp.ID != 92820377 {
+		t.Errorf("ID = %d, want 92820377 (the id must still be returned)", resp.ID)
+	}
+	if resp.PublicationDate != nil {
+		t.Errorf("PublicationDate = %+v, want nil (read-back failed after retry exhausted)", resp.PublicationDate)
+	}
+	if resp.SlotLookupError == "" {
+		t.Error("SlotLookupError = empty, want a non-empty error message about the exhausted retry")
+	}
+	// Bounded: exactly 4 attempts (MaxAttempts), not more.
+	if got := atomic.LoadInt32(&editCalls); got != 4 {
+		t.Errorf("GetPostEdit calls = %d, want 4 (MaxAttempts, not unbounded)", got)
+	}
+}
+
+// TestImportSearchPost_Slot403PermissionsNotRetried verifies that a 403
+// WITHOUT a processing indicator (a real permissions denial) is NOT
+// retried — the read-back fails immediately with one edit call.
+func TestImportSearchPost_Slot403PermissionsNotRetried(t *testing.T) {
+	var editCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			w.Write([]byte(`{"id":92820377}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
+			atomic.AddInt32(&editCalls, 1)
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"insufficient plan"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        1001,
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{55},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost: a permissions 403 must not fail the import, got: %v", err)
+	}
+	if resp.ID != 92820377 {
+		t.Errorf("ID = %d, want 92820377", resp.ID)
+	}
+	if resp.SlotLookupError == "" {
+		t.Error("SlotLookupError = empty, want a non-empty error message")
+	}
+	// ONE edit call — a non-processing 403 is not retried.
+	if got := atomic.LoadInt32(&editCalls); got != 1 {
+		t.Errorf("GetPostEdit calls = %d, want 1 (permissions 403 not retried)", got)
+	}
+}
+
 // TestImportSearchPost_NoSlotForNonSchedule verifies that when when_type is
 // NOT 3, no read-back is attempted — the response carries only the id.
 func TestImportSearchPost_NoSlotForNonSchedule(t *testing.T) {

@@ -3,8 +3,11 @@ package hooppy
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
+
+	"github.com/anatolykoptev/go-kit/retry"
 )
 
 // fillScheduleSlots reads back the publication slot(s) the server assigned
@@ -84,7 +87,7 @@ func (c *Client) fillScheduleSlots(ctx context.Context, resp *PostIDResponse, wh
 
 	// Single-post path: server returned an id.
 	if resp.ID != 0 {
-		edit, err := c.GetPostEdit(ctx, resp.ID)
+		edit, err := c.getPostEditWithProcessingRetry(ctx, resp.ID)
 		if err != nil {
 			resp.SlotLookupError = fmt.Sprintf("slot lookup: GetPostEdit(%d): %v", resp.ID, err)
 			return
@@ -265,4 +268,75 @@ func (c *Client) fetchTimezoneOffset(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("GetSettings: %w", err)
 	}
 	return settings.TimezoneOffset, nil
+}
+
+// getPostEditWithProcessingRetry wraps GetPostEdit with a bounded retry for
+// the 403-still-processing condition. Immediately after a single-post
+// create, GET /posts/{id}/edit often returns HTTP 403 with a body
+// indicating the post is still being processed server-side (attachments
+// downloading, etc.). This is a transient condition that resolves in
+// seconds — not a permissions 403. A real permissions 403 (insufficient
+// plan, no access) would be consistent across retries and is NOT retried
+// (isProcessing403 checks the body for processing indicators).
+//
+// The retry is bounded: 4 attempts, 500ms initial delay, exponential
+// backoff, 3s max delay, 6s total budget. This is short enough to not
+// block a CLI caller perceptibly while covering the typical 1-3s processing
+// window. A non-processing 403 (or any non-403 error) is returned
+// immediately — only the processing-403 is retried.
+//
+// This retry is ONLY on the slot read-back path (fillScheduleSlots → single
+// post). GetPostEdit itself is not retried — callers who call GetPostEdit
+// directly get the raw server response.
+func (c *Client) getPostEditWithProcessingRetry(ctx context.Context, postID int) (*PostEditResponse, error) {
+	return retry.Do(ctx, retry.Options{
+		MaxAttempts:    4,
+		InitialDelay:   500 * time.Millisecond,
+		MaxDelay:       3 * time.Second,
+		MaxElapsedTime: 6 * time.Second,
+	}, func() (*PostEditResponse, error) {
+		edit, err := c.GetPostEdit(ctx, postID)
+		if err != nil {
+			if isProcessing403(err) {
+				return nil, err // retryable — retry.Do will retry
+			}
+			return nil, retry.Permanent(err) // non-processing error — stop immediately
+		}
+		return edit, nil
+	})
+}
+
+// isProcessing403 reports whether err is an APIError with HTTP 403 whose
+// body indicates the post is still being processed server-side (a transient
+// condition, not a permissions denial). The check is on the error message
+// (extracted from {"message": "..."} or {"error": "..."} by newAPIError)
+// and the raw body, matching common processing indicators in English and
+// Russian (Hooppy is a Russian service). A 403 without a processing
+// indicator is treated as a real permissions error and NOT retried.
+func isProcessing403(err error) bool {
+	ae, ok := err.(*APIError)
+	if !ok || ae.StatusCode != http.StatusForbidden {
+		return false
+	}
+	haystack := strings.ToLower(ae.Message + " " + string(ae.Body))
+	for _, indicator := range processing403Indicators {
+		if strings.Contains(haystack, indicator) {
+			return true
+		}
+	}
+	return false
+}
+
+// processing403Indicators are lowercase substrings that indicate a 403 is
+// transient (post still processing), not a permissions denial. Covers
+// English and Russian (Hooppy is a Russian service).
+var processing403Indicators = []string{
+	"process",
+	"processing",
+	"обрабатыва", // обрабатывается, обрабатывается...
+	"обработк",   // обработка, обработке...
+	"not ready",
+	"still",
+	"загружает",  // загружается (downloading)
+	"загрузк",    // загрузка, загрузке...
 }
