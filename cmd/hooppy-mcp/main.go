@@ -819,26 +819,60 @@ func registerUpdateProject(server *mcp.Server) {
 
 type updateScheduleInput struct {
 	ID    int    `json:"id" jsonschema:"Schedule ID to update."`
-	Name  string `json:"name" jsonschema:"Schedule name."`
-	State int    `json:"state,omitempty" jsonschema:"State: 1=active (default), 0=paused."`
+	Name  string `json:"name,omitempty" jsonschema:"Schedule name. Optional, but at least one of name or state must be set."`
+	State int    `json:"state,omitempty" jsonschema:"State: 1=active (default), 0=paused. Optional, but at least one of name or state must be set."`
 }
 
+// registerUpdateSchedule wires the schedule-safe update path. It delegates to
+// hooppy.UpdateScheduleFromEdit, which fetches the full schedule state via
+// GET /posts/schedules/{id}/edit (72 keys on the wire) and PUTs the complete
+// object back with only the caller's overrides applied — preserving every
+// field the tool does not expose as an input.
+//
+// This is the mitigation for issue #81 (the third instance of the
+// CLI-safe/MCP-destructive divergence class): the previous handler called the
+// raw UpdateSchedule partial writer, which sends only the 36 keys
+// SchedulePayload models and silently resets the other 36 — posting times,
+// page targets, captions, comments, buttons, start/stop dates, watermark,
+// UTM tags, and the two story/reels source-id lists — on an object that
+// decides where everything publishes. An LLM asked to "change the posting
+// time on that schedule" would match this tool's intent and wipe the
+// schedule. The sibling CLI `schedules update` was already routed through
+// UpdateScheduleFromEdit; the MCP handler is the worse surface (the client is
+// an LLM) and must not lag behind it.
 func registerUpdateSchedule(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_update_schedule",
-			Description: "Update a publication schedule on Hooppy by ID. Uses default settings for unset fields. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "Update a publication schedule on Hooppy by ID. Performs a read-modify-write: fetches the schedule's full editable state, applies only the fields you specify (name, state), and sends the complete object back — preserving every other field the API carries (posting times, page targets, captions, comments, buttons, start/stop dates, watermark, UTM tags, story/reels source-id lists, and ~50 more the tool does not expose as inputs). Do NOT expect a partial update: changing only the name through a partial writer would silently wipe the schedule's posting times and page selection. UNDOCUMENTED endpoint — may change without notice.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in updateScheduleInput) (*mcp.CallToolResult, error) {
+			if in.ID == 0 {
+				return errResult("id is required (use list_schedules to find IDs)")
+			}
+			if in.Name == "" && in.State == 0 {
+				return errResult("at least one of name or state is required")
+			}
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			payload := hooppy.NewSchedulePayload(in.Name)
-			if in.State != 0 {
-				payload.State = in.State
+			overrides := map[string]json.RawMessage{}
+			if in.Name != "" {
+				b, err := json.Marshal(in.Name)
+				if err != nil {
+					return errResult(fmt.Sprintf("marshal name: %v", err))
+				}
+				overrides["name"] = b
 			}
-			resp, err := c.UpdateSchedule(ctx, in.ID, payload)
+			if in.State != 0 {
+				b, err := json.Marshal(in.State)
+				if err != nil {
+					return errResult(fmt.Sprintf("marshal state: %v", err))
+				}
+				overrides["state"] = b
+			}
+			resp, err := c.UpdateScheduleFromEdit(ctx, in.ID, overrides)
 			if err != nil {
 				return errResult(err.Error())
 			}

@@ -2,6 +2,7 @@ package hooppy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -268,9 +269,26 @@ func NewAllListEnvelope[T any](list []T, totalRows int, idFunc func(T) int) (All
 // Use NewSchedulePayload(name) to get a payload with sensible defaults,
 // then override fields as needed.
 //
+// CreateSchedule calls payload.Validate() before any request and refuses
+// locally if the mode invariant is unmet (publication_how_type=1 with no
+// selected_pages_by_source_ids, or how_type=2 with project_id=0). The error
+// names the invariant and what would satisfy it — a server 500 that says only
+// "Undefined index: <key>" teaches the caller nothing.
+//
+// NOTE: SchedulePayload models 36 of the 72 keys the server requires on this
+// strictly full-state endpoint. Even with the mode invariant satisfied, the
+// server may 500 on a missing key that SchedulePayload does not model. The
+// proven create path is read-modify-write from an existing schedule's /edit
+// response (see UpdateScheduleFromEdit); SchedulePayload-based create is
+// kept for callers who can supply the full field set, but the honest default
+// (NewSchedulePayload) fails Validate() until the caller completes it.
+//
 // UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
 // Discovered via API probing — may change without notice.
 func (c *Client) CreateSchedule(ctx context.Context, payload SchedulePayload) (*ScheduleResponse, error) {
+	if err := payload.Validate(); err != nil {
+		return nil, err
+	}
 	var resp ScheduleResponse
 	if err := c.doPOST(ctx, pathSchedules, payload, &resp); err != nil {
 		return nil, err
@@ -282,6 +300,28 @@ func (c *Client) CreateSchedule(ctx context.Context, payload SchedulePayload) (*
 // The payload must include ALL required fields (use NewSchedulePayload then
 // override, or reuse the fields from an existing Schedule).
 //
+// WARNING — PARTIAL WRITER, DROPS UNMODELLED FIELDS (issue #66):
+// SchedulePayload models 36 of the 72 keys the server carries on
+// GET /posts/schedules/{id}/edit. PUTting a SchedulePayload sends only those
+// 36 keys; the other 36 (including times, posts_hashtags, posts_links,
+// projects, selected_albums_by_source_ids, social_pages_by_accounts,
+// social_albums_by_pages, watermarks, and ~24 more the struct does not name)
+// are ABSENT from the request body. The server treats PUT as full-state, so
+// those fields are reset to their zero/empty values — a schedule's posting
+// times, page selection, and project binding can be silently destroyed by a
+// call that intended to change only the name.
+//
+// For any update that must preserve the schedule's existing state, use
+// UpdateScheduleFromEdit instead — it fetches the full /edit response, applies
+// the caller's change, and sends the complete object back so no unmodelled
+// field is dropped. The CLI `schedules update` command routes through
+// UpdateScheduleFromEdit for this reason.
+//
+// UpdateSchedule does NOT call Validate() — it is kept as a low-level seam
+// for callers who construct a full payload themselves and do not want a guard
+// they have already satisfied. If you are not certain you have a full payload,
+// use UpdateScheduleFromEdit.
+//
 // UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
 // Discovered via API probing — may change without notice.
 func (c *Client) UpdateSchedule(ctx context.Context, id int, payload SchedulePayload) (*ScheduleResponse, error) {
@@ -290,6 +330,122 @@ func (c *Client) UpdateSchedule(ctx context.Context, id int, payload SchedulePay
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// UpdateScheduleFromEdit is a read-modify-write helper for updating a single
+// schedule without dropping unmodelled fields. It:
+//  1. Fetches the full schedule state via GetScheduleEdit (72 keys on the wire).
+//  2. Unmarshals the response into map[string]json.RawMessage — every key's
+//     raw bytes are preserved, including the 36 keys SchedulePayload does not
+//     model.
+//  3. Applies the caller's overrides (each value is JSON-marshalled and
+//     replaces the corresponding key's RawMessage).
+//  4. PUTs the complete object back.
+//
+// This is the mechanism the controller verified live: a round trip through
+// this helper with a change to one field leaves every other field byte-identical
+// on the wire. The test (TestUpdateScheduleFromEdit_ByteIdentity) asserts on
+// the decoded request body, key by key — not on the Go struct, which by
+// definition cannot show the fields it does not model.
+//
+// overrides is a map of JSON field name → raw JSON value. Use ScheduleOverride
+// to build it from typed values:
+//
+//	overrides, err := hooppy.ScheduleOverride("name", "New Name")
+//
+// To compose multiple overrides, build the map directly (each value must be
+// JSON-marshalled bytes):
+//
+//	overrides := map[string]json.RawMessage{}
+//	nameBytes, _ := json.Marshal("New Name")
+//	overrides["name"] = nameBytes
+//	stateBytes, _ := json.Marshal(1)
+//	overrides["state"] = stateBytes
+//
+// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
+// Discovered via API probing — may change without notice.
+func (c *Client) UpdateScheduleFromEdit(ctx context.Context, id int, overrides map[string]json.RawMessage) (*ScheduleResponse, error) {
+	if id == 0 {
+		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: id is required (got 0)")
+	}
+	if len(overrides) == 0 {
+		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: at least one override is required (got empty map)")
+	}
+	// 1. Fetch the raw /edit response body — NOT decoded into ScheduleEditResponse,
+	//    which would drop the 36 unmodelled keys. We need the raw bytes.
+	rawBody, err := c.doGETRaw(ctx, fmt.Sprintf(pathScheduleEdit, id))
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: fetch /edit: %w", err)
+	}
+	// 2. Unmarshal into map[string]json.RawMessage — preserves every key's
+	//    raw value bytes. json.RawMessage is []byte, so re-marshalling carries
+	//    the exact wire form through (numbers stay numbers, strings stay
+	//    strings, the hostile "1,2,7,9" stays "1,2,7,9").
+	var fullState map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &fullState); err != nil {
+		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: decode /edit response: %w", err)
+	}
+	// 3. Refuse a near-empty /edit response before it can become the base of
+	//    a full-state write. A 200 with `{}` or a truncated object unmarshals
+	//    successfully (json.Unmarshal of `{}` into a map is a no-op success),
+	//    so the existing malformed-response guards (non-2xx, empty body, HTML
+	//    — each fails to unmarshal) all pass through `{}`. Applying overrides
+	//    to an empty map and PUTting the result would write a near-empty
+	//    object over a live schedule and silently destroy every field the
+	//    overrides do not touch — page targets, times, captions, buttons,
+	//    start/stop dates. Irreversible, and reported as success.
+	//
+	//    A zero-key or near-empty 200 is not exotic: a server-side bug, a
+	//    transient 200 with an empty object, a proxy that strips the body, an
+	//    auth edge that returns `{}` instead of 401. A `len == 0` test just
+	//    moves the cliff — a one- or two-key response is nearly as
+	//    destructive. Require the state to be RECOGNISABLY a schedule before
+	//    it can be used as the base of a full-state write: the structural keys
+	//    a /edit response always carries — id (identity), name (the human
+	//    handle, a required field), and publication_how_type (the mode
+	//    invariant: 1=manual, 2=by-project — the structural choice that
+	//    defines what the schedule IS and which other fields are required).
+	//    A response missing any of these is not a schedule's editable state,
+	//    whatever else it carries — refuse, name what was missing and how
+	//    many keys did arrive, never issue the PUT. The failure is an error
+	//    return, not a partial write.
+	requiredStructuralKeys := []string{"id", "name", "publication_how_type"}
+	var missing []string
+	for _, k := range requiredStructuralKeys {
+		if _, ok := fullState[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: /edit response is not a recognisable schedule (got %d key(s), missing structural key(s) %v) — refusing to use a truncated/empty state as the base of a full-state write that would destroy every field not in the overrides", len(fullState), missing)
+	}
+	// 4. Apply overrides — replace the RawMessage for each overridden key.
+	for key, val := range overrides {
+		if len(val) == 0 {
+			return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: override for %q is empty (nil json.RawMessage)", key)
+		}
+		fullState[key] = val
+	}
+	// 5. Marshal the complete map and PUT it.
+	body, err := json.Marshal(fullState)
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: encode body: %w", err)
+	}
+	var resp ScheduleResponse
+	if err := c.doPUTRaw(ctx, fmt.Sprintf(pathScheduleDelete, id), body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ScheduleOverride builds a single-field override map for UpdateScheduleFromEdit.
+// The value is JSON-marshalled. Returns an error if marshalling fails.
+func ScheduleOverride(key string, value interface{}) (map[string]json.RawMessage, error) {
+	b, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: ScheduleOverride: marshal %q: %w", key, err)
+	}
+	return map[string]json.RawMessage{key: b}, nil
 }
 
 // DeleteSchedule deletes a schedule via DELETE /posts/schedules/{id}.
