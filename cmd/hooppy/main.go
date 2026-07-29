@@ -505,6 +505,67 @@ func registerSchedules(root *cobra.Command) {
 		die(err)
 		printJSON(resp)
 	}
+
+	// schedules times — print a schedule's posting slots per weekday
+	timesCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
+		Name:  "times",
+		Short: "Print a schedule's posting slots per weekday (undocumented endpoint)",
+	})
+	timesCmd.Run = func(_ *cobra.Command, args []string) {
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: hooppy schedules times <id>")
+			os.Exit(1)
+		}
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		edit, err := c.GetScheduleEdit(context.Background(), id)
+		die(err)
+		printJSON(buildScheduleTimesOutput(edit))
+	}
+}
+
+// scheduleDaySlot is one posting slot in the `schedules times` output.
+type scheduleDaySlot struct {
+	Hours   int64 `json:"hours"`
+	Minutes int64 `json:"minutes"`
+}
+
+// scheduleDayOutput is one weekday's entry in the `schedules times` output.
+// The array ordering (Mon..Sun) is structural — a map would be re-sorted
+// alphabetically by encoding/json, destroying the week order the command
+// exists to present.
+type scheduleDayOutput struct {
+	Day   string            `json:"day"`
+	Slots []scheduleDaySlot `json:"slots"`
+}
+
+// buildScheduleTimesOutput transforms a ScheduleEditResponse.Times (an
+// ordered 7-element slice, Mon..Sun) into the ordered array shape emitted
+// by `schedules times`. Each element carries the day name and that day's
+// slots, so the ordering cannot be re-sorted by a marshaller. All 7 days
+// are emitted including empty ones (an absent Tuesday and a Tuesday with
+// no slots read identically otherwise). Slots is always a non-nil empty
+// array, never null. If the API returns more than 7 day-arrays, the extra
+// elements keep the day%d fallback name.
+func buildScheduleTimesOutput(edit *hooppy.ScheduleEditResponse) []scheduleDayOutput {
+	weekdays := []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+	out := make([]scheduleDayOutput, 0, len(edit.Times))
+	for i, day := range edit.Times {
+		dayName := fmt.Sprintf("day%d", i)
+		if i < len(weekdays) {
+			dayName = weekdays[i]
+		}
+		slots := make([]scheduleDaySlot, 0, len(day))
+		for _, s := range day {
+			slots = append(slots, scheduleDaySlot{
+				Hours:   s.Hours.Int64(),
+				Minutes: s.Minutes.Int64(),
+			})
+		}
+		out = append(out, scheduleDayOutput{Day: dayName, Slots: slots})
+	}
+	return out
 }
 
 // --- files ---
@@ -941,7 +1002,7 @@ func registerSearch(root *cobra.Command) {
 	var rwDate, rwHours, rwMinutes string
 	var rwNoAttachments bool
 	rewriteCmd.Flags().IntVar(&rwPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
-	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). The server assigns schedule slots in the given order. Per-post attachment download is skipped in batch mode — use --post-id for attachment preservation. Batch rewrite CANNOT override text (the payload shape cannot express per-post text), so --text is rejected with --post-ids; --post-ids alone keeps each post's original text (like 'search import --post-ids').")
+	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Schedule slots are reported in publication order (the queue's own order), not the order given on the command line. Per-post attachment download is skipped in batch mode — use --post-id for attachment preservation. Batch rewrite CANNOT override text (the payload shape cannot express per-post text), so --text is rejected with --post-ids; --post-ids alone keeps each post's original text (like 'search import --post-ids').")
 	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (required for --post-id; NOT allowed with --post-ids — batch rewrite cannot express per-post text; omit --text with --post-ids to keep each post's original text)")
 	rewriteCmd.Flags().StringVar(&rwPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
 	rewriteCmd.Flags().IntVar(&rwWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
@@ -1019,7 +1080,7 @@ func registerSearch(root *cobra.Command) {
 	var impWhenType, impHowType int
 	var impNoAttachments bool
 	importCmd.Flags().IntVar(&impPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
-	importCmd.Flags().StringVar(&impPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). The server assigns schedule slots in the given order. Batch import keeps each post's ORIGINAL text (no per-post text override) and strips attachments — the server downloads photos async from the ids it receives. Use --post-id for a single post to pull its text/attachments from the edit endpoint.")
+	importCmd.Flags().StringVar(&impPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Schedule slots are reported in publication order (the queue's own order), not the order given on the command line. Batch import keeps each post's ORIGINAL text (no per-post text override) and strips attachments — the server downloads photos async from the ids it receives. Use --post-id for a single post to pull its text/attachments from the edit endpoint.")
 	importCmd.Flags().IntVar(&impWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule")
 	importCmd.Flags().IntVar(&impHowType, "how-type", 2, "publication how type (2=by schedule pages)")
 	importCmd.Flags().StringVar(&impSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")

@@ -282,10 +282,30 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
 		return nil, fmt.Errorf("hooppy: CopySearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
 	}
+	// Before snapshot for slot recovery: when when_type=3, snapshot the
+	// schedule's posts BEFORE the create so fillScheduleSlots can diff
+	// after. CopySearchPost is always single (SearchPostIDs is refused
+	// above), so idsSentCount=1 — a single create is a batch of one and
+	// uses the same snapshot-diff path. Walk ALL pages (default page size
+	// is 20); a single-page snapshot would miss pre-existing posts beyond
+	// page 1 and mis-attribute them as "created". See fillScheduleSlots
+	// for WHY the list surface is used instead of GET /posts/{id}/edit.
+	var beforeSnapshot []Post
+	var beforeErr error
+	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) > 0 {
+		beforeSnapshot, _, beforeErr = c.ListAllPostsWithTotal(ctx, ListPostsFilter{ScheduleID: payload.SchedulesIDs[0]})
+		// A failed before snapshot is NOT fatal — the create proceeds,
+		// and fillScheduleSlots reports the failure in SlotLookupError.
+	}
 	var resp PostIDResponse
 	if err := c.doPUT(ctx, pathPostsCopy, payload, &resp); err != nil {
 		return nil, err
 	}
+	// Report the assigned slot when the post was created into a schedule
+	// (when_type=3). Best-effort: a lookup failure populates
+	// SlotLookupError, not an error return — the post exists. CopySearchPost
+	// is always single, so idsSentCount=1.
+	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs, beforeSnapshot, beforeErr, 1)
 	return &resp, nil
 }
 
@@ -489,6 +509,28 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
 		return nil, fmt.Errorf("hooppy: RewriteSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
 	}
+	// Before snapshot for slot recovery: when when_type=3, snapshot the
+	// schedule's posts BEFORE the create so fillScheduleSlots can diff
+	// after. This fires for BOTH single and batch — a single create is a
+	// batch of one and uses the same snapshot-diff path (the server returns
+	// {"id": ...} for a single, {"success": true} for a batch, but the diff
+	// recovers the created ids from the list either way). Walk ALL pages
+	// (default page size is 20); a single-page snapshot would miss
+	// pre-existing posts beyond page 1, causing them to be mis-attributed
+	// as "created" by the diff. See fillScheduleSlots for WHY the list
+	// surface is used instead of GET /posts/{id}/edit.
+	idsSentCount := len(payload.SearchPostIDs)
+	if idsSentCount == 0 {
+		// Scalar single-post form (SearchPostID).
+		idsSentCount = 1
+	}
+	var beforeSnapshot []Post
+	var beforeErr error
+	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) > 0 {
+		beforeSnapshot, _, beforeErr = c.ListAllPostsWithTotal(ctx, ListPostsFilter{ScheduleID: payload.SchedulesIDs[0]})
+		// A failed before snapshot is NOT fatal — the create proceeds,
+		// and fillScheduleSlots reports the failure in SlotLookupError.
+	}
 	// POST /posts with as_copy=1 — same format the UI uses.
 	body := struct {
 		AsCopy               int              `json:"as_copy"`
@@ -517,6 +559,10 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	if err := c.doPOST(ctx, pathPosts, body, &resp); err != nil {
 		return nil, err
 	}
+	// Report the assigned slot when the post was created into a schedule
+	// (when_type=3). Best-effort: a lookup failure populates
+	// SlotLookupError, not an error return — the post exists.
+	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs, beforeSnapshot, beforeErr, idsSentCount)
 	return &resp, nil
 }
 
@@ -625,6 +671,28 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
 		return nil, fmt.Errorf("hooppy: ImportSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
 	}
+	// Before snapshot for slot recovery: when when_type=3, snapshot the
+	// schedule's posts BEFORE the create so fillScheduleSlots can diff
+	// after. This fires for BOTH single and batch — a single create is a
+	// batch of one and uses the same snapshot-diff path (the server returns
+	// {"id": ...} for a single, {"success": true} for a batch, but the diff
+	// recovers the created ids from the list either way). Walk ALL pages
+	// (default page size is 20); a single-page snapshot would miss
+	// pre-existing posts beyond page 1, causing them to be mis-attributed
+	// as "created" by the diff. See fillScheduleSlots for WHY the list
+	// surface is used instead of GET /posts/{id}/edit.
+	idsSentCount := len(payload.SearchPostIDs)
+	if idsSentCount == 0 {
+		// Scalar single-post form (SearchPostID).
+		idsSentCount = 1
+	}
+	var beforeSnapshot []Post
+	var beforeErr error
+	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) > 0 {
+		beforeSnapshot, _, beforeErr = c.ListAllPostsWithTotal(ctx, ListPostsFilter{ScheduleID: payload.SchedulesIDs[0]})
+		// A failed before snapshot is NOT fatal — the create proceeds,
+		// and fillScheduleSlots reports the failure in SlotLookupError.
+	}
 	body := struct {
 		AsCopy               int              `json:"as_copy"`
 		PublicationWhenType  int              `json:"publication_when_type"`
@@ -652,5 +720,9 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 	if err := c.doPUT(ctx, pathPostsImport, body, &resp); err != nil {
 		return nil, err
 	}
+	// Report the assigned slot when the post was created into a schedule
+	// (when_type=3). Best-effort: a lookup failure populates
+	// SlotLookupError, not an error return — the post exists.
+	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs, beforeSnapshot, beforeErr, idsSentCount)
 	return &resp, nil
 }

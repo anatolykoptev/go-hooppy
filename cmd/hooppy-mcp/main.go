@@ -45,6 +45,7 @@ func registerTools(server *mcp.Server) {
 	registerUploadDocument(server)
 	registerListProjects(server)
 	registerListSchedules(server)
+	registerGetScheduleEdit(server)
 	// Undocumented endpoints (not in OpenAPI spec v0.1.0)
 	registerCreateSchedule(server)
 	registerUpdateSchedule(server)
@@ -522,6 +523,35 @@ func registerListSchedules(server *mcp.Server) {
 				return jsonResult(env)
 			}
 			resp, err := c.ListSchedules(ctx, in.Page)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- get_schedule_edit (undocumented endpoint) ---
+
+type getScheduleEditInput struct {
+	ID int `json:"id" jsonschema:"Schedule ID to fetch the editable state for (use list_schedules to find IDs). REQUIRED."`
+}
+
+func registerGetScheduleEdit(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_get_schedule_edit",
+			Description: "Get a schedule's full editable state, including its posting times (an array of 7 weekday arrays, each holding that day's time slots). This is the endpoint that models the schedule's times — the list_schedules response does not carry them. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in getScheduleEditInput) (*mcp.CallToolResult, error) {
+			if in.ID == 0 {
+				return errResult("id is required (use list_schedules to find IDs)")
+			}
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.GetScheduleEdit(ctx, in.ID)
 			if err != nil {
 				return errResult(err.Error())
 			}

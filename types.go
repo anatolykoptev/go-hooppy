@@ -138,6 +138,159 @@ type ScheduleResponse struct {
 	Schedules []Schedule `json:"schedules"`
 }
 
+// ScheduleTimeSlot is one time slot in a schedule's times array. Both Hours
+// and Minutes are FlexInt because the API encodes them polymorphically:
+// measured across several schedules, minutes arrived as a JSON number in 21
+// values and as a JSON string ("00") in 7; hours was a number in every sample
+// but is the same field family, so it is treated the same way. A bare int
+// here aborts the whole decode — the bug this repo has shipped five times.
+// FlexInt already handles number-or-numeric-string; reusing it rather than
+// inventing a second one.
+type ScheduleTimeSlot struct {
+	Hours   FlexInt `json:"hours"`
+	Minutes FlexInt `json:"minutes"`
+}
+
+// ScheduleEditResponse is returned by GET /posts/schedules/{id}/edit. It
+// carries 72 keys — three more than the list response — including ten fields
+// the list never returns: times, posts_hashtags, posts_links, project_id,
+// projects, selected_pages_by_source_ids, selected_albums_by_source_ids,
+// social_pages_by_accounts, social_albums_by_pages, watermarks.
+//
+// times is the posting schedule itself: an array of 7 arrays, one per
+// weekday, each holding that day's slots (ScheduleTimeSlot). A weekday with
+// no slots is an empty array. That is how a "ПН/СР/ЧТ" schedule is expressed
+// — days with slots and days without.
+//
+// Field types are chosen from the evidence in the issue (measured, not
+// inferred from the name):
+//   - project_id: int (measured).
+//   - selected_pages_by_source_ids / selected_albums_by_source_ids:
+//     map[int][]int — same shape as PostEditResponse.SelectedPagesBySourceIDs
+//     (source_id → list of page/album ids).
+//   - social_pages_by_accounts: []SocialPagesByAccount — an ARRAY, despite
+//     the "by_accounts" suffix reading like a map keyed by account id. This
+//     is the sixth instance on this API of a name implying the wrong shape
+//     (errors_for_source_ids was an array of ints, not a map; photo was an
+//     object, not a string). Each element is {account, pages}; the account
+//     and page sub-objects use a DIFFERENT field set from the accounts-surface
+//     Account/Page types (social_id/name/photo/link, not social_account_id/
+//     social_account_name/...), so they get their own narrow types —
+//     SocialPagesAccount and SocialPagesPage — which list ONLY the safe
+//     fields measured on the wire. The OAuth tokens page objects carry
+//     elsewhere in this API (access_token, bot_token, refresh_token,
+//     password, wp_app_password, access_token_secret) are intentionally NOT
+//     modelled and therefore cannot reach the marshalled output. See
+//     TestScheduleEdit_DecodeCredentialHygiene.
+//   - projects: []Project — array of full project objects (id, user_id,
+//     position, name, is_deleted, publication_where_type, posts_count,
+//     watermark_id, utm_tags, ...). The existing narrow Project type (id/
+//     name) FITS: Go's encoding/json silently ignores the extra fields, so
+//     the decode succeeds and captures the two fields callers need. Reused
+//     rather than widened — a wider struct would model fields nobody reads
+//     and risk a wrong-guess abort on an unmeasured nested type.
+//   - watermarks: []Watermark — array of narrow watermark objects (no
+//     credential fields).
+//   - posts_hashtags, posts_links: json.RawMessage — measured as objects,
+//     but the key/value shape is not evidenced; RawMessage is the one choice
+//     that cannot abort the decode on a wrong guess.
+//   - social_albums_by_pages: json.RawMessage — an EMPTY ARRAY in every
+//     sample; the element shape is therefore UNOBSERVED. RawMessage avoids
+//     guessing a struct that would abort the decode once a non-empty
+//     response arrives.
+//
+// UNDOCUMENTED: GET /posts/schedules/{id}/edit is not in the public OpenAPI
+// spec (v0.1.0). Discovered via API probing — may change without notice.
+type ScheduleEditResponse struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	// Times is the posting schedule: 7 arrays (one per weekday), each
+	// holding that day's slots. A weekday with no slots is an empty array.
+	Times [][]ScheduleTimeSlot `json:"times"`
+	// The ten list-absent fields (issue #69).
+	PostsHashtags             json.RawMessage        `json:"posts_hashtags"` // object — key/value shape not measured
+	PostsLinks                json.RawMessage        `json:"posts_links"`    // object — key/value shape not measured
+	ProjectID                 int                    `json:"project_id"`
+	Projects                  []Project              `json:"projects"`
+	SelectedPagesBySourceIDs  map[int][]int          `json:"selected_pages_by_source_ids"`
+	SelectedAlbumsBySourceIDs map[int][]int          `json:"selected_albums_by_source_ids"`
+	SocialPagesByAccounts     []SocialPagesByAccount `json:"social_pages_by_accounts"`
+	SocialAlbumsByPages       json.RawMessage        `json:"social_albums_by_pages"` // empty array in every sample; element shape unobserved
+	Watermarks                []Watermark            `json:"watermarks"`
+}
+
+// SocialPagesByAccount is one element of the social_pages_by_accounts array
+// on GET /posts/schedules/{id}/edit: a connected account and the pages
+// available to it for this schedule. The field name reads like a map keyed
+// by account id, but the wire shape is an ARRAY of these objects — the
+// sixth name-implies-wrong-shape instance on this API.
+//
+// Narrow: only the account and pages sub-objects are modelled, and each of
+// those lists only the safe fields measured on the wire (see SocialPagesAccount
+// and SocialPagesPage). The OAuth tokens page objects carry elsewhere in this
+// API are NOT modelled and cannot reach the marshalled output — see
+// TestScheduleEdit_DecodeCredentialHygiene.
+type SocialPagesByAccount struct {
+	Account SocialPagesAccount `json:"account"`
+	Pages   []SocialPagesPage  `json:"pages"`
+}
+
+// SocialPagesAccount is the account sub-object inside a
+// social_pages_by_accounts element. Its field set DIFFERS from the
+// accounts-surface Account type (social_id/name/photo/link here, not
+// social_account_id/social_account_name/social_account_photo), so it gets
+// its own narrow type rather than reusing Account.
+//
+// Field types from the measured capture (15 elements):
+//   - id: number (int) — the account's internal id.
+//   - social_id: STRING — the same number-beside-stringified-id pattern that
+//     bit photo.id; typed string, not int, because the wire sends a string.
+//   - source_id: number (int).
+//   - name, photo, link: strings (photo/link are URLs).
+//
+// No token fields are modelled. Page-shaped objects elsewhere on this API
+// carry access_token/bot_token/refresh_token/password/wp_app_password/
+// access_token_secret; this account sub-object was not observed carrying
+// them, but the narrow modelling guarantees they cannot leak even if a
+// future response includes them.
+type SocialPagesAccount struct {
+	ID       int    `json:"id"`
+	SocialID string `json:"social_id"`
+	SourceID int    `json:"source_id"`
+	Name     string `json:"name"`
+	Photo    string `json:"photo"`
+	Link     string `json:"link"`
+}
+
+// SocialPagesPage is one page inside a social_pages_by_accounts element's
+// pages array. Its field set DIFFERS from the accounts-surface Page type
+// (social_id/type/name/alias/photo/link here, not social_page_id/
+// social_page_name/social_page_photo/page_id), so it gets its own narrow
+// type rather than reusing Page.
+//
+// Field types from the measured capture:
+//   - id: number (int).
+//   - social_id: STRING — number-beside-stringified-id pattern; typed string.
+//   - type: string (e.g. "board").
+//   - name, alias, photo, link: strings.
+//
+// No token fields are modelled. This is the credential-hygiene-critical
+// surface: page-shaped objects on this API carry live OAuth tokens
+// (access_token, bot_token, refresh_token, password, wp_app_password,
+// access_token_secret). The sample showed only safe fields, but the sample
+// is one account's worth — the narrow struct guarantees the token values
+// are dropped at decode and absent from any re-marshal, so a credential
+// cannot reach stdout via printJSON. See TestScheduleEdit_DecodeCredentialHygiene.
+type SocialPagesPage struct {
+	ID       int    `json:"id"`
+	SocialID string `json:"social_id"`
+	Type     string `json:"type"`
+	Name     string `json:"name"`
+	Alias    string `json:"alias"`
+	Photo    string `json:"photo"`
+	Link     string `json:"link"`
+}
+
 // DeleteResponse is returned by DELETE endpoints (schedules, projects).
 type DeleteResponse struct {
 	Success bool `json:"success"`
@@ -160,6 +313,31 @@ type User struct {
 // UserResponse wraps GET /users/me.
 type UserResponse struct {
 	User User `json:"user"`
+}
+
+// SettingsResponse is returned by GET /users/settings. Narrowly modelled:
+// only timezone_id, timezone_offset, and the timezones array ({id, name})
+// are kept. The response carries api_token, gpt_key, and ru_captcha_key —
+// NONE of them are modelled, so they are dropped at decode and absent from
+// any re-marshal. A credential cannot reach stdout via printJSON. See
+// TestSettings_DecodeCredentialHygiene.
+//
+// TimezoneOffset is an integer count of HOURS from UTC (e.g. 3 for UTC+3,
+// -5 for UTC-5). Fractional offsets (UTC+5:30, UTC+5:45) are NOT supported
+// by the server — confirmed by measurement; the field is a plain int, not
+// a float. The batch slot path (fillScheduleSlots) uses this to format the
+// publication date as dd.mm.yyyy at the account's offset; a fractional
+// offset would require minutes, but the server does not return one.
+type SettingsResponse struct {
+	TimezoneID     int        `json:"timezone_id,omitempty"`
+	TimezoneOffset int        `json:"timezone_offset,omitempty"`
+	Timezones      []Timezone `json:"timezones,omitempty"`
+}
+
+// Timezone is one entry in the timezones array on GET /users/settings.
+type Timezone struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
 }
 
 // Watermark is an image watermark configuration.
@@ -369,8 +547,51 @@ const (
 )
 
 // PostIDResponse is returned by PUT /posts/{mode} cross-posting endpoints.
+//
+// Slot reporting (issue #69): when a post is created into a schedule
+// (publication_when_type=3), the server assigns the publication slot
+// server-side and returns only the new id. The library now reads the slot
+// back and populates the fields below so the caller does not need a second
+// call they have to know to make. The read-back is best-effort: a lookup
+// failure populates SlotLookupError and the method still returns the id
+// (exit zero) — losing the id because a follow-up read failed is strictly
+// worse than today's behaviour.
+//
+//   - PublicationDate: the assigned slot ({date, hours, minutes} shape from
+//     GET /posts/{id}/edit). Populated for the primary id (ID). For a batch,
+//     per-id slots are in Slots.
+//   - ScheduleID: the schedule the post was created into.
+//   - SlotLookupError: set when the read-back failed (id still returned).
+//   - IDs: all created post ids for a batch. The server does NOT send "ids"
+//     in the response — it returns {"success": true} for a batch with no id
+//     or ids. IDs is populated by the client from a schedule snapshot diff
+//     (before vs after the create). The json tag "ids,omitempty" is kept so
+//     the recovered ids marshal to output (the CLI prints this struct as
+//     JSON); the tag WOULD decode a server-sent "ids" field, but the server
+//     does not send one (measured on both single and batch paths), so decode
+//     leaves the field empty in practice. Empty for a single-post create
+//     (which returns {"id": ...}).
+//   - ID: for a single-post create, the wire id from the server (never
+//     overwritten by the diff — the diff supplies the slot, not the
+//     identity). For a batch, set to the first recovered id (ordered by
+//     publication timestamp) so callers reading only ID get a valid id
+//     instead of 0.
+//   - Slots: per-id slots for a batch; empty for a single-post create.
 type PostIDResponse struct {
-	ID int `json:"id"`
+	ID              int              `json:"id"`
+	IDs             []int            `json:"ids,omitempty"`
+	PublicationDate *PublicationDate `json:"publication_date,omitempty"`
+	ScheduleID      int              `json:"schedule_id,omitempty"`
+	SlotLookupError string           `json:"slot_lookup_error,omitempty"`
+	Slots           []ScheduleSlot   `json:"slots,omitempty"`
+}
+
+// ScheduleSlot is one created post's assigned publication slot, used in the
+// per-id Slots array of a batch PostIDResponse. The shape mirrors the flat
+// PublicationDate/ScheduleID fields that a single-post create populates.
+type ScheduleSlot struct {
+	ID              int              `json:"id"`
+	PublicationDate *PublicationDate `json:"publication_date,omitempty"`
 }
 
 // Post is a post returned by GET /posts (the user's own posts). The live
@@ -483,6 +704,13 @@ type Post struct {
 // appears to carry a timezone offset). Both timestamps are kept; they are
 // not collapsed.
 //
+// The time field is ZERO-PADDED on the list surface (e.g. "09:20", not
+// "9:20"). postPubDateToPublicationDate parses it by splitting on ":" — a
+// malformed time string (missing colon, wrong number of parts) leaves
+// Hours/Minutes empty and the batch path populates slot_lookup_error
+// naming the malformed value, rather than silently producing a slot with
+// no time.
+//
 // Timestamp and SourceTimestamp are modelled as FlexInt, not bare int64:
 // measured as a JSON number in all 60 census rows, so this is not a live
 // break today — but on this API the string form of a numeric field has
@@ -491,7 +719,7 @@ type Post struct {
 // Int64() accessor keeps callers unchanged. See issue #74 (the sweep).
 type PostPublicationDate struct {
 	Date            string  `json:"date"`             // "29 Июля"-style display date
-	Time            string  `json:"time"`             // "12:25"-style display time
+	Time            string  `json:"time"`             // "09:20"-style display time (zero-padded HH:MM)
 	Timestamp       FlexInt `json:"timestamp"`        // unix timestamp (number in all 60 rows; FlexInt — a stringified numeric has appeared on this API)
 	SourceTimestamp FlexInt `json:"source_timestamp"` // unix timestamp carrying a tz offset (same polymorphism note as Timestamp)
 }
