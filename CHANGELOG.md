@@ -40,6 +40,13 @@
 * **`parseMetricFloat`/`parseMetricInt` silent 1000×-wrong value on a decimal comma** (#65): the accessors stripped commas before `ParseFloat`/`Atoi`, so a decimal-comma string from the vendor's Russian locale (`"0,520"` = the ratio 0.520) silently became `520.0` with `err==nil`, and `"1,2,3"` became `123` on the int path — the exact silent-wrongness class these accessors exist to prevent. The shape is now validated BEFORE stripping: only a plain decimal or a comma-thousands-grouped number is accepted; a leading-zero head followed by a comma (`"0,520"`), non-thousands-grouped commas (`"1,2,3"`, `"3,14"`), and other-locale separators (`"1 234"`, `"1.234,56"`) return an error.
 * **Negative metric thresholds fell through the refusal guard** (#65): the guard used `> 0`, so a caller passing `-1` (directly, or from a computed threshold like `avg-stddev` going negative) took neither branch — no error, no parameter, an unfiltered result while the help stated the flag errors. The guard now fires on `!= 0` for the four ints and the float.
 * **BEHAVIOUR CHANGE — negative page/ID filters now error across all list endpoints** (#65): every list endpoint that took a page or ID filter gated on `> 0` had the same silent-negative hole — a negative took neither branch (no error, no parameter), so the server returned an unfiltered or first-page result that looked filtered. `ListAccounts`, `ListPages`, `ListPosts`, `ListSearchPosts`, `ListProjects`, `ListSchedules`, `ListWatermarks`, and `ListNotifications` now reject negative page/ID values with an error before any request is issued; zero stays the unset sentinel. This is BEHAVIOUR-CHANGING for consumers that previously passed a negative (e.g. `--page -1` via the CLI's signed `IntVar`, or a computed `page-1` that underflowed): they got a result set and now get an error. Under `release-please` this ships as a `fix:` patch bump; callers must pass 0 (or omit) to leave a filter unset.
+## [1.1.1](https://github.com/anatolykoptev/go-hooppy/compare/v1.1.0...v1.1.1) (2026-07-29)
+
+
+### Fixed
+
+* force every call site to declare retry eligibility, so creates can never retry ([#91](https://github.com/anatolykoptev/go-hooppy/issues/91)) ([7743dda](https://github.com/anatolykoptev/go-hooppy/commit/7743ddaf8a3f1ac79c084e4face6e3f0eade49a5))
+
 ## [1.1.0](https://github.com/anatolykoptev/go-hooppy/compare/v1.0.0...v1.1.0) (2026-07-29)
 
 
