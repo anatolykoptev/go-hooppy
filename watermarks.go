@@ -25,7 +25,7 @@ func (c *Client) ListWatermarks(ctx context.Context, page int) (*WatermarksRespo
 		params.Set("page", strconv.Itoa(page))
 	}
 	var resp WatermarksResponse
-	if err := c.doGET(ctx, pathWatermarks, params, &resp); err != nil {
+	if err := c.doGET(ctx, pathWatermarks, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -47,7 +47,7 @@ func (c *Client) CreateWatermark(ctx context.Context, payload WatermarkPayload) 
 // UNDOCUMENTED: not in the public OpenAPI spec (v0.1.0).
 func (c *Client) UpdateWatermark(ctx context.Context, id int, payload WatermarkPayload) (*WatermarkResponse, error) {
 	var resp WatermarkResponse
-	if err := c.doPUT(ctx, fmt.Sprintf(pathWatermarkByID, id), payload, &resp); err != nil {
+	if err := c.doPUT(ctx, fmt.Sprintf(pathWatermarkByID, id), payload, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -58,7 +58,7 @@ func (c *Client) UpdateWatermark(ctx context.Context, id int, payload WatermarkP
 // UNDOCUMENTED: not in the public OpenAPI spec (v0.1.0).
 func (c *Client) DeleteWatermark(ctx context.Context, id int) (*WatermarkResponse, error) {
 	var resp WatermarkResponse
-	if err := c.doDELETE(ctx, fmt.Sprintf(pathWatermarkByID, id), &resp); err != nil {
+	if err := c.doDELETE(ctx, fmt.Sprintf(pathWatermarkByID, id), &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil

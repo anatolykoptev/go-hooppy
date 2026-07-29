@@ -612,3 +612,92 @@ func TestConfig_HTTPClientOverride(t *testing.T) {
 		t.Fatalf("ListAccounts: %v", err)
 	}
 }
+
+// TestRetry_ImportSearchPost_NotRetried pins the idempotency fix: PUT
+// /posts/import CREATES posts, so ImportSearchPost must issue exactly one
+// request even with RetryOptions set — a 5xx after the write committed,
+// retried, would duplicate the created posts in a live publishing queue.
+// The 500 surfaces as an error. Asserting the count (not just an error)
+// catches both an unbounded-retry and a single-retry regression.
+func TestRetry_ImportSearchPost_NotRetried(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	// when_type=1 (not schedule-driven) so no before-snapshot fires — only
+	// the PUT /posts/import request reaches the stub.
+	_, err = c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        123,
+		PublicationWhenType: 1,
+	})
+	if err == nil {
+		t.Fatal("expected error from 500, got nil — import must not retry past a 5xx")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("import calls = %d, want 1 (PUT /posts/import creates posts and must not retry)", got)
+	}
+}
+
+// TestRetry_UpdatePostRetried confirms the retrying PUT path still applies to
+// the full-state Update* verbs: a 500 then 200 yields exactly two requests
+// and a success. UpdatePost targets a known id and converges on re-send, so
+// retry is safe here (unlike the create-shaped import).
+func TestRetry_UpdatePostRetried(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n < 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"boom"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	resp, err := c.UpdatePost(context.Background(), 42, map[string]string{"text": "hi"})
+	if err != nil {
+		t.Fatalf("UpdatePost: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("resp.Success = %v, want true", resp.Success)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("update calls = %d, want 2 (Update* PUT retries on 5xx)", got)
+	}
+}
+
+// TestImportSearchPost_NoRetryOptions pins the default path: with
+// RetryOptions == nil, ImportSearchPost issues exactly one request and the
+// 500 surfaces as an error — byte-identical to today's behaviour.
+func TestImportSearchPost_NoRetryOptions(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv) // no RetryOptions
+	_, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        123,
+		PublicationWhenType: 1,
+	})
+	if err == nil {
+		t.Fatal("expected error from 500, got nil")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("import calls = %d, want 1 (no retry without RetryOptions)", got)
+	}
+}

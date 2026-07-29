@@ -25,7 +25,7 @@ func (c *Client) ListNotifications(ctx context.Context, page int) (*Notification
 		params.Set("page", strconv.Itoa(page))
 	}
 	var resp NotificationsResponse
-	if err := c.doGET(ctx, pathNotifications, params, &resp); err != nil {
+	if err := c.doGET(ctx, pathNotifications, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil

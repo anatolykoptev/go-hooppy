@@ -191,7 +191,7 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 		params.Set("content_types_exclude", f.ContentTypesExclude)
 	}
 	var resp SearchPostsResponse
-	if err := c.doGET(ctx, pathPostsSearchIndex, params, &resp); err != nil {
+	if err := c.doGET(ctx, pathPostsSearchIndex, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -203,7 +203,7 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 // UNDOCUMENTED: GET /posts-search/source-resources is not in the public OpenAPI spec.
 func (c *Client) ListSourceResources(ctx context.Context) (*SourceResourcesResponse, error) {
 	var resp SourceResourcesResponse
-	if err := c.doGET(ctx, pathPostsSearchSources, nil, &resp); err != nil {
+	if err := c.doGET(ctx, pathPostsSearchSources, nil, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -215,7 +215,7 @@ func (c *Client) ListSourceResources(ctx context.Context) (*SourceResourcesRespo
 // UNDOCUMENTED: GET /posts-search/parsing/form is not in the public OpenAPI spec.
 func (c *Client) GetParsingForm(ctx context.Context) (*ParsingFormResponse, error) {
 	var resp ParsingFormResponse
-	if err := c.doGET(ctx, pathPostsSearchParseForm, nil, &resp); err != nil {
+	if err := c.doGET(ctx, pathPostsSearchParseForm, nil, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -238,7 +238,7 @@ func (c *Client) StartParsing(ctx context.Context, payload ParsingStartPayload) 
 //
 // UNDOCUMENTED: DELETE /posts-search/parsing is not in the public OpenAPI spec.
 func (c *Client) StopParsing(ctx context.Context) error {
-	return c.doDELETE(ctx, pathPostsSearchParseStop, nil)
+	return c.doDELETE(ctx, pathPostsSearchParseStop, nil, true)
 }
 
 // CopySearchPost copies a scraped post (from GET /posts-search) to the user's
@@ -298,7 +298,13 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 		// and fillScheduleSlots reports the failure in SlotLookupError.
 	}
 	var resp PostIDResponse
-	if err := c.doPUT(ctx, pathPostsCopy, payload, &resp); err != nil {
+	// doPUT retryable=false: PUT /posts/copy CREATES a post (a copy of the
+	// scraped source). Non-idempotent — a 5xx/timeout after the write
+	// committed, retried, would publish a second copy. Same hazard class as
+	// ImportSearchPost (PUT /posts/import) and createPostWithMode (PUT
+	// /posts/{mode}); all create-shaped PUTs pass false. Enforced by
+	// TestRetryPolicySweep and pinned by TestRetryPolicy_CreateNotRetried.
+	if err := c.doPUT(ctx, pathPostsCopy, payload, &resp, false); err != nil {
 		return nil, err
 	}
 	// Report the assigned slot when the post was created into a schedule
@@ -325,7 +331,7 @@ func (c *Client) GetSearchPostEdit(ctx context.Context, searchPostID int) (*Sear
 	path := fmt.Sprintf(pathPostsSearchEdit, searchPostID)
 	params := url.Values{}
 	params.Set("as_copy", "1")
-	if err := c.doGET(ctx, path, params, &resp); err != nil {
+	if err := c.doGET(ctx, path, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -726,7 +732,13 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 		IDs:                  ids,
 	}
 	var resp PostIDResponse
-	if err := c.doPUT(ctx, pathPostsImport, body, &resp); err != nil {
+	// doPUT retryable=false: PUT /posts/import CREATES posts, so it is
+	// non-idempotent — a 5xx/timeout after the write committed, retried,
+	// would duplicate the created posts in a live publishing queue (issue
+	// #87). The full-state Update* PUTs target a known id and converge on
+	// re-send, so they pass true. Enforced by TestRetryPolicySweep and
+	// pinned by TestRetryPolicy_CreateNotRetried.
+	if err := c.doPUT(ctx, pathPostsImport, body, &resp, false); err != nil {
 		return nil, err
 	}
 	// Report the assigned slot when the post was created into a schedule

@@ -95,7 +95,7 @@ func (c *Client) ListPosts(ctx context.Context, f ListPostsFilter) (*PostsRespon
 		params.Set("page", strconv.Itoa(f.Page))
 	}
 	var resp PostsResponse
-	if err := c.doGET(ctx, pathPosts, params, &resp); err != nil {
+	if err := c.doGET(ctx, pathPosts, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -179,7 +179,7 @@ func (c *Client) CreatePost(ctx context.Context, payload interface{}) (*CreatePo
 // Discovered via API probing — may change without notice.
 func (c *Client) UpdatePost(ctx context.Context, id int, payload interface{}) (*DeletePostResponse, error) {
 	var resp DeletePostResponse
-	if err := c.doPUT(ctx, fmt.Sprintf(pathPostUpdate, id), payload, &resp); err != nil {
+	if err := c.doPUT(ctx, fmt.Sprintf(pathPostUpdate, id), payload, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -229,7 +229,7 @@ type PostEditResponse struct {
 // UNDOCUMENTED: GET /posts/{id}/edit is not in the public OpenAPI spec.
 func (c *Client) GetPostEdit(ctx context.Context, postID int) (*PostEditResponse, error) {
 	var resp PostEditResponse
-	if err := c.doGET(ctx, fmt.Sprintf(pathPostEdit, postID), nil, &resp); err != nil {
+	if err := c.doGET(ctx, fmt.Sprintf(pathPostEdit, postID), nil, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -376,7 +376,7 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 // DeletePost removes a single post by ID.
 func (c *Client) DeletePost(ctx context.Context, id int) (*DeletePostResponse, error) {
 	var resp DeletePostResponse
-	if err := c.doDELETE(ctx, fmt.Sprintf(pathPostDelete, id), &resp); err != nil {
+	if err := c.doDELETE(ctx, fmt.Sprintf(pathPostDelete, id), &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil

@@ -30,7 +30,7 @@ func (c *Client) ListAccounts(ctx context.Context, f ListAccountsFilter) (*Accou
 		params.Set("page", strconv.Itoa(f.Page))
 	}
 	var resp AccountsResponse
-	if err := c.doGET(ctx, pathAccounts, params, &resp); err != nil {
+	if err := c.doGET(ctx, pathAccounts, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -63,7 +63,7 @@ func (c *Client) ListPages(ctx context.Context, f ListPagesFilter) (*PagesRespon
 		params.Set("page", strconv.Itoa(f.Page))
 	}
 	var resp PagesResponse
-	if err := c.doGET(ctx, pathPages, params, &resp); err != nil {
+	if err := c.doGET(ctx, pathPages, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -143,7 +143,7 @@ func (c *Client) ListAllPagesWithFirstAndLastTotal(ctx context.Context, f ListPa
 // Discovered via API probing — may change without notice.
 func (c *Client) DisconnectPage(ctx context.Context, id int) (*DeleteResponse, error) {
 	var resp DeleteResponse
-	if err := c.doDELETE(ctx, fmt.Sprintf(pathPageDisconnect, id), &resp); err != nil {
+	if err := c.doDELETE(ctx, fmt.Sprintf(pathPageDisconnect, id), &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil

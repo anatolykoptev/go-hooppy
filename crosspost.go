@@ -18,10 +18,17 @@ func (c *Client) CrossPostWithMode(ctx context.Context, mode CrossPostMode, payl
 // payload. All cross-posting endpoints accept the same payload as POST /posts
 // and return {"id":...}.
 //
+// doPUT retryable=false: every /posts/{mode} endpoint CREATES a post (the
+// doc comments on each wrapper below say "creates a post via the X mode").
+// Non-idempotent — a 5xx/timeout after the write committed, retried, would
+// publish a second post. Same hazard class as ImportSearchPost (PUT
+// /posts/import) and CopySearchPost (PUT /posts/copy); all create-shaped PUTs
+// pass false. Enforced by TestRetryPolicySweep.
+//
 // UNDOCUMENTED: these endpoints are not in the public OpenAPI spec (v0.1.0).
 func (c *Client) createPostWithMode(ctx context.Context, mode CrossPostMode, payload interface{}) (*PostIDResponse, error) {
 	var resp PostIDResponse
-	if err := c.doPUT(ctx, fmt.Sprintf("/posts/%s", mode), payload, &resp); err != nil {
+	if err := c.doPUT(ctx, fmt.Sprintf("/posts/%s", mode), payload, &resp, false); err != nil {
 		return nil, err
 	}
 	return &resp, nil

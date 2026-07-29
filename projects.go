@@ -26,7 +26,7 @@ func (c *Client) ListProjects(ctx context.Context, page int) (*ProjectsResponse,
 		params.Set("page", strconv.Itoa(page))
 	}
 	var resp ProjectsResponse
-	if err := c.doGET(ctx, pathProjects, params, &resp); err != nil {
+	if err := c.doGET(ctx, pathProjects, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -38,7 +38,7 @@ func (c *Client) ListProjects(ctx context.Context, page int) (*ProjectsResponse,
 // Discovered via API probing — may change without notice.
 func (c *Client) UpdateProject(ctx context.Context, id int, name string) (*DeleteResponse, error) {
 	var resp DeleteResponse
-	if err := c.doPUT(ctx, fmt.Sprintf(pathProjectDelete, id), map[string]string{"name": name}, &resp); err != nil {
+	if err := c.doPUT(ctx, fmt.Sprintf(pathProjectDelete, id), map[string]string{"name": name}, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -64,7 +64,7 @@ func (c *Client) CreateProject(ctx context.Context, payload ProjectPayload) (*Pr
 // Discovered via API probing — may change without notice.
 func (c *Client) DeleteProject(ctx context.Context, id int) (*DeleteResponse, error) {
 	var resp DeleteResponse
-	if err := c.doDELETE(ctx, fmt.Sprintf(pathProjectDelete, id), &resp); err != nil {
+	if err := c.doDELETE(ctx, fmt.Sprintf(pathProjectDelete, id), &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -88,7 +88,7 @@ func (c *Client) ListSchedules(ctx context.Context, page int) (*SchedulesRespons
 		params.Set("page", strconv.Itoa(page))
 	}
 	var resp SchedulesResponse
-	if err := c.doGET(ctx, pathSchedules, params, &resp); err != nil {
+	if err := c.doGET(ctx, pathSchedules, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -326,7 +326,7 @@ func (c *Client) CreateSchedule(ctx context.Context, payload SchedulePayload) (*
 // Discovered via API probing — may change without notice.
 func (c *Client) UpdateSchedule(ctx context.Context, id int, payload SchedulePayload) (*ScheduleResponse, error) {
 	var resp ScheduleResponse
-	if err := c.doPUT(ctx, fmt.Sprintf(pathScheduleDelete, id), payload, &resp); err != nil {
+	if err := c.doPUT(ctx, fmt.Sprintf(pathScheduleDelete, id), payload, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -454,7 +454,7 @@ func ScheduleOverride(key string, value interface{}) (map[string]json.RawMessage
 // Discovered via API probing — may change without notice.
 func (c *Client) DeleteSchedule(ctx context.Context, id int) (*ScheduleResponse, error) {
 	var resp ScheduleResponse
-	if err := c.doDELETE(ctx, fmt.Sprintf(pathScheduleDelete, id), &resp); err != nil {
+	if err := c.doDELETE(ctx, fmt.Sprintf(pathScheduleDelete, id), &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -471,7 +471,7 @@ func (c *Client) DeleteSchedule(ctx context.Context, id int) (*ScheduleResponse,
 // spec (v0.1.0). Discovered via API probing — may change without notice.
 func (c *Client) GetScheduleEdit(ctx context.Context, id int) (*ScheduleEditResponse, error) {
 	var resp ScheduleEditResponse
-	if err := c.doGET(ctx, fmt.Sprintf(pathScheduleEdit, id), nil, &resp); err != nil {
+	if err := c.doGET(ctx, fmt.Sprintf(pathScheduleEdit, id), nil, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
