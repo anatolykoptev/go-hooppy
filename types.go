@@ -437,10 +437,11 @@ type Post struct {
 	// photo: a media descriptor OBJECT, not a URL string — measured from a
 	// live GET /posts response. The name is misleading: type was "video"
 	// in the capture, so this field is not photo-specific. Inside the
-	// object, id and updated_date are POLYMORPHIC (number on some rows,
-	// string on others — measured across 60 rows); every other field is
-	// stable. See PostPhoto for the censused shape and the FlexInt type
-	// for the polymorphic fields. A pointer so a text-only post
+	// object, id is an OPAQUE identifier (number ×1, non-numeric string
+	// ×52 — modelled as PhotoID) and updated_date is a NULLABLE timestamp
+	// (null ×2, number ×39, numeric string ×12 — modelled as FlexInt);
+	// every other field is stable. See PostPhoto for the censused shape
+	// and the two opposite representations. A pointer so a text-only post
 	// (photo null/absent) decodes to nil rather than a zero-value struct.
 	Photo *PostPhoto `json:"photo"`
 	// photos_amount: photo count (SearchPostsFilter.PhotosAmount is int).
@@ -488,14 +489,29 @@ type PostPublicationDate struct {
 // PostPhoto is the media descriptor carried in Post.Photo. Despite the
 // field name, it is NOT photo-specific: the measured capture had
 // type:"video". Types below are censused across 60 rows on three pages —
-// a field's type is a property of the collection, not of one row.
+// a field's type is a property of the collection, not of one row, AND the
+// type alone is not the specification: "string" can mean a numeric string
+// or an opaque token, and those demand opposite models. Sample the VALUES
+// before choosing a representation.
 //
-// Two fields are POLYMORPHIC across the collection: id and updated_date
-// each arrive as a JSON number on some rows and a JSON string on others.
-// Both are FlexInt (accept either form, expose Int64()) so neither shape
-// can abort the decode — the bug that shipped twice because the prior
-// fixtures sampled a single row. Every other field is stable across all
-// 60 rows; their types are exactly as censused:
+// Two fields are POLYMORPHIC across the collection, and they need OPPOSITE
+// representations:
+//
+//   - id arrives as a JSON number on one row and a JSON string on 52, but
+//     52 of 53 values are NON-NUMERIC tokens ("gohsHKYeG8pGbbXf" shape).
+//     It is an opaque identifier that happens to be numeric sometimes, so
+//     it is modelled as PhotoID (a string): a number on the wire is stored
+//     as its decimal text, an opaque token is stored untouched. Never
+//     parsed as an integer — there is nothing numeric about
+//     "gohsHKYeG8pGbbXf".
+//   - updated_date arrives as null (×2), a JSON number (×39), or a JSON
+//     numeric string (×12). Every non-null value parses as an integer. It
+//     is a nullable unix timestamp that is sometimes stringified, so it is
+//     modelled as FlexInt (a number-or-numeric-string, nil when null) —
+//     the FlexInt idea applied to the field that actually is one.
+//
+// Every other field is stable across all 60 rows; their types are exactly
+// as censused:
 //
 //	access_key string, description string, duration number, file_path string,
 //	folder string, is_used number, name string, owner_id number,
@@ -510,9 +526,9 @@ type PostPublicationDate struct {
 //	 "sticker":"","file_path":"A","text":"","folder":"A",
 //	 "updated_date":1700000000}
 type PostPhoto struct {
-	ID          FlexInt `json:"id"`           // POLYMORPHIC: number | string across rows
+	ID          PhotoID `json:"id"`           // OPAQUE: number ×1, non-numeric string ×52 — model as string, never parse
 	OwnerID     int     `json:"owner_id"`     // number (stable)
-	PostID      string  `json:"post_id"`      // string (stable, while id is polymorphic)
+	PostID      string  `json:"post_id"`      // string (stable, while id is opaque)
 	AccessKey   string  `json:"access_key"`   // string (stable)
 	SourceID    int     `json:"source_id"`    // number (stable)
 	Type        string  `json:"type"`         // "video" observed — not photo-specific
@@ -526,7 +542,7 @@ type PostPhoto struct {
 	FilePath    string  `json:"file_path"`    // string (stable)
 	Text        string  `json:"text"`         // string (stable)
 	Folder      string  `json:"folder"`       // string (stable)
-	UpdatedDate FlexInt `json:"updated_date"` // POLYMORPHIC: number | string across rows
+	UpdatedDate FlexInt `json:"updated_date"` // NULLABLE TIMESTAMP: null ×2, number ×39, numeric string ×12
 }
 
 // PostSchedule is a nested schedule reference inside a GET /posts row's
@@ -595,13 +611,14 @@ func (m Metric) String() string {
 }
 
 // FlexInt is an integer field the API encodes as EITHER a JSON number or a
-// JSON string ("123") — both forms occur for PostPhoto.ID and
-// PostPhoto.UpdatedDate within the SAME collection (measured across 60 rows
-// on three pages), so a typed int field would abort the decode on the string
-// form and a typed string field would abort on the number form. That is the
-// same bug class as Post.Photo (string vs object) and Post.Photo.ID (int vs
-// string) that this fix addresses: a field's type is a property of the
-// collection, not of the row you happened to look at.
+// JSON numeric string ("123"), and may be null. It is the right model for a
+// field whose values are ALL integers but whose wire form varies —
+// PostPhoto.UpdatedDate (null ×2, number ×39, numeric string ×12 across 60
+// rows). It is the WRONG model for PostPhoto.ID, whose string form is
+// usually a NON-NUMERIC opaque token (see PhotoID): a field's type is a
+// property of the collection, not of the row you happened to look at, AND
+// the type alone is not the specification — sample the VALUES before
+// choosing a representation.
 //
 // FlexInt accepts a JSON number, a JSON string holding an integer, or null
 // (→ unset) via a custom UnmarshalJSON. The raw wire bytes are preserved so
@@ -677,6 +694,49 @@ func (f FlexInt) Int64() int64 {
 		}
 	}
 	return 0
+}
+
+// PhotoID is an opaque media identifier that the API encodes as EITHER a
+// JSON number or a JSON string — and, crucially, the string form is usually
+// a NON-NUMERIC token ("gohsHKYeG8pGbbXf", "5iwfr17ku4_9nhvcu4gf7" shape).
+// Of 53 censused PostPhoto.ID values only one was numeric; the other 52 are
+// opaque tokens. PhotoID is therefore a STRING, not an integer: a number on
+// the wire is stored as its decimal text, and an opaque token is stored
+// untouched. There is nothing numeric to parse — modelling it as an integer
+// (FlexInt) is the bug that shipped four times, because the first real call
+// hit a non-numeric token and FlexInt rejected it with
+// `FlexInt: string "dntn8okrta_xk1hsrk7m8" is not an integer`.
+//
+// PhotoID is a defined string type, so the accessor is the value itself:
+// number-form 456254128 and string-form "456254128" both yield "456254128",
+// and "gohsHKYeG8pGbbXf" survives verbatim. That equivalence is the point.
+type PhotoID string
+
+// UnmarshalJSON accepts a JSON string (the common, opaque-token form) or a
+// JSON number (stored as its decimal text). null decodes to "". Any other
+// shape returns an error rather than silently coercing — a silent coerce
+// would recreate the wrong-type-hides-bug class this type exists to prevent.
+func (p *PhotoID) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if len(s) == 0 || s == "null" {
+		*p = ""
+		return nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		*p = PhotoID(str)
+		return nil
+	}
+	// Bare number → store its decimal text (e.g. 456254128 → "456254128").
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("PhotoID: expected string or number, got %s: %w", s, err)
+	}
+	*p = PhotoID(string(n))
+	return nil
 }
 
 // Photo is an uploaded photo attachment.

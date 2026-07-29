@@ -285,8 +285,8 @@ func TestPost_DecodeFullRow(t *testing.T) {
 	if p.Photo == nil {
 		t.Fatal("Photo = nil, want the media-descriptor object")
 	}
-	if p.Photo.PostID != "30" || p.Photo.ID.Int64() != 10 || p.Photo.OwnerID != 20 {
-		t.Errorf("Photo = %+v, want id 10 / owner_id 20 / post_id \"30\"", p.Photo)
+	if p.Photo.PostID != "30" || p.Photo.ID != "10" || p.Photo.OwnerID != 20 {
+		t.Errorf("Photo = %+v, want id \"10\" / owner_id 20 / post_id \"30\"", p.Photo)
 	}
 	if p.Photo.Type != "video" {
 		t.Errorf("Photo.Type = %q, want %q (not photo-specific)", p.Photo.Type, "video")
@@ -490,8 +490,8 @@ func TestPost_DecodeRealCapture(t *testing.T) {
 	if p.Photo.PostID != "5" {
 		t.Errorf("Photo.PostID = %q, want %q (string while id/owner_id are numbers)", p.Photo.PostID, "5")
 	}
-	if p.Photo.ID.Int64() != 3 || p.Photo.OwnerID != 4 {
-		t.Errorf("Photo.ID/OwnerID = %d/%d, want 3/4 (numbers)", p.Photo.ID.Int64(), p.Photo.OwnerID)
+	if p.Photo.ID != "3" || p.Photo.OwnerID != 4 {
+		t.Errorf("Photo.ID/OwnerID = %q/%d, want \"3\"/4 (id is an opaque string; number form stores decimal text)", p.Photo.ID, p.Photo.OwnerID)
 	}
 	if p.Photo.Type != "video" {
 		t.Errorf("Photo.Type = %q, want %q (not photo-specific despite the field name)", p.Photo.Type, "video")
@@ -529,21 +529,30 @@ func TestPost_DecodeRealCapture(t *testing.T) {
 }
 
 // TestPost_DecodePolymorphicPhoto is the regression guard for the bug that
-// shipped TWICE because every prior fixture sampled a single row: PostPhoto.ID
-// and PostPhoto.UpdatedDate are POLYMORPHIC across the collection (number on
-// some rows, string on others — measured across 60 rows on three pages). A
-// typed int field aborts the entire unmarshal on the string form; a typed
-// string field aborts on the number form. The mixed fixture
-// (testdata/post_list_rows_polymorphic.json) carries three rows that differ
-// in shape — the guard a single-row fixture could never be:
+// shipped FOUR times because every prior fixture sampled a single row AND
+// measured the type without looking at the values. PostPhoto.ID and
+// PostPhoto.UpdatedDate are both POLYMORPHIC across the collection but need
+// OPPOSITE representations:
+//
+//   - id is an OPAQUE identifier that is numeric on 1 of 53 rows and a
+//     non-numeric token on the other 52. Model as PhotoID (string): a number
+//     on the wire stores its decimal text; an opaque token stores untouched.
+//     Never parse as an integer — there is nothing numeric about
+//     "gohsHKYeG8pGbbXf".
+//   - updated_date is a NULLABLE unix timestamp (null ×2, number ×39, numeric
+//     string ×12). Model as FlexInt: number-or-numeric-string, nil when null.
+//
+// The mixed fixture (testdata/post_list_rows_polymorphic.json) carries five
+// rows that differ in shape — the guard a single-row fixture could never be:
 //
 //   - row 0: photo null (text-only post → *PostPhoto decodes to nil)
-//   - row 1: photo.id and photo.updated_date as JSON NUMBERS (11, 1700000000)
-//   - row 2: photo.id and photo.updated_date as JSON STRINGS ("21", "1800000000")
+//   - row 1: photo.id NUMBER (11), updated_date NUMBER (1700000000)
+//   - row 2: photo.id NUMERIC STRING ("21"), updated_date NUMERIC STRING ("1800000000")
+//   - row 3: photo.id NON-NUMERIC STRING ("gohsHKYeG8pGbbXf"), updated_date NULL
+//   - row 4: photo.id NUMERIC STRING ("11" — same value as row 1's number form)
 //
-// Every KEY and every VALUE TYPE is preserved, including the string-vs-number
-// split. The accessor (FlexInt.Int64) MUST return the same int whether the
-// wire form was 21 or "21" — that equivalence is the point of the type.
+// Every KEY and every VALUE TYPE is preserved, including the
+// numeric-vs-opaque distinction. That distinction is the entire bug.
 func TestPost_DecodePolymorphicPhoto(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "post_list_rows_polymorphic.json"))
 	if err != nil {
@@ -551,10 +560,10 @@ func TestPost_DecodePolymorphicPhoto(t *testing.T) {
 	}
 	var resp PostsResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		t.Fatalf("unmarshal mixed fixture: %v\n— a wrong field type aborts the whole decode (the photo.id int-vs-string bug class)", err)
+		t.Fatalf("unmarshal mixed fixture: %v\n— a wrong field type aborts the whole decode (the photo.id opaque-token-vs-integer bug class)", err)
 	}
-	if len(resp.List) != 3 {
-		t.Fatalf("len(List) = %d, want 3 (null + number-form + string-form rows)", len(resp.List))
+	if len(resp.List) != 5 {
+		t.Fatalf("len(List) = %d, want 5 (null + number + numeric-string + opaque-token + equivalence rows)", len(resp.List))
 	}
 
 	// Row 0: photo null — *PostPhoto decodes to nil, not a zero struct.
@@ -567,11 +576,8 @@ func TestPost_DecodePolymorphicPhoto(t *testing.T) {
 	if r1.Photo == nil {
 		t.Fatal("row 1 Photo = nil, want the number-form object")
 	}
-	if !r1.Photo.ID.IsSet() {
-		t.Error("row 1 Photo.ID not set, want the number-form id")
-	}
-	if got := r1.Photo.ID.Int64(); got != 11 {
-		t.Errorf("row 1 Photo.ID.Int64() = %d, want 11 (number form)", got)
+	if r1.Photo.ID != "11" {
+		t.Errorf("row 1 Photo.ID = %q, want \"11\" (number form → decimal text)", r1.Photo.ID)
 	}
 	if got := r1.Photo.UpdatedDate.Int64(); got != 1700000000 {
 		t.Errorf("row 1 Photo.UpdatedDate.Int64() = %d, want 1700000000 (number form)", got)
@@ -584,26 +590,56 @@ func TestPost_DecodePolymorphicPhoto(t *testing.T) {
 		t.Errorf("row 1 new stable fields = is_used %d / name %q / folder %q / file_path %q", r1.Photo.IsUsed, r1.Photo.Name, r1.Photo.Folder, r1.Photo.FilePath)
 	}
 
-	// Row 2: photo.id and updated_date as JSON STRINGS — the form that
-	// aborted the decode when ID was typed int. Must decode AND yield the
-	// same int via the accessor.
+	// Row 2: photo.id and updated_date as JSON NUMERIC STRINGS.
 	r2 := resp.List[2]
 	if r2.Photo == nil {
-		t.Fatal("row 2 Photo = nil, want the string-form object")
+		t.Fatal("row 2 Photo = nil, want the numeric-string-form object")
 	}
-	if !r2.Photo.ID.IsSet() {
-		t.Error("row 2 Photo.ID not set, want the string-form id")
-	}
-	if got := r2.Photo.ID.Int64(); got != 21 {
-		t.Errorf("row 2 Photo.ID.Int64() = %d, want 21 (string form \"21\" → 21)", got)
+	if r2.Photo.ID != "21" {
+		t.Errorf("row 2 Photo.ID = %q, want \"21\" (numeric string form, stored verbatim)", r2.Photo.ID)
 	}
 	if got := r2.Photo.UpdatedDate.Int64(); got != 1800000000 {
-		t.Errorf("row 2 Photo.UpdatedDate.Int64() = %d, want 1800000000 (string form)", got)
+		t.Errorf("row 2 Photo.UpdatedDate.Int64() = %d, want 1800000000 (numeric string form)", got)
 	}
-	// The accessor equivalence: number-form 11 and string-form "21" both
-	// return ints; the caller never sees the wire split.
-	if r1.Photo.ID.Int64() == r2.Photo.ID.Int64() {
-		t.Errorf("row 1 and row 2 Photo.ID both decoded to %d — fixture must use distinct ids", r1.Photo.ID.Int64())
+
+	// Row 3: photo.id is a NON-NUMERIC opaque token, updated_date is NULL.
+	// This is the row that aborted the decode when ID was FlexInt
+	// (`FlexInt: string "dntn8okrta_xk1hsrk7m8" is not an integer`). The
+	// opaque token MUST survive untouched; null updated_date MUST decode
+	// (unset) without error.
+	r3 := resp.List[3]
+	if r3.Photo == nil {
+		t.Fatal("row 3 Photo = nil, want the opaque-token-form object")
+	}
+	if r3.Photo.ID != "gohsHKYeG8pGbbXf" {
+		t.Errorf("row 3 Photo.ID = %q, want \"gohsHKYeG8pGbbXf\" (non-numeric opaque token MUST survive untouched — the bug)", r3.Photo.ID)
+	}
+	if r3.Photo.UpdatedDate.IsSet() {
+		t.Errorf("row 3 Photo.UpdatedDate.IsSet() = true, want false (null → unset)")
+	}
+
+	// Row 4: photo.id as the NUMERIC STRING form of row 1's NUMBER value.
+	// The accessor equivalence: number-form 11 and string-form "11" both
+	// yield "11" — the caller never sees the wire split. This is the
+	// assertion the user asked for.
+	r4 := resp.List[4]
+	if r4.Photo == nil {
+		t.Fatal("row 4 Photo = nil, want the equivalence-row object")
+	}
+	if r4.Photo.ID != r1.Photo.ID {
+		t.Errorf("accessor equivalence broken: row 1 Photo.ID (number 11) = %q, row 4 Photo.ID (string \"11\") = %q, want both \"11\"", r1.Photo.ID, r4.Photo.ID)
+	}
+	if r4.Photo.ID != "11" {
+		t.Errorf("row 4 Photo.ID = %q, want \"11\" (numeric string form of row 1's number)", r4.Photo.ID)
+	}
+	// Rows 1/2/3 carry distinct ids; row 4 deliberately mirrors row 1
+	// (the equivalence assertion above), so it is excluded here.
+	seen := map[PhotoID]bool{}
+	for _, i := range []int{1, 2, 3} {
+		if seen[resp.List[i].Photo.ID] {
+			t.Errorf("Photo.ID %q appears in more than one fixture row — ids must be distinct across rows 1/2/3", resp.List[i].Photo.ID)
+		}
+		seen[resp.List[i].Photo.ID] = true
 	}
 }
 
