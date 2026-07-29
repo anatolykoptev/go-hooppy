@@ -217,6 +217,23 @@ func TestDetectVKMarkup(t *testing.T) {
 			t.Errorf("detectVKMarkup = %v, want empty (unterminated [[ is not a marker)", hits)
 		}
 	})
+	// A "[" inside a marker's inner means nested/broken markup — not a valid
+	// VK marker. stripVKMarkup leaves it byte-untouched, so detection MUST
+	// NOT report it either: reporting it would warn "VK markup found" and
+	// suggest --strip-vk-markup, a flag that changes nothing. Detection and
+	// strip must agree on what is a marker.
+	t.Run("malformed nested double-bracket not reported (strip leaves it, detection agrees)", func(t *testing.T) {
+		hits := detectVKMarkup("[[a|[c|d]]]")
+		if len(hits) != 0 {
+			t.Errorf("detectVKMarkup = %v, want empty (inner [ = malformed, strip leaves it, detection must agree)", hits)
+		}
+	})
+	t.Run("malformed single bracket with inner [ not reported (strip leaves it, detection agrees)", func(t *testing.T) {
+		hits := detectVKMarkup("[url|[x|y]]")
+		if len(hits) != 0 {
+			t.Errorf("detectVKMarkup = %v, want empty (inner [ = malformed, strip leaves it, detection must agree)", hits)
+		}
+	})
 }
 
 // --- detectAdMarkers: returns the matched lines ---
@@ -870,6 +887,97 @@ func TestRunImport_StripBatch_PartialFailurePreservesPublished(t *testing.T) {
 	// stderr must name the failed import.
 	if !strings.Contains(errOut.String(), "ImportSearchPost(5003)") {
 		t.Errorf("stderr does not name the failed import; got:\n%s", errOut.String())
+	}
+}
+
+// TestRunImport_StripBatch_EditFetchFailurePreservesPublished pins the OTHER
+// half of F3: the strip-batch path's GetSearchPostEdit failure branch. The
+// existing F3 test (TestRunImport_StripBatch_PartialFailurePreservesPublished)
+// fails the IMPORT (the second API call); this test fails the EDIT FETCH (the
+// first). The two branches are separate code and can diverge in one edit, so
+// both must be pinned. The edit-fetch branch is symmetric with the import
+// branch: it records a "failed" result and continues, so the other four posts
+// are still attempted, the successful ones are created, and stdout lists ALL
+// FIVE with their outcomes. Asserted by PARSING stdout (not substring).
+func TestRunImport_StripBatch_EditFetchFailurePreservesPublished(t *testing.T) {
+	editBodies := map[int]string{
+		5101: editBodyFor("post one"),
+		5102: editBodyFor("post two"),
+		5104: editBodyFor("post four"),
+		5105: editBodyFor("post five"),
+	}
+	// Fail the edit GET for post 5103 (the 3rd of 5).
+	srv, cap := importStubServerEditFailing(t, editBodies, 5103)
+	c := newImportTestClient(t, srv)
+
+	var out, errOut strings.Builder
+	code := runImport(context.Background(), c, &out, &errOut, importArgs{
+		postIDs:  "5101,5102,5103,5104,5105",
+		whenType: 1,
+		howType:  1,
+		stripVK:  true,
+	})
+	// Exit non-zero — a post failed.
+	if code == 0 {
+		t.Fatalf("exit 0; want non-zero (one edit fetch failed); stderr=%s", errOut.String())
+	}
+	// Parse stdout (NOT substring) — the shape contract is the point.
+	var parsed struct {
+		StripVKMarkup bool `json:"strip_vk_markup"`
+		PerPost       []struct {
+			SearchPostID int    `json:"search_post_id"`
+			Status       string `json:"status"`
+			PostID       int    `json:"post_id,omitempty"`
+			Error        string `json:"error,omitempty"`
+		} `json:"per_post"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &parsed); err != nil {
+		t.Fatalf("stdout not valid JSON: %v\nstdout=%s", err, out.String())
+	}
+	if !parsed.StripVKMarkup {
+		t.Errorf("strip_vk_markup = false, want true")
+	}
+	// ALL FIVE posts must be listed — the edit-fetch failure must not
+	// discard the other four.
+	if got, want := len(parsed.PerPost), 5; got != want {
+		t.Fatalf("per_post len = %d, want %d (every post attempted must be listed, even one whose edit fetch failed); stdout=%s", got, want, out.String())
+	}
+	// The failed entry must be the 3rd post and carry an error.
+	if parsed.PerPost[2].Status != "failed" || parsed.PerPost[2].SearchPostID != 5103 {
+		t.Errorf("per_post[2] = {id:%d status:%q}, want {id:5103 status:failed}", parsed.PerPost[2].SearchPostID, parsed.PerPost[2].Status)
+	}
+	if parsed.PerPost[2].Error == "" {
+		t.Errorf("per_post[2] error empty, want the failure reason")
+	}
+	// The other four must be "created" with non-zero post ids.
+	var created, failed int
+	for i, r := range parsed.PerPost {
+		switch r.Status {
+		case "created":
+			created++
+			if r.PostID == 0 {
+				t.Errorf("per_post[%d] created but post_id = 0, want the published id", i)
+			}
+		case "failed":
+			failed++
+		default:
+			t.Errorf("per_post[%d] status = %q, want created or failed", i, r.Status)
+		}
+	}
+	if created != 4 {
+		t.Errorf("created count = %d, want 4 (the other four posts must still be attempted and created)", created)
+	}
+	if failed != 1 {
+		t.Errorf("failed count = %d, want 1 (only the 3rd edit fetch failed)", failed)
+	}
+	// Only 4 import calls reach the wire (the 3rd post's import is never
+	// attempted because its edit fetch failed first).
+	if got, want := cap.count(), 4; got != want {
+		t.Errorf("import call count = %d, want %d (the edit-fetch-failed post is not imported)", got, want)
+	}
+	// stderr must name the failed edit fetch.
+	if !strings.Contains(errOut.String(), "GetSearchPostEdit(5103)") {
+		t.Errorf("stderr does not name the failed edit fetch; got:\n%s", errOut.String())
 	}
 }
 

@@ -179,7 +179,14 @@ func stripVKMarkup(text string) string {
 
 // detectVKMarkup returns the raw [url|text] and [[page|display]] markers found
 // in the text, or nil if none. Unterminated brackets are NOT reported (they
-// are not markers — they are literal text).
+// are not markers — they are literal text). A "[" inside a marker's inner
+// (nested/broken markup such as "[[a|[c|d]]]" or "[url|[x|y]]") is also NOT
+// reported: stripVKMarkup leaves such a marker byte-untouched (it is not a
+// valid VK marker), so reporting it would warn "VK markup found" and suggest
+// --strip-vk-markup — a flag that changes nothing. Detection and strip must
+// agree on what is a marker. [[page]] without a pipe IS reported: it is valid
+// VK wiki markup (an internal page reference), just without display text, and
+// the operator should know it is there even though strip leaves it untouched.
 func detectVKMarkup(text string) []string {
 	var hits []string
 	i := 0
@@ -196,15 +203,18 @@ func detectVKMarkup(text string) []string {
 				continue
 			}
 			inner := rest[:end]
-			if strings.Contains(inner, "|") {
+			if !strings.Contains(inner, "[") {
+				// Well-formed [[...]] (no nested "[" inside). Report it
+				// whether or not it has a pipe: [[page|display]] is display
+				// markup, [[page]] is an internal page reference — both are
+				// real VK wiki markup the operator should know about.
 				hits = append(hits, text[i:i+2+end+2])
-				i += 2 + end + 2
-				continue
 			}
-			// [[page]] without a pipe is still VK wiki markup (internal page
-			// reference) — report it so the operator knows it is there, even
-			// though strip leaves it untouched.
-			hits = append(hits, text[i:i+2+end+2])
+			// A "[" inside the inner means nested/broken markup
+			// ("[[a|[c|d]]]"); stripVKMarkup leaves it byte-untouched, so
+			// detection MUST NOT report it — reporting it would suggest
+			// --strip-vk-markup, a flag that changes nothing for a malformed
+			// marker. Detection and strip must agree.
 			i += 2 + end + 2
 			continue
 		}
@@ -215,7 +225,10 @@ func detectVKMarkup(text string) []string {
 			continue
 		}
 		inner := rest[:end]
-		if strings.Contains(inner, "|") {
+		// Same guard as the [[...]] branch: a "[" inside the inner means
+		// nested/broken markup ("[url|[x|y]]"); strip leaves it untouched,
+		// so detection must not report it.
+		if !strings.Contains(inner, "[") && strings.Contains(inner, "|") {
 			hits = append(hits, text[i:i+1+end+1])
 		}
 		i += 1 + end + 1
