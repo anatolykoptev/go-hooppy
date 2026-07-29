@@ -998,7 +998,7 @@ func TestImportSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
 	if requestMade {
 		t.Fatal("ImportSearchPost issued a request despite when_type=3 + empty schedules — must fail before any request")
 	}
-	if !contains(err.Error(), "schedule") {
+	if !strings.Contains(err.Error(), "schedule") {
 		t.Errorf("error must explain the schedule requirement, got: %v", err)
 	}
 }
@@ -1066,7 +1066,7 @@ func TestCopySearchPost_RejectsBatchSlice(t *testing.T) {
 	if requestMade {
 		t.Fatal("CopySearchPost issued a request despite a non-empty SearchPostIDs — must fail before any request (the slice would otherwise marshal onto the wire with err == nil)")
 	}
-	if !contains(err.Error(), "RewriteSearchPost") || !contains(err.Error(), "ImportSearchPost") {
+	if !strings.Contains(err.Error(), "RewriteSearchPost") || !strings.Contains(err.Error(), "ImportSearchPost") {
 		t.Errorf("error must name the batch-capable endpoints RewriteSearchPost/ImportSearchPost, got: %v", err)
 	}
 	// The scalar must stay valid on its own (no batch slice) — sanity-check

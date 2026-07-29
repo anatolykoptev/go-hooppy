@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,7 +94,7 @@ func TestNewAPIError_TruncatedBody(t *testing.T) {
 	if !errorsAs(err, &ae) {
 		t.Fatal("expected *APIError")
 	}
-	if !contains(ae.Message, "(truncated)") {
+	if !strings.Contains(ae.Message, "(truncated)") {
 		t.Errorf("Message should contain '(truncated)', got length %d", len(ae.Message))
 	}
 }

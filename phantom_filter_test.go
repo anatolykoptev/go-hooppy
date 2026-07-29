@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -263,6 +264,25 @@ func assertFilterSweep(t *testing.T, specs map[string]fieldSpec, typ reflect.Typ
 
 	for name, spec := range specs {
 		t.Run(name, func(t *testing.T) {
+			// A spec that cannot assert anything must be a test FAILURE,
+			// never a silent pass: the gate is defeated by omission, not
+			// by a wrong value. wireParam is required for BOTH arms (the
+			// phantom arm asserts the error names it; the works arm
+			// asserts the wire carries it). expectWire is required for
+			// the works arm only. Without these checks a spec that omits
+			// a map key passes vacuously — a field can be classified
+			// `works` with NO wire assertion, or `phantom` with no
+			// error-names-parameter assertion (the hand-rolled contains
+			// short-circuited len(substr)==0 to true, evaporating the
+			// check). That is the per-struct blindness of the prior round
+			// reproduced per-field.
+			if spec.wireParam == "" {
+				t.Fatalf("spec for %q has an empty wireParam — the gate cannot assert anything without it; a spec that omits it must fail, not pass (the gate is defeated by omission, not by a wrong value)", name)
+			}
+			if !spec.phantom && spec.expectWire == "" {
+				t.Fatalf("spec for working filter %q has an empty expectWire — the works arm cannot assert the wire value without it; a spec that omits it must fail, not pass", name)
+			}
+
 			if spec.phantom {
 				// Run BOTH signs: setVal (positive) and negVal (negative).
 				// The phantom guard fires on != 0 today, so both must error
@@ -302,7 +322,7 @@ func assertFilterSweep(t *testing.T, specs map[string]fieldSpec, typ reflect.Typ
 						// not just any error — an unrelated early failure
 						// (e.g. a transport error) would otherwise satisfy
 						// the phantom arm.
-						if !contains(err.Error(), spec.wireParam) {
+						if !strings.Contains(err.Error(), spec.wireParam) {
 							t.Fatalf("phantom parameter %q (%s): error does not name the field (want %q in message, got: %v) — an unrelated early failure must not satisfy the phantom arm", name, vc.label, spec.wireParam, err)
 						}
 					})
