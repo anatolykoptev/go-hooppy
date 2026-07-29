@@ -196,6 +196,14 @@ func TestSearchPost_ParseMetrics(t *testing.T) {
 		{"zero", "0", 0},
 		{"empty string", "", 0},
 		{"malformed", "12abc", -1}, // -1 sentinel: expect an error, not 0
+		// Signed values are parsed FAITHFULLY on the response side (issue
+		// #65 item 3): the server is the source of truth, so a server-sent
+		// "-5" likes parses to -5 rather than being clamped or rejected.
+		// This is deliberately asymmetric with the request side, which
+		// rejects negative IDs/pages. A caller wanting a domain check
+		// applies it on the returned int.
+		{"signed negative", "-5", -5},
+		{"signed positive", "+864", 864},
 		// Decimal-comma / non-thousands-grouped comma forms MUST error: the
 		// vendor is a Russian-language service where comma is the decimal
 		// separator, and stripping the comma before Atoi would silently turn
@@ -253,6 +261,10 @@ func TestSearchPost_ParseMetrics(t *testing.T) {
 		{"zero", "0", 0},
 		{"empty string", "", 0},
 		{"malformed", "0.5abc", -1}, // -1 sentinel: expect an error
+		// Signed involvement is parsed FAITHFULLY (issue #65 item 3): a
+		// server-sent negative ratio is returned as-is, not clamped — see
+		// the signed-value asymmetry note on the parse accessors.
+		{"signed negative ratio", "-0.5", -0.5},
 		// Decimal-comma forms MUST error, not silently parse to a 1000×-wrong
 		// value: in the vendor's Russian locale "0,520" is the ratio 0.520,
 		// but stripping the comma yields "0520" → 520.0 with err==nil — the

@@ -3,9 +3,11 @@ package hooppy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -165,22 +167,16 @@ func TestListSearchPosts_MetricFiltersRejected(t *testing.T) {
 	}
 }
 
-// TestListSearchPosts_VideoDurationOutOfRange covers issue #65 item 2:
-// VideoDuration is a bucket-key filter (measured valid keys 1-4) gated on
-// `> 0` — the same hole this PR closed for the min_* fields. A negative
-// value took neither branch: no error, no parameter, an unfiltered result
-// that looks filtered. The guard now rejects anything outside 1-4 (and
-// zero stays the unset sentinel) BEFORE any request is issued. A value
-// above 4 is rejected too — it is not a measured valid key and would be
-// silently ignored by the server, returning an unfiltered result.
-func TestListSearchPosts_VideoDurationOutOfRange(t *testing.T) {
-	cases := []struct {
-		name string
-		f    SearchPostsFilter
-	}{
-		{"negative", SearchPostsFilter{VideoDuration: -1}},
-		{"above range", SearchPostsFilter{VideoDuration: 5}},
-	}
+// TestListSearchPosts_VideoDurationNegative covers issue #65 item 2:
+// VideoDuration is a bucket-key filter gated on `> 0` — the same hole
+// this PR closed for the min_* fields. A negative value took neither
+// branch: no error, no parameter, an unfiltered result that looks
+// filtered. The guard now rejects negatives before any request; zero
+// stays the unset sentinel. Positive values are passed through verbatim
+// (see TestListSearchPosts_VideoDurationPassThrough) — the prior guard
+// hardcoded a 1..4 enum from a measurement that only tried 1..4, then a
+// wider measurement found keys 5-8 are real, so the enum was removed.
+func TestListSearchPosts_VideoDurationNegative(t *testing.T) {
 	reached := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached = true
@@ -189,15 +185,41 @@ func TestListSearchPosts_VideoDurationOutOfRange(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			reached = false
-			_, err := c.ListSearchPosts(context.Background(), tc.f)
-			if err == nil {
-				t.Fatalf("ListSearchPosts with VideoDuration=%d: expected an error, got nil — a value outside 1-4 must be rejected before any request (issue #65 item 2)", tc.f.VideoDuration)
+	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{VideoDuration: -1})
+	if err == nil {
+		t.Fatal("ListSearchPosts with VideoDuration=-1: expected an error, got nil — a negative bucket key must be rejected before any request (issue #65 item 2)")
+	}
+	if reached {
+		t.Fatal("ListSearchPosts with VideoDuration=-1: the guard issued a request before erroring — rejection MUST happen before any request is issued")
+	}
+}
+
+// TestListSearchPosts_VideoDurationPassThrough covers issue #65 item 2:
+// the prior guard hardcoded video_duration to a 1..4 enum. A wider live
+// measurement found keys 5-8 are real and each returns a distinct result
+// set (5 → 4128; 6 → 4161; 7 → 644; 8 → 677), so the enum hard-errored
+// on four working filters. The guard now passes any non-negative value
+// through verbatim and lets the server answer — do not re-introduce a
+// hardcoded upper bound (9 and 10 error today, but the vendor may add
+// them). This test asserts each measured-working key (5,6,7,8) reaches
+// the wire as-is; reverting to the 1..4 enum makes it RED.
+func TestListSearchPosts_VideoDurationPassThrough(t *testing.T) {
+	for _, key := range []int{5, 6, 7, 8} {
+		t.Run(fmt.Sprintf("key=%d", key), func(t *testing.T) {
+			var gotVD string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotVD = r.URL.Query().Get("video_duration")
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+
+			_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{VideoDuration: key})
+			if err != nil {
+				t.Fatalf("ListSearchPosts with VideoDuration=%d: expected pass-through, got error: %v — keys 5-8 are measured to work; the 1..4 enum must not be re-introduced (issue #65 item 2)", key, err)
 			}
-			if reached {
-				t.Fatalf("ListSearchPosts with VideoDuration=%d: the guard issued a request before erroring — rejection MUST happen before any request is issued", tc.f.VideoDuration)
+			if gotVD != strconv.Itoa(key) {
+				t.Fatalf("ListSearchPosts with VideoDuration=%d: video_duration on wire = %q, want %q — pass-through must send the value verbatim", key, gotVD, strconv.Itoa(key))
 			}
 		})
 	}
@@ -224,6 +246,48 @@ func TestListSearchPosts_PhotosAmountNegative(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("ListSearchPosts with PhotosAmount=-1: the guard issued a request before erroring — rejection MUST happen before any request is issued")
+	}
+}
+
+// TestListSearchPosts_IDPageNegative covers issue #65 item 1: the five
+// ID/page filters (SourceType, SourceID, SourceResourceID, OwnerID,
+// Page) were gated on `> 0` — the same silent-negative hole this PR closed
+// for the min_* and bucket-key fields. A negative took neither branch:
+// no error, no parameter, an unfiltered result that looks filtered.
+// Reachable from the shipped CLI (--source-id -1, --page -1 via pflag's
+// signed IntVar). The guard now rejects negatives before any request;
+// zero stays the unset sentinel. Each case is isolated to one field so a
+// regression in any single guard is visible.
+func TestListSearchPosts_IDPageNegative(t *testing.T) {
+	cases := []struct {
+		name string
+		f    SearchPostsFilter
+	}{
+		{"SourceType negative", SearchPostsFilter{SourceType: -1}},
+		{"SourceID negative", SearchPostsFilter{SourceID: -1}},
+		{"SourceResourceID negative", SearchPostsFilter{SourceResourceID: -1}},
+		{"OwnerID negative", SearchPostsFilter{OwnerID: -1}},
+		{"Page negative", SearchPostsFilter{Page: -1}},
+	}
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reached = false
+			_, err := c.ListSearchPosts(context.Background(), tc.f)
+			if err == nil {
+				t.Fatalf("ListSearchPosts with %s: expected an error, got nil — a negative ID/page value must be rejected before any request (issue #65 item 1)", tc.name)
+			}
+			if reached {
+				t.Fatalf("ListSearchPosts with %s: the guard issued a request before erroring — rejection MUST happen before any request is issued", tc.name)
+			}
+		})
 	}
 }
 

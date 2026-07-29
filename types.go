@@ -821,6 +821,19 @@ type SearchPostEditResponse struct {
 // Do NOT retype the fields to numbers with a custom unmarshaller: a silent
 // parse failure on an unexpected separator would be worse than the current
 // honest string.
+//
+// Signed-value asymmetry (issue #65 item 3): metricShapeRe accepts an
+// optional leading sign, so a server-sent "-5" likes parses to -5. This is
+// FAITHFUL parsing on the response side, not a silent wrong value — the
+// server is the source of truth for what it emitted, and clamping or
+// rejecting its data here would mask a vendor bug rather than surface it.
+// This is deliberately asymmetric with the request side (ListSearchPosts /
+// ListPosts / ListAccounts / ListPages reject negative IDs and page
+// numbers before any request): on the request side the CALLER is the
+// source of input and we can validate intent; on the response side the
+// SERVER is the source and we must reflect what it sent. A caller that
+// wants a domain check (e.g. likes must be >= 0) can apply it on the
+// returned int — the accessor does not silently drop the signal.
 func (p SearchPost) ViewsInt() (int, error)    { return parseMetricInt("views", p.Views) }
 func (p SearchPost) LikesInt() (int, error)    { return parseMetricInt("likes", p.Likes) }
 func (p SearchPost) RepostsInt() (int, error)  { return parseMetricInt("reposts", p.Reposts) }
@@ -850,18 +863,21 @@ var metricShapeRe = regexp.MustCompile(`^[+-]?(0(\.\d+)?|[1-9]\d*(\.\d+)?|[1-9]\
 
 // validateAndStripMetric validates that v is a well-formed metric string
 // (per metricShapeRe) and returns it with thousands-separator commas
-// removed, ready for strconv.Atoi/ParseFloat. An empty string returns ""
-// (callers treat it as 0). A shape failure returns an error naming the
-// field — the shared gate for parseMetricInt and parseMetricFloat so the
-// regex fix lives in one place, not two.
-func validateAndStripMetric(name, v string) (string, error) {
+// removed, ready for strconv.Atoi/ParseFloat. The bool is true iff v was
+// non-empty and matched the shape — callers use it (not an empty-string
+// re-test) to decide "no value → 0", so a future regex edit that admits
+// the empty string cannot silently turn a present value into a 0. A shape
+// failure returns (false, error) naming the field — the shared gate for
+// parseMetricInt and parseMetricFloat so the regex fix lives in one
+// place, not two.
+func validateAndStripMetric(name, v string) (string, bool, error) {
 	if v == "" {
-		return "", nil
+		return "", false, nil
 	}
 	if !metricShapeRe.MatchString(v) {
-		return "", fmt.Errorf("hooppy: SearchPost.%s: parse %q: not a well-formed metric (expected a plain or comma-thousands-grouped number; a decimal comma is not accepted — the vendor's locale uses comma as the decimal separator)", name, v)
+		return "", false, fmt.Errorf("hooppy: SearchPost.%s: parse %q: not a well-formed metric (expected a plain or comma-thousands-grouped number; a decimal comma is not accepted — the vendor's locale uses comma as the decimal separator)", name, v)
 	}
-	return strings.ReplaceAll(v, ",", ""), nil
+	return strings.ReplaceAll(v, ",", ""), true, nil
 }
 
 // parseMetricInt strips the observed thousands separator (comma) and parses
@@ -874,11 +890,11 @@ func validateAndStripMetric(name, v string) (string, error) {
 // error rather than a silent 0, so a caller cannot accidentally rank on a
 // wrong value.
 func parseMetricInt(name, v string) (int, error) {
-	s, err := validateAndStripMetric(name, v)
+	s, present, err := validateAndStripMetric(name, v)
 	if err != nil {
 		return 0, err
 	}
-	if s == "" {
+	if !present {
 		return 0, nil
 	}
 	n, err := strconv.Atoi(s)
@@ -895,11 +911,11 @@ func parseMetricInt(name, v string) (int, error) {
 // rejected rather than silently parsed to 520.0 — a 1000×-wrong value with
 // err==nil. Same error discipline as parseMetricInt.
 func parseMetricFloat(name, v string) (float64, error) {
-	s, err := validateAndStripMetric(name, v)
+	s, present, err := validateAndStripMetric(name, v)
 	if err != nil {
 		return 0, err
 	}
-	if s == "" {
+	if !present {
 		return 0, nil
 	}
 	f, err := strconv.ParseFloat(s, 64)

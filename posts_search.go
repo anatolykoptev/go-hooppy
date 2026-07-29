@@ -45,6 +45,20 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	if f.DateTo != "" {
 		params.Set("date_to", f.DateTo)
 	}
+	// Reject negatives for the five ID/page filters before any request:
+	// the old `> 0` guard let a negative take neither branch — no error, no
+	// parameter, an unfiltered result that looks filtered. This is the
+	// exact defect class the PhotosAmount/VideoDuration guards below and
+	// the min_* guard above close. Reachable from the shipped CLI:
+	// cmd/hooppy binds all five with IntVar and pflag accepts negatives
+	// (--source-id -1 drops the parameter → results from every network
+	// while the caller believes they filtered to one; --page -1, or a
+	// computed page-1 that underflows, drops the parameter → the server
+	// returns page 1, so a paging loop silently re-reads the first page).
+	// Zero stays the unset sentinel.
+	if f.SourceType < 0 || f.SourceID < 0 || f.SourceResourceID < 0 || f.OwnerID < 0 || f.Page < 0 {
+		return nil, fmt.Errorf("hooppy: ListSearchPosts: source_type/source_id/source_resource_id/owner_id/page must be non-negative (got source_type=%d, source_id=%d, source_resource_id=%d, owner_id=%d, page=%d); pass 0 to leave any unset", f.SourceType, f.SourceID, f.SourceResourceID, f.OwnerID, f.Page)
+	}
 	if f.SourceType > 0 {
 		params.Set("source_type", strconv.Itoa(f.SourceType))
 	}
@@ -76,38 +90,63 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	//     `text` is accepted (returns the unfiltered count).
 	//   - photos_amount and video_duration ship values: [] (empty), so the
 	//     valid keys are NOT discoverable from the descriptor at all.
-	//     Measured on a live account (video content only), video_duration
-	//     accepts keys 1-4 and each changes the result set: unset 4194;
-	//     =1 → 710; =2 → 159; =3 → 3525; =4 → 4036. The counts overlap
-	//     (3 and 4 alone exceed the unfiltered total), so these are
-	//     overlapping or cumulative ranges, not disjoint buckets. The
-	//     vendor does not document the range semantics, so the meaning of
-	//     each key is unknown — no labels (short/medium/long, etc.) are
-	//     inferred. photos_amount was measured too and also filters
-	//     (unset 10000; =1 → 9297; =5 → 566).
 	// A value absent from `values` may still work; an empty `values` array
 	// does NOT mean the filter takes no argument. We therefore pass caller
-	// strings through verbatim and never hardcode a value enum.
-	// PhotosAmount and VideoDuration are bucket-key filters with a finite
-	// valid key space. The old `> 0` guard reproduced the exact defect this
-	// PR closed for the min_* fields: a negative value took neither branch —
-	// no error, no parameter, an unfiltered result that looks filtered. A
-	// negative bucket key is never valid, so reject it before any request.
-	// VideoDuration's valid keys were measured at 1-4 (each changes the
-	// result set; filters_plug values:[] is empty); reject anything outside
-	// that range with an error naming it. PhotosAmount's upper bound is not
-	// confirmed (5 was measured to filter), so only the negative hole is
-	// closed here — zero stays the unset sentinel.
+	// values through verbatim and never hardcode a value enum — a prior
+	// guard hardcoded video_duration to 1..4 from a measurement that only
+	// tried 1..4, then a wider measurement found keys 5-8 are real and
+	// each returns a distinct result set. Replacing one hardcoded range
+	// with another (9 and 10 error today) would repeat the same mistake
+	// when the vendor adds them. Reject only negatives, send any
+	// non-negative value verbatim, and let the server answer.
+	//
+	// Measured (NOT guessed) against the live API — recorded here so the
+	// pass-through decision is grounded, not assumed:
+	//
+	//   video_duration (unset = unfiltered):
+	//     key  rows
+	//     0    4194  (unfiltered)
+	//     1    710
+	//     2    159
+	//     3    3525
+	//     4    4036
+	//     5    4128
+	//     6    4161
+	//     7    644
+	//     8    677
+	//     9,10 server error (non-JSON)
+	//   Keys 5-8 are real and each returns a distinct result set; the
+	//   prior 1..4 guard would have hard-errored on four working filters.
+	//   9 and 10 erroring today does NOT mean the vendor will not add them
+	//   — do not re-introduce a hardcoded upper bound.
+	//
+	//   photos_amount (unset = unfiltered; saturates — "N or more", not
+	//   "exactly N"):
+	//     key  rows
+	//     1    9294
+	//     5    566
+	//     6    742
+	//     10   2172
+	//     99   2172  (identical to 10 → saturates, not a phantom class)
+	//
+	// PhotosAmount and VideoDuration are bucket-key filters. The old
+	// `> 0` guard reproduced the exact defect this PR closed for the
+	// min_* fields: a negative value took neither branch — no error, no
+	// parameter, an unfiltered result that looks filtered. A negative
+	// bucket key is never valid, so reject it before any request. Zero
+	// stays the unset sentinel; any positive value is passed through
+	// verbatim (the valid key space is not enumerable client-side — see
+	// the measurement tables above).
 	if f.PhotosAmount < 0 {
 		return nil, fmt.Errorf("hooppy: ListSearchPosts: photos_amount must be a non-negative bucket key (got %d); pass 0 to leave unset or a positive key from the filters_plug descriptor", f.PhotosAmount)
 	}
 	if f.PhotosAmount > 0 {
 		params.Set("photos_amount", strconv.Itoa(f.PhotosAmount))
 	}
-	if f.VideoDuration != 0 {
-		if f.VideoDuration < 1 || f.VideoDuration > 4 {
-			return nil, fmt.Errorf("hooppy: ListSearchPosts: video_duration must be in 1..4 (got %d); pass 0 to leave unset — keys 1-4 are the measured valid bucket keys (filters_plug values:[] is empty, see issue #63)", f.VideoDuration)
-		}
+	if f.VideoDuration < 0 {
+		return nil, fmt.Errorf("hooppy: ListSearchPosts: video_duration must be a non-negative bucket key (got %d); pass 0 to leave unset — keys 1-8 are measured to work (filters_plug values:[] is empty, see issue #63)", f.VideoDuration)
+	}
+	if f.VideoDuration > 0 {
 		params.Set("video_duration", strconv.Itoa(f.VideoDuration))
 	}
 	if f.ContentTypes != "" {

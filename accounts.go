@@ -16,6 +16,13 @@ type ListAccountsFilter struct {
 // ListAccounts returns the connected social network accounts.
 func (c *Client) ListAccounts(ctx context.Context, f ListAccountsFilter) (*AccountsResponse, error) {
 	params := url.Values{}
+	// Reject negatives before any request: the old `> 0` guard let a
+	// negative take neither branch — no error, no parameter, an unfiltered
+	// result that looks filtered. Same defect class as the posts-search
+	// ID/page guards (see posts_search.go). Zero stays the unset sentinel.
+	if f.SourceID < 0 || f.Page < 0 {
+		return nil, fmt.Errorf("hooppy: ListAccounts: source_id/page must be non-negative (got source_id=%d, page=%d); pass 0 to leave either unset", f.SourceID, f.Page)
+	}
 	if f.SourceID > 0 {
 		params.Set("source_id", strconv.Itoa(f.SourceID))
 	}
@@ -39,6 +46,13 @@ type ListPagesFilter struct {
 // ListPages returns the groups/pages connected to the user's accounts.
 func (c *Client) ListPages(ctx context.Context, f ListPagesFilter) (*PagesResponse, error) {
 	params := url.Values{}
+	// Reject negatives before any request: the old `> 0` guard let a
+	// negative take neither branch — no error, no parameter, an unfiltered
+	// result that looks filtered. Same defect class as the posts-search
+	// ID/page guards (see posts_search.go). Zero stays the unset sentinel.
+	if f.SourceID < 0 || f.AccountID < 0 || f.Page < 0 {
+		return nil, fmt.Errorf("hooppy: ListPages: source_id/account_id/page must be non-negative (got source_id=%d, account_id=%d, page=%d); pass 0 to leave any unset", f.SourceID, f.AccountID, f.Page)
+	}
 	if f.SourceID > 0 {
 		params.Set("source_id", strconv.Itoa(f.SourceID))
 	}
