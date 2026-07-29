@@ -14,20 +14,39 @@ import (
 // id because a follow-up read failed is strictly worse than today's
 // behaviour (the post exists; a lookup failure is a reporting problem).
 //
-// Single-id path: calls GetPostEdit(id), which returns the slot
-// structurally as *PublicationDate ({date, hours, minutes}) plus
-// schedule_id. One call. The date is returned directly by the server in
-// dd.mm.yyyy format — no timezone conversion is needed.
+// Single-post path (resp.ID != 0): the server returned {"id": ...} — one
+// GetPostEdit call reads the slot structurally as *PublicationDate
+// ({date, hours, minutes}) plus schedule_id. The date is returned directly
+// by the server in dd.mm.yyyy format — no timezone conversion is needed.
 //
-// Batch path: calls ListPosts filtered by schedule_id — ONE call — which
-// returns every queued post with its slot (Post.PublicationDate, the
-// {date, time, timestamp, source_timestamp} shape). The created ids are
-// matched against the list rows; each match's PostPublicationDate is
-// converted to the {date, hours, minutes} PublicationDate shape (hours/
-// minutes from the time field, date from the timestamp formatted as
-// dd.mm.yyyy at the account's timezone offset — see below). Per-id
-// GetPostEdit fallback only for ids the list did not return; N+1 calls
-// against a rate-limited vendor is what the list path avoids.
+// Batch path (resp.ID == 0): the server returns {"success": true} for a
+// batch create — NO id, NO ids. The created post ids are recovered via a
+// snapshot-diff: the caller snapshots the schedule's post ids BEFORE the
+// create (beforeSnapshot, via ListPosts filtered by schedule_id), and this
+// method snapshots AFTER the create, then computes created = after - before.
+// This is correct regardless of the list's sort order, page size, or how
+// many posts the schedule already holds. It costs two list walks (before +
+// after) instead of one; the cheaper "take the N newest" was rejected
+// because ListPostsFilter has no sort parameter, the server's default order
+// is unspecified, and the list is paginated — every version of that idea
+// depends on an assumption we have not measured.
+//
+// Count guard: if len(created) != idsSentCount, do NOT guess — a concurrent
+// create by another client is the obvious way this diverges, and quietly
+// attributing someone else's post to this caller's batch is a
+// data-integrity bug. Populate SlotLookupError naming both counts and
+// return what we have.
+//
+// Failure contract: any failure in this recovery leaves the create
+// successful — no error returned, SlotLookupError populated, exit zero.
+// The posts exist; this is reporting.
+//
+// Response shape: for a batch, the recovered ids are emitted in IDs
+// (ordered by the queue's own publication timestamp), and ID is set to the
+// first recovered id so callers reading only ID get a valid id instead of
+// 0. The server does NOT send "ids" in the response — PostIDResponse.IDs
+// is populated by this client from the snapshot diff, not decoded from the
+// wire.
 //
 // Date format (batch path): the list surface's PostPublicationDate.Date is
 // a display string ("29 Июля") in the account's timezone, not dd.mm.yyyy.
@@ -40,28 +59,21 @@ import (
 //
 // Offset-unavailable behaviour: if the settings lookup fails, the import
 // is NOT failed (the id is still returned, exit zero). The publication
-// date for list-matched ids is OMITTED (Date left empty) and
-// SlotLookupError records that the offset was unavailable — a
-// stated-unknown date is better than a silently-wrong one. Per-id fallback
-// slots (from GetPostEdit) are unaffected: they carry the server-provided
-// date directly. The settings endpoint is called at most once per
-// fillScheduleSlots call (never per matched id).
+// date for recovered ids is OMITTED (Date left empty) and SlotLookupError
+// records that the offset was unavailable — a stated-unknown date is
+// better than a silently-wrong one. Hours/minutes are still correct (from
+// the time field). The settings endpoint is called at most once per
+// fillScheduleSlots call (never per recovered id).
 //
-// scheduleIDs is the payload's SchedulesIDs — the schedule the post was
-// created into. The first element is used as the list filter (a batch
-// targets one schedule; the server assigns slots from that schedule's
-// times).
-func (c *Client) fillScheduleSlots(ctx context.Context, resp *PostIDResponse, whenType int, scheduleIDs []int) {
-	if whenType != 3 || resp == nil || resp.ID == 0 {
+// beforeSnapshot is the schedule's posts before the create (nil for the
+// single-post path). beforeErr is non-nil if the before snapshot failed
+// (the batch path cannot diff → SlotLookupError, no ids recovered).
+// idsSentCount is the number of ids sent in the batch (0 for single).
+// scheduleIDs is the payload's SchedulesIDs — the first element is used as
+// the list filter (a batch targets one schedule).
+func (c *Client) fillScheduleSlots(ctx context.Context, resp *PostIDResponse, whenType int, scheduleIDs []int, beforeSnapshot []Post, beforeErr error, idsSentCount int) {
+	if whenType != 3 || resp == nil {
 		return
-	}
-
-	// Resolve the created ids: the server returns "ids" alongside "id" for
-	// a batch; fall back to [ID] for a single-post create or when the server
-	// did not return ids.
-	createdIDs := resp.IDs
-	if len(createdIDs) == 0 {
-		createdIDs = []int{resp.ID}
 	}
 
 	// ScheduleID for the response: the first schedule from the payload (a
@@ -70,11 +82,11 @@ func (c *Client) fillScheduleSlots(ctx context.Context, resp *PostIDResponse, wh
 		resp.ScheduleID = scheduleIDs[0]
 	}
 
-	// Single-id path: one GetPostEdit call.
-	if len(createdIDs) == 1 {
-		edit, err := c.GetPostEdit(ctx, createdIDs[0])
+	// Single-post path: server returned an id.
+	if resp.ID != 0 {
+		edit, err := c.GetPostEdit(ctx, resp.ID)
 		if err != nil {
-			resp.SlotLookupError = fmt.Sprintf("slot lookup: GetPostEdit(%d): %v", createdIDs[0], err)
+			resp.SlotLookupError = fmt.Sprintf("slot lookup: GetPostEdit(%d): %v", resp.ID, err)
 			return
 		}
 		resp.PublicationDate = edit.PublicationDate
@@ -84,51 +96,75 @@ func (c *Client) fillScheduleSlots(ctx context.Context, resp *PostIDResponse, wh
 		return
 	}
 
-	// Batch path: ONE ListPosts call filtered by schedule_id, then match.
-	// Per-id GetPostEdit fallback only for ids the list did not return.
+	// Batch path: server returned {"success": true} — no id, no ids.
+	// Recover the created ids via snapshot-diff.
+	c.fillBatchSlotsBySnapshotDiff(ctx, resp, scheduleIDs, beforeSnapshot, beforeErr, idsSentCount)
+}
+
+// fillBatchSlotsBySnapshotDiff recovers the created post ids for a batch
+// by diffing the schedule's post list after the create against the before
+// snapshot taken by the caller. See fillScheduleSlots for the full design
+// rationale.
+func (c *Client) fillBatchSlotsBySnapshotDiff(ctx context.Context, resp *PostIDResponse, scheduleIDs []int, before []Post, beforeErr error, idsSentCount int) {
 	if len(scheduleIDs) == 0 {
 		resp.SlotLookupError = "slot lookup: batch path requires at least one schedule ID to filter the list"
 		return
 	}
-
-	listResp, err := c.ListPosts(ctx, ListPostsFilter{ScheduleID: scheduleIDs[0]})
-	if err != nil {
-		// List failed — fall back to per-id GetPostEdit for all ids rather
-		// than giving up entirely. A total list failure does not mean the
-		// posts do not exist; the per-id path is the fallback the task
-		// prescribes for missing ids. The per-id path returns the date
-		// directly from the server, so no timezone offset is needed here.
-		c.fillSlotsPerID(ctx, resp, createdIDs)
-		if resp.SlotLookupError != "" {
-			resp.SlotLookupError = fmt.Sprintf("slot lookup: ListPosts(schedule_id=%d) failed (%v); per-id fallback attempted — %s", scheduleIDs[0], err, resp.SlotLookupError)
-		} else {
-			resp.SlotLookupError = fmt.Sprintf("slot lookup: ListPosts(schedule_id=%d) failed (%v); per-id fallback used", scheduleIDs[0], err)
-		}
+	if beforeErr != nil {
+		resp.SlotLookupError = fmt.Sprintf("slot lookup: before-snapshot ListPosts(schedule_id=%d) failed (%v) — cannot diff to recover created ids", scheduleIDs[0], beforeErr)
 		return
 	}
+
+	// After snapshot: the schedule's posts after the create.
+	listResp, err := c.ListPosts(ctx, ListPostsFilter{ScheduleID: scheduleIDs[0]})
+	if err != nil {
+		resp.SlotLookupError = fmt.Sprintf("slot lookup: after-snapshot ListPosts(schedule_id=%d) failed (%v) — created ids not recovered (posts exist)", scheduleIDs[0], err)
+		return
+	}
+
+	// Diff: created = after - before.
+	beforeSet := make(map[int]struct{}, len(before))
+	for i := range before {
+		beforeSet[before[i].ID] = struct{}{}
+	}
+	var created []Post
+	for i := range listResp.List {
+		if _, ok := beforeSet[listResp.List[i].ID]; !ok {
+			created = append(created, listResp.List[i])
+		}
+	}
+
+	// Count guard: if the diff recovered a different number of ids than
+	// were sent, do NOT guess. A concurrent create by another client is
+	// the obvious way this diverges; quietly attributing someone else's
+	// post to this caller's batch is a data-integrity bug.
+	if len(created) != idsSentCount {
+		for i := range created {
+			resp.IDs = append(resp.IDs, created[i].ID)
+		}
+		if len(resp.IDs) > 0 {
+			resp.ID = resp.IDs[0]
+		}
+		resp.SlotLookupError = fmt.Sprintf("slot lookup: snapshot-diff recovered %d created ids, but %d were sent — counts differ (concurrent create suspected); returning recovered ids without slot attribution", len(created), idsSentCount)
+		return
+	}
+
+	// Order created by publication timestamp (ascending — the queue's own
+	// publication order).
+	sortPostsByTimestamp(created)
 
 	// Fetch the account timezone offset ONCE for this batch — the
 	// list-surface date is a display string, so the batch path formats the
 	// timestamp as dd.mm.yyyy at the account's offset (not UTC). A failed
 	// lookup does not fail the import; see the offset-unavailable behaviour
-	// in the doc comment.
+	// in the fillScheduleSlots doc comment.
 	offset, offsetErr := c.fetchTimezoneOffset(ctx)
 
-	// Build id → PostPublicationDate map from the list.
-	slotsByPostID := make(map[int]*PostPublicationDate, len(listResp.List))
-	for i := range listResp.List {
-		p := &listResp.List[i]
-		if p.PublicationDate != nil {
-			slotsByPostID[p.ID] = p.PublicationDate
-		}
-	}
-
-	// Match created ids against the list.
-	var missing []int
-	for _, id := range createdIDs {
-		ppd, ok := slotsByPostID[id]
-		if !ok {
-			missing = append(missing, id)
+	for i := range created {
+		ppd := created[i].PublicationDate
+		if ppd == nil {
+			resp.IDs = append(resp.IDs, created[i].ID)
+			resp.Slots = append(resp.Slots, ScheduleSlot{ID: created[i].ID})
 			continue
 		}
 		pd := postPubDateToPublicationDate(ppd, offset)
@@ -138,29 +174,17 @@ func (c *Client) fillScheduleSlots(ctx context.Context, resp *PostIDResponse, wh
 			// Hours/minutes are still correct (from the time field).
 			pd.Date = ""
 		}
+		resp.IDs = append(resp.IDs, created[i].ID)
 		resp.Slots = append(resp.Slots, ScheduleSlot{
-			ID:              id,
+			ID:              created[i].ID,
 			PublicationDate: pd,
 		})
 	}
 
-	if offsetErr != nil {
-		if resp.SlotLookupError != "" {
-			resp.SlotLookupError += "; "
-		}
-		resp.SlotLookupError += fmt.Sprintf("slot lookup: account timezone offset unavailable (%v) — publication dates for list-matched ids omitted, hours/minutes still correct", offsetErr)
-	}
-
-	// Per-id fallback for unmatched ids.
-	if len(missing) > 0 {
-		before := len(resp.Slots)
-		c.fillSlotsPerID(ctx, resp, missing)
-		filled := len(resp.Slots) - before
-		if filled < len(missing) {
-			if resp.SlotLookupError == "" {
-				resp.SlotLookupError = fmt.Sprintf("slot lookup: %d of %d batch ids not found in list or per-id fallback (schedule_id=%d)", len(missing)-filled, len(createdIDs), scheduleIDs[0])
-			}
-		}
+	// ID = first recovered id (ordered by timestamp) so callers reading
+	// only ID get a valid id instead of 0.
+	if len(resp.IDs) > 0 {
+		resp.ID = resp.IDs[0]
 	}
 
 	// Populate the primary PublicationDate from the first slot (the flat
@@ -168,29 +192,34 @@ func (c *Client) fillScheduleSlots(ctx context.Context, resp *PostIDResponse, wh
 	if len(resp.Slots) > 0 {
 		resp.PublicationDate = resp.Slots[0].PublicationDate
 	}
+
+	if offsetErr != nil {
+		resp.SlotLookupError = fmt.Sprintf("slot lookup: account timezone offset unavailable (%v) — publication dates for recovered ids omitted, hours/minutes still correct", offsetErr)
+	}
 }
 
-// fillSlotsPerID calls GetPostEdit for each id and appends a ScheduleSlot
-// for each that succeeds. Failures are accumulated into SlotLookupError.
-func (c *Client) fillSlotsPerID(ctx context.Context, resp *PostIDResponse, ids []int) {
-	var errs []string
-	for _, id := range ids {
-		edit, err := c.GetPostEdit(ctx, id)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("GetPostEdit(%d): %v", id, err))
-			continue
+// sortPostsByTimestamp sorts posts by their PublicationDate.Timestamp
+// ascending (the queue's own publication order). Posts without a timestamp
+// sort after those with one.
+func sortPostsByTimestamp(posts []Post) {
+	for i := 1; i < len(posts); i++ {
+		for j := i; j > 0; j-- {
+			if postTimestamp(&posts[j]) < postTimestamp(&posts[j-1]) {
+				posts[j], posts[j-1] = posts[j-1], posts[j]
+			} else {
+				break
+			}
 		}
-		resp.Slots = append(resp.Slots, ScheduleSlot{
-			ID:              id,
-			PublicationDate: edit.PublicationDate,
-		})
 	}
-	if len(errs) > 0 {
-		if resp.SlotLookupError != "" {
-			resp.SlotLookupError += "; "
-		}
-		resp.SlotLookupError += "per-id fallback errors: " + strings.Join(errs, "; ")
+}
+
+// postTimestamp returns the publication timestamp of a post, or
+// math.MaxInt64 if absent (sorts after all real timestamps).
+func postTimestamp(p *Post) int64 {
+	if p.PublicationDate == nil || !p.PublicationDate.Timestamp.IsSet() {
+		return 1<<62
 	}
+	return p.PublicationDate.Timestamp.Int64()
 }
 
 // postPubDateToPublicationDate converts the list-surface PostPublicationDate

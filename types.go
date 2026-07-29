@@ -555,8 +555,14 @@ const (
 //     per-id slots are in Slots.
 //   - ScheduleID: the schedule the post was created into.
 //   - SlotLookupError: set when the read-back failed (id still returned).
-//   - IDs: all created post ids for a batch (server returns "ids" alongside
-//     "id"); empty for a single-post create.
+//   - IDs: all created post ids for a batch. The server does NOT send "ids"
+//     in the response — it returns {"success": true} for a batch with no id
+//     or ids. IDs is populated by the client from a schedule snapshot diff
+//     (before vs after the create), not decoded from the wire. Empty for a
+//     single-post create (which returns {"id": ...}).
+//   - ID: for a single-post create, the id from the server. For a batch,
+//     set to the first recovered id (ordered by publication timestamp) so
+//     callers reading only ID get a valid id instead of 0.
 //   - Slots: per-id slots for a batch; empty for a single-post create.
 type PostIDResponse struct {
 	ID              int              `json:"id"`

@@ -340,34 +340,60 @@ func TestImportSearchPost_SlotReported(t *testing.T) {
 	}
 }
 
-// TestImportSearchPost_BatchSlotOneCall verifies that a batch import into a
-// schedule (when_type=3) resolves all slots in ONE ListPosts call (not N
-// GetPostEdit calls), and matches all created ids to the right slots.
-func TestImportSearchPost_BatchSlotOneCall(t *testing.T) {
+// TestImportSearchPost_BatchSlotSnapshotDiff verifies that a batch import
+// into a schedule (when_type=3) recovers the created ids via a
+// snapshot-diff (the server returns {"success": true} for a batch — no id,
+// no ids). The before snapshot (taken before the create) has 2 pre-existing
+// posts; the after snapshot has those 2 plus 3 newly created posts. The
+// diff recovers exactly the 3 created ids, ordered by publication timestamp,
+// with no GetPostEdit calls (the snapshot-diff replaces the old per-id
+// fallback).
+//
+// RED-on-revert: if the batch path trusts resp.ID again (the old guard
+// `resp.ID == 0 → return early`), no ids are recovered, Slots is empty, and
+// the test fails at the Slots length check.
+func TestImportSearchPost_BatchSlotSnapshotDiff(t *testing.T) {
 	var listCalls int32
 	var editCalls int32
 	var settingsCalls int32
+	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			// Server returns the first id plus the full ids array for the batch.
-			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378,92820379]}`))
+			// Server returns {"success": true} for a batch — NO id, NO ids.
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"success":true}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			atomic.AddInt32(&settingsCalls, 1)
 			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[{"id":101,"name":"(GMT+03:00) Санкт-Петербург"}],"api_token":"SECRET","gpt_key":"SECRET","ru_captcha_key":"SECRET"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
 			atomic.AddInt32(&listCalls, 1)
-			// Return all posts in the schedule, each with its slot.
-			w.Write([]byte(`{
-				"list": [
-					{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-					{"id":92820378,"publication_date":{"date":"29 Июля","time":"16:25","timestamp":1753777500,"source_timestamp":1753781100},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-					{"id":92820379,"publication_date":{"date":"30 Июля","time":"12:00","timestamp":1753856400,"source_timestamp":1753860000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
-				],
-				"total_rows": 3,
-				"is_has_more": false,
-				"rows_limit": 20
-			}`))
+			if atomic.LoadInt32(&createCalled) == 0 {
+				// Before snapshot: 2 pre-existing posts.
+				w.Write([]byte(`{
+					"list": [
+						{"id":10000001,"publication_date":{"date":"28 Июля","time":"09:00","timestamp":1753670400,"source_timestamp":1753674000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+						{"id":10000002,"publication_date":{"date":"28 Июля","time":"12:00","timestamp":1753681200,"source_timestamp":1753684800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+					],
+					"total_rows": 2,
+					"is_has_more": false,
+					"rows_limit": 20
+				}`))
+			} else {
+				// After snapshot: 2 pre-existing + 3 created.
+				w.Write([]byte(`{
+					"list": [
+						{"id":10000001,"publication_date":{"date":"28 Июля","time":"09:00","timestamp":1753670400,"source_timestamp":1753674000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+						{"id":10000002,"publication_date":{"date":"28 Июля","time":"12:00","timestamp":1753681200,"source_timestamp":1753684800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+						{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+						{"id":92820378,"publication_date":{"date":"29 Июля","time":"16:25","timestamp":1753777500,"source_timestamp":1753781100},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+						{"id":92820379,"publication_date":{"date":"30 Июля","time":"12:00","timestamp":1753856400,"source_timestamp":1753860000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+					],
+					"total_rows": 5,
+					"is_has_more": false,
+					"rows_limit": 20
+				}`))
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
 			atomic.AddInt32(&editCalls, 1)
 			w.Write([]byte(`{"id":92820377,"publication_date":{"date":"31.07.2026","hours":"14","minutes":"25"},"schedule_id":55}`))
@@ -388,19 +414,29 @@ func TestImportSearchPost_BatchSlotOneCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportSearchPost batch: %v", err)
 	}
+	// ID set to the first recovered id (ordered by timestamp — 92820377
+	// has the smallest timestamp of the three created).
 	if resp.ID != 92820377 {
-		t.Errorf("ID = %d, want 92820377", resp.ID)
+		t.Errorf("ID = %d, want 92820377 (first recovered id by timestamp)", resp.ID)
 	}
-	// ONE list call, not three GetPostEdit calls.
-	if got := atomic.LoadInt32(&listCalls); got != 1 {
-		t.Errorf("ListPosts calls = %d, want 1 (batch resolves all slots in ONE call)", got)
+	// IDs contains all recovered ids, ordered by timestamp.
+	if len(resp.IDs) != 3 {
+		t.Fatalf("IDs = %v, want 3 recovered ids", resp.IDs)
 	}
+	if resp.IDs[0] != 92820377 || resp.IDs[1] != 92820378 || resp.IDs[2] != 92820379 {
+		t.Errorf("IDs = %v, want [92820377, 92820378, 92820379] (ordered by timestamp)", resp.IDs)
+	}
+	// No GetPostEdit calls — the snapshot-diff replaces per-id fallback.
 	if got := atomic.LoadInt32(&editCalls); got != 0 {
-		t.Errorf("GetPostEdit calls = %d, want 0 (all ids matched in the list — no per-id fallback)", got)
+		t.Errorf("GetPostEdit calls = %d, want 0 (snapshot-diff recovers ids, no per-id fallback)", got)
 	}
-	// ONE settings call for the whole batch, not one per matched id.
+	// At least 2 list calls (before + after snapshots).
+	if got := atomic.LoadInt32(&listCalls); got < 2 {
+		t.Errorf("ListPosts calls = %d, want >= 2 (before + after snapshots)", got)
+	}
+	// ONE settings call for the whole batch.
 	if got := atomic.LoadInt32(&settingsCalls); got != 1 {
-		t.Errorf("GetSettings calls = %d, want 1 (offset fetched once per batch, not per id)", got)
+		t.Errorf("GetSettings calls = %d, want 1 (offset fetched once per batch)", got)
 	}
 	// All three slots matched to the right ids.
 	if len(resp.Slots) != 3 {
@@ -655,37 +691,39 @@ func TestPostPubDateToPublicationDate_OffsetShift(t *testing.T) {
 	}
 }
 
-// TestImportSearchPost_BatchPerIDFallback verifies the per-id fallback: when
-// the list does not return one of the created ids, that id is fetched via
-// GetPostEdit. The list path is still ONE call; the fallback is per-missing-
-// id only.
-func TestImportSearchPost_BatchPerIDFallback(t *testing.T) {
-	var listCalls int32
-	var editCalls int32
+// TestImportSearchPost_BatchCountMismatch verifies the count guard: when
+// the snapshot-diff recovers a different number of ids than were sent
+// (simulating a concurrent create by another client, or a post still
+// processing and not yet in the list), SlotLookupError names both counts,
+// the recovered ids are emitted in IDs, but no slot attribution is done.
+// The create is NOT failed — exit zero, the posts exist.
+func TestImportSearchPost_BatchCountMismatch(t *testing.T) {
+	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378,92820399]}`))
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"success":true}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
-			atomic.AddInt32(&listCalls, 1)
-			// Return only 2 of the 3 created ids — 92820399 is missing.
-			w.Write([]byte(`{
-				"list": [
+			if atomic.LoadInt32(&createCalled) == 0 {
+				// Before: 2 pre-existing posts.
+				w.Write([]byte(`{"list":[
+					{"id":10000001,"publication_date":{"date":"28 Июля","time":"09:00","timestamp":1753670400,"source_timestamp":1753674000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+					{"id":10000002,"publication_date":{"date":"28 Июля","time":"12:00","timestamp":1753681200,"source_timestamp":1753684800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],"total_rows":2,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				// After: 2 pre-existing + only 2 of the 3 created (one
+				// is still processing, not in the list yet).
+				w.Write([]byte(`{"list":[
+					{"id":10000001,"publication_date":{"date":"28 Июля","time":"09:00","timestamp":1753670400,"source_timestamp":1753674000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+					{"id":10000002,"publication_date":{"date":"28 Июля","time":"12:00","timestamp":1753681200,"source_timestamp":1753684800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
 					{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
 					{"id":92820378,"publication_date":{"date":"29 Июля","time":"16:25","timestamp":1753777500,"source_timestamp":1753781100},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
-				],
-				"total_rows": 2,
-				"is_has_more": false,
-				"rows_limit": 20
-			}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820399/edit":
-			atomic.AddInt32(&editCalls, 1)
-			w.Write([]byte(`{"id":92820399,"publication_date":{"date":"01.08.2026","hours":"09","minutes":"00"},"schedule_id":55}`))
+				],"total_rows":4,"is_has_more":false,"rows_limit":20}`))
+			}
 		default:
-			// Don't fail on unexpected paths — the list path may probe for
-			// other ids; we only care about the one we expect.
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
@@ -693,56 +731,53 @@ func TestImportSearchPost_BatchPerIDFallback(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001, 2002, 2003},
+		SearchPostIDs:       []int{2001, 2002, 2003}, // 3 sent
 		PublicationWhenType: 3,
 		PublicationHowType:  2,
 		SchedulesIDs:        []int{55},
 	})
 	if err != nil {
-		t.Fatalf("ImportSearchPost batch: %v", err)
+		t.Fatalf("ImportSearchPost batch: a count mismatch must not fail the import, got: %v", err)
 	}
-	// ONE list call.
-	if got := atomic.LoadInt32(&listCalls); got != 1 {
-		t.Errorf("ListPosts calls = %d, want 1", got)
+	// SlotLookupError names both counts.
+	if resp.SlotLookupError == "" {
+		t.Error("SlotLookupError = empty, want a message about the count mismatch")
 	}
-	// ONE GetPostEdit call — for the missing id only.
-	if got := atomic.LoadInt32(&editCalls); got != 1 {
-		t.Errorf("GetPostEdit calls = %d, want 1 (per-id fallback for the one missing id)", got)
+	if !strings.Contains(resp.SlotLookupError, "2") || !strings.Contains(resp.SlotLookupError, "3") {
+		t.Errorf("SlotLookupError = %q, want it to name both counts (recovered 2, sent 3)", resp.SlotLookupError)
 	}
-	// All three slots resolved.
-	if len(resp.Slots) != 3 {
-		t.Fatalf("Slots = %d entries, want 3 (2 from list + 1 from fallback)", len(resp.Slots))
+	// Recovered ids are emitted in IDs (2 of 3).
+	if len(resp.IDs) != 2 {
+		t.Errorf("IDs = %v, want 2 recovered ids", resp.IDs)
 	}
-	slotByID := make(map[int]*PublicationDate, 3)
-	for i := range resp.Slots {
-		slotByID[resp.Slots[i].ID] = resp.Slots[i].PublicationDate
-	}
-	// The fallback id got its slot from GetPostEdit.
-	pd, ok := slotByID[92820399]
-	if !ok || pd == nil {
-		t.Fatal("slot for 92820399 (fallback id) missing or nil")
-	}
-	if pd.Hours != "09" || pd.Minutes != "00" {
-		t.Errorf("fallback slot 92820399: hours=%q minutes=%q, want 09/00", pd.Hours, pd.Minutes)
+	// No slot attribution (count mismatch → do not guess).
+	if len(resp.Slots) != 0 {
+		t.Errorf("Slots = %d entries, want 0 (count mismatch → no slot attribution)", len(resp.Slots))
 	}
 }
 
-// TestImportSearchPost_BatchListFailsAllFallback verifies that when the
-// ListPosts call fails entirely, the per-id fallback is used for ALL ids.
-func TestImportSearchPost_BatchListFailsAllFallback(t *testing.T) {
-	var listCalls int32
-	var editCalls int32
+// TestImportSearchPost_BatchAfterSnapshotFails verifies that when the
+// after-snapshot ListPosts call fails, no ids are recovered,
+// SlotLookupError is set, and the create is NOT failed (exit zero). The
+// posts exist; this is reporting.
+func TestImportSearchPost_BatchAfterSnapshotFails(t *testing.T) {
+	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378]}`))
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"success":true}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
-			atomic.AddInt32(&listCalls, 1)
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error":"server error"}`))
-		case r.Method == http.MethodGet && (r.URL.Path == "/posts/92820377/edit" || r.URL.Path == "/posts/92820378/edit"):
-			atomic.AddInt32(&editCalls, 1)
-			w.Write([]byte(`{"id":` + r.URL.Path[len("/posts/"):len("/posts/")+8] + `,"publication_date":{"date":"31.07.2026","hours":"14","minutes":"25"},"schedule_id":55}`))
+			if atomic.LoadInt32(&createCalled) == 0 {
+				// Before snapshot succeeds.
+				w.Write([]byte(`{"list":[
+					{"id":10000001,"publication_date":{"date":"28 Июля","time":"09:00","timestamp":1753670400,"source_timestamp":1753674000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+				],"total_rows":1,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				// After snapshot fails.
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"server error"}`))
+			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -757,22 +792,18 @@ func TestImportSearchPost_BatchListFailsAllFallback(t *testing.T) {
 		SchedulesIDs:        []int{55},
 	})
 	if err != nil {
-		t.Fatalf("ImportSearchPost batch: %v", err)
+		t.Fatalf("ImportSearchPost batch: an after-snapshot failure must not fail the import, got: %v", err)
 	}
-	if got := atomic.LoadInt32(&listCalls); got != 1 {
-		t.Errorf("ListPosts calls = %d, want 1 (the failed call)", got)
+	// No ids recovered.
+	if len(resp.IDs) != 0 {
+		t.Errorf("IDs = %v, want empty (after-snapshot failed)", resp.IDs)
 	}
-	// Both ids fetched via per-id fallback.
-	if got := atomic.LoadInt32(&editCalls); got != 2 {
-		t.Errorf("GetPostEdit calls = %d, want 2 (all ids via fallback after list failure)", got)
+	if resp.ID != 0 {
+		t.Errorf("ID = %d, want 0 (no ids recovered)", resp.ID)
 	}
-	// SlotLookupError is set (the list failure is reported).
+	// SlotLookupError is set.
 	if resp.SlotLookupError == "" {
-		t.Error("SlotLookupError = empty, want a message about the list failure + fallback")
-	}
-	// Both slots resolved despite the list failure.
-	if len(resp.Slots) != 2 {
-		t.Fatalf("Slots = %d entries, want 2 (both via fallback)", len(resp.Slots))
+		t.Error("SlotLookupError = empty, want a message about the after-snapshot failure")
 	}
 }
 
@@ -780,38 +811,40 @@ func TestImportSearchPost_BatchListFailsAllFallback(t *testing.T) {
 // formats the publication date at the account's timezone offset (from
 // GET /users/settings), not UTC. The fixture uses a post whose timestamp
 // falls at 23:30 UTC — at UTC the date is 29.07.2025, at UTC+3 it is
-// 30.07.2025 (the next day). The GetPostEdit stub returns 30.07.2025 for
-// the same post (what the single path reports), and the batch slot's date
-// must match — the two paths agree instead of diverging by a day.
+// 30.07.2025 (the next day).
 //
 // RED-on-revert: if the offset is ignored (format in UTC), the batch date
 // is 29.07.2025, not 30.07.2025 → the assertion fails.
 func TestImportSearchPost_BatchDateAtAccountOffset(t *testing.T) {
 	var settingsCalls int32
+	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378,92820379]}`))
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"success":true}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			atomic.AddInt32(&settingsCalls, 1)
 			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[{"id":101,"name":"(GMT+03:00) SPb"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
-			// 1753831800 = 2025-07-29 23:30:00 UTC → UTC date 29.07.2025,
-			// UTC+3 date 30.07.2025. The first post carries this timestamp.
-			w.Write([]byte(`{
-				"list": [
-					{"id":92820377,"publication_date":{"date":"30 Июля","time":"02:30","timestamp":1753831800,"source_timestamp":1753842600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-					{"id":92820378,"publication_date":{"date":"30 Июля","time":"10:00","timestamp":1753856400,"source_timestamp":1753867200},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-					{"id":92820379,"publication_date":{"date":"30 Июля","time":"14:00","timestamp":1753870800,"source_timestamp":1753881600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
-				],
-				"total_rows": 3,
-				"is_has_more": false,
-				"rows_limit": 20
-			}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
-			// What the single path would report for the same post — the
-			// batch date must match this, not diverge by a day.
-			w.Write([]byte(`{"id":92820377,"publication_date":{"date":"30.07.2025","hours":"02","minutes":"30"},"schedule_id":55}`))
+			if atomic.LoadInt32(&createCalled) == 0 {
+				// Before: empty schedule.
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				// After: 3 created posts.
+				// 1753831800 = 2025-07-29 23:30:00 UTC → UTC date 29.07.2025,
+				// UTC+3 date 30.07.2025. The first post carries this timestamp.
+				w.Write([]byte(`{
+					"list": [
+						{"id":92820377,"publication_date":{"date":"30 Июля","time":"02:30","timestamp":1753831800,"source_timestamp":1753842600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+						{"id":92820378,"publication_date":{"date":"30 Июля","time":"10:00","timestamp":1753856400,"source_timestamp":1753867200},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+						{"id":92820379,"publication_date":{"date":"30 Июля","time":"14:00","timestamp":1753870800,"source_timestamp":1753881600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+					],
+					"total_rows": 3,
+					"is_has_more": false,
+					"rows_limit": 20
+				}`))
+			}
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -833,14 +866,12 @@ func TestImportSearchPost_BatchDateAtAccountOffset(t *testing.T) {
 		t.Fatalf("Slots = %d entries, want 3", len(resp.Slots))
 	}
 	// The first slot's date must be 30.07.2025 (UTC+3), NOT 29.07.2025 (UTC).
-	// This is what the single path (GetPostEdit stub above) reports for the
-	// same post — the two paths agree.
 	pd := resp.Slots[0].PublicationDate
 	if pd == nil {
 		t.Fatal("Slots[0].PublicationDate = nil")
 	}
 	if pd.Date != "30.07.2025" {
-		t.Errorf("Slots[0].Date = %q, want 30.07.2025 (23:30 UTC at offset+3 = 02:30 next day; GetPostEdit reports the same) — if this is 29.07.2025 the offset was ignored (UTC bug)", pd.Date)
+		t.Errorf("Slots[0].Date = %q, want 30.07.2025 (23:30 UTC at offset+3 = 02:30 next day) — if this is 29.07.2025 the offset was ignored (UTC bug)", pd.Date)
 	}
 	// Settings called once for the batch of three, not three times.
 	if got := atomic.LoadInt32(&settingsCalls); got != 1 {
@@ -855,24 +886,30 @@ func TestImportSearchPost_BatchDateAtAccountOffset(t *testing.T) {
 // case: a post at 02:00 UTC with timezone_offset -5 → the date is the
 // PREVIOUS day (28.07.2025, not 29.07.2025 UTC).
 func TestImportSearchPost_BatchDateNegativeOffset(t *testing.T) {
+	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378]}`))
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"success":true}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			w.Write([]byte(`{"timezone_id":5,"timezone_offset":-5,"timezones":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
-			// 1753754400 = 2025-07-29 02:00:00 UTC → UTC date 29.07.2025,
-			// UTC-5 date 28.07.2025 (previous day).
-			w.Write([]byte(`{
-				"list": [
-					{"id":92820377,"publication_date":{"date":"28 Июля","time":"21:00","timestamp":1753754400,"source_timestamp":1753736400},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-					{"id":92820378,"publication_date":{"date":"29 Июля","time":"10:00","timestamp":1753790400,"source_timestamp":1753772400},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
-				],
-				"total_rows": 2,
-				"is_has_more": false,
-				"rows_limit": 20
-			}`))
+			if atomic.LoadInt32(&createCalled) == 0 {
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				// 1753754400 = 2025-07-29 02:00:00 UTC → UTC date 29.07.2025,
+				// UTC-5 date 28.07.2025 (previous day).
+				w.Write([]byte(`{
+					"list": [
+						{"id":92820377,"publication_date":{"date":"28 Июля","time":"21:00","timestamp":1753754400,"source_timestamp":1753736400},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+						{"id":92820378,"publication_date":{"date":"29 Июля","time":"10:00","timestamp":1753790400,"source_timestamp":1753772400},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+					],
+					"total_rows": 2,
+					"is_has_more": false,
+					"rows_limit": 20
+				}`))
+			}
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -903,29 +940,36 @@ func TestImportSearchPost_BatchDateNegativeOffset(t *testing.T) {
 }
 
 // TestImportSearchPost_BatchSettingsLookupFails verifies that a failed
-// settings lookup (stub 500) does NOT fail the import: the id is still
-// returned, exit zero, SlotLookupError records the offset was unavailable,
-// and the publication dates for list-matched ids are OMITTED (empty) — a
-// stated-unknown date is better than a silently-wrong one. Hours/minutes
-// are still correct (from the time field, not the timestamp).
+// settings lookup (stub 500) does NOT fail the import: the ids are still
+// recovered from the snapshot-diff, exit zero, SlotLookupError records the
+// offset was unavailable, and the publication dates for recovered ids are
+// OMITTED (empty) — a stated-unknown date is better than a silently-wrong
+// one. Hours/minutes are still correct (from the time field, not the
+// timestamp).
 func TestImportSearchPost_BatchSettingsLookupFails(t *testing.T) {
+	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			w.Write([]byte(`{"id":92820377,"ids":[92820377,92820378]}`))
+			atomic.StoreInt32(&createCalled, 1)
+			w.Write([]byte(`{"success":true}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(`{"error":"server error"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
-			w.Write([]byte(`{
-				"list": [
-					{"id":92820377,"publication_date":{"date":"30 Июля","time":"14:25","timestamp":1753831800,"source_timestamp":1753842600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-					{"id":92820378,"publication_date":{"date":"30 Июля","time":"16:25","timestamp":1753839000,"source_timestamp":1753849800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
-				],
-				"total_rows": 2,
-				"is_has_more": false,
-				"rows_limit": 20
-			}`))
+			if atomic.LoadInt32(&createCalled) == 0 {
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			} else {
+				w.Write([]byte(`{
+					"list": [
+						{"id":92820377,"publication_date":{"date":"30 Июля","time":"14:25","timestamp":1753831800,"source_timestamp":1753842600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
+						{"id":92820378,"publication_date":{"date":"30 Июля","time":"16:25","timestamp":1753839000,"source_timestamp":1753849800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+					],
+					"total_rows": 2,
+					"is_has_more": false,
+					"rows_limit": 20
+				}`))
+			}
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -943,9 +987,12 @@ func TestImportSearchPost_BatchSettingsLookupFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportSearchPost: a failed settings lookup must not fail the import, got error: %v", err)
 	}
-	// The id is still returned (exit zero).
+	// The ids are still recovered (exit zero).
 	if resp.ID != 92820377 {
-		t.Errorf("ID = %d, want 92820377 (the id must still be returned)", resp.ID)
+		t.Errorf("ID = %d, want 92820377 (recovered from snapshot-diff)", resp.ID)
+	}
+	if len(resp.IDs) != 2 {
+		t.Errorf("IDs = %v, want 2 recovered ids", resp.IDs)
 	}
 	// SlotLookupError records the offset was unavailable.
 	if resp.SlotLookupError == "" {
@@ -954,7 +1001,7 @@ func TestImportSearchPost_BatchSettingsLookupFails(t *testing.T) {
 	if !strings.Contains(resp.SlotLookupError, "timezone offset unavailable") {
 		t.Errorf("SlotLookupError = %q, want it to mention the unavailable timezone offset", resp.SlotLookupError)
 	}
-	// Both slots resolved (list matched), but dates are OMITTED (empty).
+	// Both slots resolved (diff matched), but dates are OMITTED (empty).
 	if len(resp.Slots) != 2 {
 		t.Fatalf("Slots = %d entries, want 2", len(resp.Slots))
 	}
