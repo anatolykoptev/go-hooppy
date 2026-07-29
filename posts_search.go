@@ -726,7 +726,11 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 		IDs:                  ids,
 	}
 	var resp PostIDResponse
-	if err := c.doPUT(ctx, pathPostsImport, body, &resp); err != nil {
+	// doPUTNoRetry, not doPUT: PUT /posts/import CREATES posts, so it is
+	// non-idempotent — a 5xx/timeout after the write committed, retried,
+	// would duplicate the created posts. The Update* PUTs target a known
+	// id and converge on re-send, so they keep the retrying doPUT.
+	if err := c.doPUTNoRetry(ctx, pathPostsImport, body, &resp); err != nil {
 		return nil, err
 	}
 	// Report the assigned slot when the post was created into a schedule

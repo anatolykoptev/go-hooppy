@@ -50,7 +50,7 @@ type Config struct {
 	MaxUploadBytes   int64          // max file size for uploads; default 50 MB
 	MaxResponseBytes int64          // max response body size; default 10 MB
 	HTTPClient       *http.Client   // if non-nil, overrides the default *http.Client (caller owns transport config — pool sizing, TLS, proxies). Follows the go-kit WithHTTPClient pattern.
-	RetryOptions     *retry.Options // if non-nil, enables retry for GET and DELETE requests on transient failures (429/5xx). POST and streaming uploads NEVER retry (non-idempotent). Context is the sole deadline authority. Use OnRetry for observability.
+	RetryOptions     *retry.Options // if non-nil, enables retry for GET, PUT (full-state Update* to a known id), and DELETE requests on transient failures (429/5xx). POST, streaming uploads, and the create-shaped PUT /posts/import (ImportSearchPost) NEVER retry — they are non-idempotent and a retry after a committed write would duplicate created posts. Context is the sole deadline authority. Use OnRetry for observability.
 }
 
 // NewClient creates a new Hooppy API client.
@@ -222,6 +222,26 @@ func (c *Client) doPUT(ctx context.Context, path string, body interface{}, out i
 	return c.do(req, out)
 }
 
+// doPUTNoRetry performs a PUT request with a JSON body and decodes the
+// response, NEVER retrying even when Config.RetryOptions is set. Used for
+// non-idempotent PUT endpoints (PUT /posts/import creates posts — a 5xx or
+// timeout arriving after the write committed, then retried, would duplicate
+// the created posts in a live publishing queue). The full-state Update* PUTs
+// target a known id and converge on re-send, so they keep the retrying doPUT.
+func (c *Client) doPUTNoRetry(ctx context.Context, path string, body interface{}, out interface{}) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		return fmt.Errorf("hooppy: encode body: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+path, &buf)
+	if err != nil {
+		return fmt.Errorf("hooppy: build request: %w", err)
+	}
+	c.setAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(req, out)
+}
+
 // doGETRaw performs a GET request and returns the raw response body bytes,
 // without JSON-decoding into a Go struct. Used by UpdateScheduleFromEdit to
 // fetch the full /edit response (72 keys) as raw bytes so unmodelled fields
@@ -375,11 +395,12 @@ func (c *Client) do(req *http.Request, out interface{}) error {
 }
 
 // doWithRetry wraps a request-builder closure with retry.Do for transient
-// failures (429/5xx). Non-retryable APIErrors (4xx) and body-read/decode
-// errors are wrapped with retry.Permanent to stop immediately. Retryable
-// APIErrors with a Retry-After header use retry.RetryAfter to override
-// the exponential backoff. MaxElapsedTime defaults to 30s if unset.
-// Context is the sole deadline authority — retry.Do respects ctx.Done().
+// failures (429/5xx). Non-retryable APIErrors (4xx other than 429) and
+// body-read/decode errors are wrapped with retry.Permanent to stop
+// immediately. Retryable APIErrors with a Retry-After header use
+// retry.RetryAfter to override the exponential backoff. MaxElapsedTime
+// defaults to 30s if unset. Context is the sole deadline authority —
+// retry.Do respects ctx.Done().
 func (c *Client) doWithRetry(ctx context.Context, buildReq func() (*http.Request, error), out interface{}) error {
 	opts := *c.retryOpts // copy so applyDefaults doesn't mutate the caller's Options
 	if opts.MaxElapsedTime == 0 {
