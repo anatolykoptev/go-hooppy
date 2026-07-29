@@ -24,6 +24,30 @@ import (
 // involvement) instead, which DOES work server-side. The fields are kept on
 // the struct so callers get a clear error rather than a silent lie — see
 // issue #63.
+//
+// Three more phantom parameters were found in the same sweep (issues #67,
+// #73): source_id, source_resource_id, and owner_id are accepted by the
+// server and silently dropped — the caller gets an unfiltered result set
+// that looks filtered. They are refused here with the same shape as the
+// min_* guard. Use source_type (1=social, 2=RSS), content_types,
+// photos_amount, video_duration, or text to narrow. Note that source_id
+// is phantom on /posts-search but WORKS on /posts (ListPosts) — same name,
+// two endpoints, opposite behaviour — so the fix is per-endpoint, never
+// per-name.
+//
+// # Method notes for the next investigator (both cost a wrong answer)
+//
+//  1. total_rows CAPS AT 10000. A filter over a large collection looks
+//     phantom because both the filtered and unfiltered sides read the cap.
+//     Judge by RETURNED ROW CONTENT, not total_rows.
+//
+//  2. An impossible enum value is NOT a probe. source_type=9 returns
+//     everything because the server ignores an unrecognised enum rather
+//     than matching nothing — indistinguishable from a phantom. Use a
+//     different VALID value: source_type=2 returns 0 rows and proves the
+//     filter works.
+//
+// These two notes are why this issue took three rounds to characterise.
 func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*SearchPostsResponse, error) {
 	// Refuse the five metric-threshold filters before any request: the API
 	// has no such server-side parameters, so emitting them would silently
@@ -36,6 +60,23 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	if f.MinLikes != 0 || f.MinViews != 0 || f.MinComments != 0 || f.MinReposts != 0 || f.MinInvolvement != 0 {
 		return nil, fmt.Errorf("hooppy: ListSearchPosts: min_likes/min_views/min_comments/min_reposts/min_involvement are not server-side filters — the API silently ignores them and returns an unfiltered result set; use sort_by (likes|views|reposts|comments|involvement) instead, which does work server-side (issue #63)")
 	}
+	// Refuse the three phantom ID filters before any request (issues #67,
+	// #73): source_id, source_resource_id, and owner_id are accepted by
+	// the server and silently dropped — the caller gets an unfiltered
+	// result set that looks filtered. Measured by returned row content
+	// (not total_rows, which caps at 10000 — see the method notes above):
+	//   - source_id=7 (Instagram) returns rows whose own source_id is 1.
+	//   - source_resource_id=2228 (Instagram-only) returns rows with
+	//     source_id: [1].
+	//   - owner_id=<real> returns four different owners.
+	// Same defect class as the min_* guard. The fields stay on the struct
+	// (source-compatible — existing code still compiles) but any non-zero
+	// value now errors. Use source_type, content_types, photos_amount,
+	// video_duration, or text to narrow. source_id WORKS on /posts
+	// (ListPosts) — phantom only here, so the fix is per-endpoint.
+	if f.SourceID != 0 || f.SourceResourceID != 0 || f.OwnerID != 0 {
+		return nil, fmt.Errorf("hooppy: ListSearchPosts: source_id/source_resource_id/owner_id are not server-side filters on /posts-search — the API accepts and silently ignores them, returning an unfiltered result set that looks filtered (measured by row content, not total_rows which caps at 10000); use source_type (1=social, 2=RSS), content_types, photos_amount, video_duration, or text to narrow (issues #67, #73)")
+	}
 	params := url.Values{}
 	if f.Text != "" {
 		params.Set("text", f.Text)
@@ -46,37 +87,30 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	if f.DateTo != "" {
 		params.Set("date_to", f.DateTo)
 	}
-	// Reject negatives for the five ID/page filters before any request:
-	// the old `> 0` guard let a negative take neither branch — no error, no
-	// parameter, an unfiltered result that looks filtered. This is the
-	// exact defect class the PhotosAmount/VideoDuration guards below and
-	// the min_* guard above close. Reachable from the shipped CLI:
-	// cmd/hooppy binds all five with IntVar and pflag accepts negatives
-	// (--source-id -1 drops the parameter → results from every network
+	// Reject negatives for the two remaining ID/page filters before any
+	// request: the old `> 0` guard let a negative take neither branch —
+	// no error, no parameter, an unfiltered result that looks filtered.
+	// This is the exact defect class the PhotosAmount/VideoDuration guards
+	// below and the min_* guard above close. Reachable from the shipped
+	// CLI: cmd/hooppy binds these with IntVar and pflag accepts negatives
+	// (--source-type -1 drops the parameter → results from every network
 	// while the caller believes they filtered to one; --page -1, or a
 	// computed page-1 that underflows, drops the parameter → the server
 	// returns page 1, so a paging loop silently re-reads the first page).
-	// Zero stays the unset sentinel.
-	if f.SourceType < 0 || f.SourceID < 0 || f.SourceResourceID < 0 || f.OwnerID < 0 || f.Page < 0 {
-		return nil, fmt.Errorf("hooppy: ListSearchPosts: source_type/source_id/source_resource_id/owner_id/page must be non-negative (got source_type=%d, source_id=%d, source_resource_id=%d, owner_id=%d, page=%d); pass 0 to leave any unset", f.SourceType, f.SourceID, f.SourceResourceID, f.OwnerID, f.Page)
+	// Zero stays the unset sentinel. SourceID/SourceResourceID/OwnerID are
+	// no longer here — they are phantom and refused above on != 0.
+	if f.SourceType < 0 || f.Page < 0 {
+		return nil, fmt.Errorf("hooppy: ListSearchPosts: source_type/page must be non-negative (got source_type=%d, page=%d); pass 0 to leave any unset", f.SourceType, f.Page)
 	}
 	if f.SourceType > 0 {
 		params.Set("source_type", strconv.Itoa(f.SourceType))
 	}
-	if f.SourceID > 0 {
-		params.Set("source_id", strconv.Itoa(f.SourceID))
-	}
-	if f.SourceResourceID > 0 {
-		params.Set("source_resource_id", strconv.Itoa(f.SourceResourceID))
-	}
-	if f.OwnerID > 0 {
-		params.Set("owner_id", strconv.Itoa(f.OwnerID))
-	}
 	if f.Page > 0 {
 		params.Set("page", strconv.Itoa(f.Page))
 	}
-	// Sorting (empirically verified — not in filters_plug, which describes
-	// filters only, not sorting or pagination).
+	// Sorting — reaches the wire but is NOT differentially measured (see
+	// the "assumed" group in TestPhantomFilterSweep). Not in filters_plug,
+	// which describes filters only, not sorting or pagination.
 	if f.SortBy != "" {
 		params.Set("sort_by", f.SortBy)
 	}

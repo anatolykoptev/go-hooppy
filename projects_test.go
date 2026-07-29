@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
+	"strings"
 	"testing"
 )
 
@@ -423,7 +424,7 @@ func TestListAllSchedules_SanityCap(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when is_has_more never goes false, got nil")
 	}
-	if !contains(err.Error(), "exceeded") {
+	if !strings.Contains(err.Error(), "exceeded") {
 		t.Errorf("expected cap error mentioning 'exceeded', got: %v", err)
 	}
 }

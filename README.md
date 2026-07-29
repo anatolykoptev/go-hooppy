@@ -180,8 +180,8 @@ hooppy notifications
 
 # Search and scrape posts from external social media pages (UNDOCUMENTED)
 hooppy search sources                          # list configured source resources
-hooppy search posts --source-resource-id <id>  # list scraped posts from a source
-hooppy search posts --source-resource-id <id> --text "search query" --date-from 01.01.2026
+hooppy search posts --source-type 1  # list scraped posts (1=social, 2=RSS)
+hooppy search posts --source-type 1 --text "search query" --date-from 01.01.2026
 hooppy search status                           # check if parsing is in progress
 hooppy search parse --source-resource-id <id> --account-id <id>  # start scraping
 hooppy search stop                             # stop in-progress scraping

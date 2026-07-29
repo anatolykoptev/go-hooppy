@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -22,7 +23,7 @@ func TestListPosts_NilIsPublished(t *testing.T) {
 		t.Fatalf("ListPosts: %v", err)
 	}
 	// is_published should NOT be in the query string when nil.
-	if contains(capturedURL, "is_published") {
+	if strings.Contains(capturedURL, "is_published") {
 		t.Errorf("URL should not contain is_published, got: %s", capturedURL)
 	}
 }
@@ -40,7 +41,7 @@ func TestListPosts_TrueIsPublished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPosts: %v", err)
 	}
-	if !contains(capturedURL, "is_published=1") {
+	if !strings.Contains(capturedURL, "is_published=1") {
 		t.Errorf("URL should contain is_published=1, got: %s", capturedURL)
 	}
 }
@@ -58,7 +59,7 @@ func TestListPosts_FalseIsPublished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPosts: %v", err)
 	}
-	if !contains(capturedURL, "is_published=0") {
+	if !strings.Contains(capturedURL, "is_published=0") {
 		t.Errorf("URL should contain is_published=0, got: %s", capturedURL)
 	}
 }
@@ -80,19 +81,32 @@ func TestListPosts_ZeroValuesSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPosts: %v", err)
 	}
-	if contains(capturedURL, "source_id") || contains(capturedURL, "account_id") || contains(capturedURL, "page_id") {
+	if strings.Contains(capturedURL, "source_id") || strings.Contains(capturedURL, "account_id") || strings.Contains(capturedURL, "page_id") {
 		t.Errorf("zero values should be skipped, got: %s", capturedURL)
 	}
 }
 
 // TestListPosts_NegativeRejected covers issue #65 item 1: the ListPosts
-// ID/page filters (SourceID, AccountID, PageID, ScheduleID, ProjectID,
-// Page) were gated on `> 0` — the same silent-negative hole this PR closed
-// across the search/accounts/pages filters. A negative took neither
-// branch: no error, no parameter, an unfiltered result that looks
-// filtered. Reachable from the shipped CLI (cmd/hooppy binds these with
-// IntVar; pflag accepts negatives). The guard now rejects negatives
+// ID/page filters that are still WORKING filters (SourceID, ScheduleID,
+// ProjectID, Page) were gated on `> 0` — the same silent-negative hole
+// this PR closed across the search/accounts/pages filters. A negative
+// took neither branch: no error, no parameter, an unfiltered result that
+// looks filtered. Reachable from the shipped CLI (cmd/hooppy binds these
+// with IntVar; pflag accepts negatives). The guard now rejects negatives
 // before any request; zero stays the unset sentinel.
+//
+// AccountID and PageID ARE included here even though they are phantom
+// parameters (issues #67, #73): the phantom guard fires on != 0 today,
+// so a negative is refused by it — but that is a property of the CURRENT
+// guard. The observable these cases assert (a negative value errors
+// before any request) stays true and stays worth asserting regardless of
+// which internal guard produces the refusal. They are the only thing
+// that notices if the phantom guard is weakened from != 0 to > 0: a
+// negative would then take neither branch — no error, no parameter, an
+// unfiltered result that looks filtered — which is issue #65 item 1
+// verbatim and reachable from the shipped CLI. The structural sweep in
+// TestPhantomFilterSweep now also runs both signs on every phantom field
+// (see its negVal arm), so this is belt-and-braces with that gate.
 func TestListPosts_NegativeRejected(t *testing.T) {
 	cases := []struct {
 		name string
@@ -139,7 +153,7 @@ func TestListPosts_PublicationDate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPosts: %v", err)
 	}
-	if !contains(capturedURL, "publication_date=01.01.2026") {
+	if !strings.Contains(capturedURL, "publication_date=01.01.2026") {
 		t.Errorf("URL should contain publication_date, got: %s", capturedURL)
 	}
 }
@@ -157,8 +171,6 @@ func TestListPosts_AllFilters(t *testing.T) {
 		IsPublished:     &pub,
 		PublicationDate: "15.06.2026",
 		SourceID:        6,
-		AccountID:       100,
-		PageID:          200,
 		ScheduleID:      300,
 		ProjectID:       400,
 		Page:            2,
@@ -166,8 +178,10 @@ func TestListPosts_AllFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPosts: %v", err)
 	}
-	for _, param := range []string{"is_published=1", "publication_date=15.06.2026", "source_id=6", "account_id=100", "page_id=200", "schedule_id=300", "project_id=400", "page=2"} {
-		if !contains(capturedURL, param) {
+	// account_id and page_id are phantom on /posts (issues #67, #73) and
+	// are refused — they are not on the wire. See TestPhantomFilterSweep.
+	for _, param := range []string{"is_published=1", "publication_date=15.06.2026", "source_id=6", "schedule_id=300", "project_id=400", "page=2"} {
+		if !strings.Contains(capturedURL, param) {
 			t.Errorf("URL should contain %s, got: %s", param, capturedURL)
 		}
 	}
@@ -205,7 +219,7 @@ func TestDeletePost_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeletePost: %v", err)
 	}
-	if !contains(capturedPath, "/42") {
+	if !strings.Contains(capturedPath, "/42") {
 		t.Errorf("path should contain /42, got: %s", capturedPath)
 	}
 }
@@ -260,20 +274,6 @@ func TestBatchDeletePosts_MultipleIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BatchDeletePosts: %v", err)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		(len(s) > 0 && len(substr) > 0 && indexOf(s, substr) >= 0))
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }
 
 // TestUpdatePostText_ScheduleDriven_PreservesTextsAndPageSelection verifies
@@ -423,7 +423,7 @@ func TestUpdatePostText_FailClosed_NoPageSelection(t *testing.T) {
 	if putCalled {
 		t.Fatal("PUT was issued despite fail-closed — must refuse to send a request that clears page targets")
 	}
-	if !contains(err.Error(), "99") {
+	if !strings.Contains(err.Error(), "99") {
 		t.Errorf("error must name the post ID (99), got: %v", err)
 	}
 }
@@ -692,7 +692,7 @@ func TestUpdatePostText_ScheduleDriven_ZeroScheduleID_RefusesRequest(t *testing.
 	if putCalled {
 		t.Fatal("PUT was issued despite zero schedule_id — must refuse to send a request that targets no schedule")
 	}
-	if !contains(err.Error(), "88") {
+	if !strings.Contains(err.Error(), "88") {
 		t.Errorf("error must name the post ID (88), got: %v", err)
 	}
 }
@@ -819,7 +819,7 @@ func TestListAllPosts_SanityCap(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when is_has_more never goes false, got nil")
 	}
-	if !contains(err.Error(), "exceeded") {
+	if !strings.Contains(err.Error(), "exceeded") {
 		t.Errorf("expected cap error mentioning 'exceeded', got: %v", err)
 	}
 }
@@ -982,7 +982,7 @@ func TestUpdatePostText_FailClosed_NotBySchedule_EmptySelection_Refuses(t *testi
 	if putCalled {
 		t.Fatal("PUT was issued despite when_type != 3 and empty selection — must refuse to send a request that clears page targets")
 	}
-	if !contains(err.Error(), "71") {
+	if !strings.Contains(err.Error(), "71") {
 		t.Errorf("error must name the post ID (71), got: %v", err)
 	}
 }

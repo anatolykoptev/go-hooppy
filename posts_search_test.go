@@ -19,8 +19,8 @@ func TestListSearchPosts(t *testing.T) {
 			t.Errorf("GET /posts-search, got %s %s", r.Method, r.URL.Path)
 		}
 		q := r.URL.Query()
-		if q.Get("source_resource_id") != "123" {
-			t.Errorf("source_resource_id = %q, want 123", q.Get("source_resource_id"))
+		if q.Get("source_type") != "1" {
+			t.Errorf("source_type = %q, want 1", q.Get("source_type"))
 		}
 		if q.Get("text") != "test query" {
 			t.Errorf("text = %q, want test query", q.Get("text"))
@@ -46,8 +46,8 @@ func TestListSearchPosts(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
-		SourceResourceID: 123,
-		Text:             "test query",
+		SourceType: 1,
+		Text:       "test query",
 	})
 	if err != nil {
 		t.Fatalf("ListSearchPosts: %v", err)
@@ -283,15 +283,29 @@ func TestListSearchPosts_PhotosAmountPassThrough(t *testing.T) {
 	}
 }
 
-// TestListSearchPosts_IDPageNegative covers issue #65 item 1: the five
-// ID/page filters (SourceType, SourceID, SourceResourceID, OwnerID,
-// Page) were gated on `> 0` — the same silent-negative hole this PR closed
-// for the min_* and bucket-key fields. A negative took neither branch:
-// no error, no parameter, an unfiltered result that looks filtered.
-// Reachable from the shipped CLI (--source-id -1, --page -1 via pflag's
-// signed IntVar). The guard now rejects negatives before any request;
-// zero stays the unset sentinel. Each case is isolated to one field so a
-// regression in any single guard is visible.
+// TestListSearchPosts_IDPageNegative covers issue #65 item 1: the
+// ID/page filters that are still WORKING filters (SourceType, Page) were
+// gated on `> 0` — the same silent-negative hole this PR closed for the
+// min_* and bucket-key fields. A negative took neither branch: no error,
+// no parameter, an unfiltered result that looks filtered. Reachable from
+// the shipped CLI (--source-type -1, --page -1 via pflag's signed IntVar).
+// The guard now rejects negatives before any request; zero stays the
+// unset sentinel. Each case is isolated to one field so a regression in
+// any single guard is visible.
+//
+// SourceID, SourceResourceID, and OwnerID ARE included here even though
+// they are phantom parameters (issues #67, #73): the phantom guard fires
+// on != 0 today, so a negative is refused by it — but that is a property
+// of the CURRENT guard. The observable these cases assert (a negative
+// value errors before any request) stays true and stays worth asserting
+// regardless of which internal guard produces the refusal. They are the
+// only thing that notices if the phantom guard is weakened from != 0 to
+// > 0: a negative would then take neither branch — no error, no
+// parameter, an unfiltered result that looks filtered — which is issue
+// #65 item 1 verbatim and reachable from the shipped CLI. The structural
+// sweep in TestPhantomFilterSweep now also runs both signs on every
+// phantom field (see its negVal arm), so this is belt-and-braces with
+// that gate.
 func TestListSearchPosts_IDPageNegative(t *testing.T) {
 	cases := []struct {
 		name string
@@ -387,15 +401,14 @@ func TestListSearchPosts_FilterVocabularyPinned(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	// Populate every VALID filter (no metric thresholds — those are refused
-	// by the guard and never reach the wire; see TestListSearchPosts_MetricFiltersRejected).
+	// by the guard and never reach the wire; see TestListSearchPosts_MetricFiltersRejected;
+	// no source_id/source_resource_id/owner_id — those are phantom on
+	// /posts-search and refused, see TestPhantomFilterSweep).
 	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
 		Text:                "query",
 		DateFrom:            "01.01.2026",
 		DateTo:              "31.01.2026",
 		SourceType:          1,
-		SourceID:            1,
-		SourceResourceID:    123,
-		OwnerID:             100,
 		Page:                2,
 		SortBy:              "likes",
 		SortDirection:       "desc",
@@ -985,7 +998,7 @@ func TestImportSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
 	if requestMade {
 		t.Fatal("ImportSearchPost issued a request despite when_type=3 + empty schedules — must fail before any request")
 	}
-	if !contains(err.Error(), "schedule") {
+	if !strings.Contains(err.Error(), "schedule") {
 		t.Errorf("error must explain the schedule requirement, got: %v", err)
 	}
 }
@@ -1053,7 +1066,7 @@ func TestCopySearchPost_RejectsBatchSlice(t *testing.T) {
 	if requestMade {
 		t.Fatal("CopySearchPost issued a request despite a non-empty SearchPostIDs — must fail before any request (the slice would otherwise marshal onto the wire with err == nil)")
 	}
-	if !contains(err.Error(), "RewriteSearchPost") || !contains(err.Error(), "ImportSearchPost") {
+	if !strings.Contains(err.Error(), "RewriteSearchPost") || !strings.Contains(err.Error(), "ImportSearchPost") {
 		t.Errorf("error must name the batch-capable endpoints RewriteSearchPost/ImportSearchPost, got: %v", err)
 	}
 	// The scalar must stay valid on its own (no batch slice) — sanity-check
