@@ -352,9 +352,15 @@ func (c *Client) UpdateSchedule(ctx context.Context, id int, payload SchedulePay
 // to build it from typed values:
 //
 //	overrides, err := hooppy.ScheduleOverride("name", "New Name")
-//	// or compose multiple:
-//	overrides, _ := hooppy.ScheduleOverride("state", 1)
-//	hooppy.ScheduleOverrideInto(overrides, "name", "New Name")
+//
+// To compose multiple overrides, build the map directly (each value must be
+// JSON-marshalled bytes):
+//
+//	overrides := map[string]json.RawMessage{}
+//	nameBytes, _ := json.Marshal("New Name")
+//	overrides["name"] = nameBytes
+//	stateBytes, _ := json.Marshal(1)
+//	overrides["state"] = stateBytes
 //
 // UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
 // Discovered via API probing — may change without notice.
@@ -406,18 +412,6 @@ func ScheduleOverride(key string, value interface{}) (map[string]json.RawMessage
 		return nil, fmt.Errorf("hooppy: ScheduleOverride: marshal %q: %w", key, err)
 	}
 	return map[string]json.RawMessage{key: b}, nil
-}
-
-// ScheduleOverrideInto adds or replaces a field in an existing override map.
-// Convenience for composing multiple overrides without error-checking each
-// append individually (the error return is still checked by the caller).
-func ScheduleOverrideInto(m map[string]json.RawMessage, key string, value interface{}) error {
-	b, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Errorf("hooppy: ScheduleOverrideInto: marshal %q: %w", key, err)
-	}
-	m[key] = b
-	return nil
 }
 
 // DeleteSchedule deletes a schedule via DELETE /posts/schedules/{id}.
