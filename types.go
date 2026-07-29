@@ -1193,17 +1193,34 @@ type ParsingStartResponse struct {
 }
 
 // CopySearchPostPayload copies or rewrites a scraped post (from GET /posts-search)
-// to the user's own pages. Used by CopySearchPost (PUT /posts/copy) and
-// RewriteSearchPost (POST /posts with as_copy=1).
+// to the user's own pages. Used by CopySearchPost (PUT /posts/copy),
+// RewriteSearchPost (POST /posts with as_copy=1), and ImportSearchPost
+// (PUT /posts/import).
 //
 // Photo handling: to include photos when rewriting, call GetSearchPostEdit
 // to get the scraped post's attachments, extract photo data, and pass them
 // in Attachments as [{type: "photos", data: [photo objects]}].
 //
-// UNDOCUMENTED: PUT /posts/copy and POST /posts with as_copy=1 + search_post_id
-// are not in the public OpenAPI spec.
+// ID precedence — SearchPostIDs (batch) wins over SearchPostID (single):
+//   - SearchPostIDs non-empty: the slice is comma-joined in CALLER ORDER and
+//     sent as the ids wire field. The server assigns schedule slots in the
+//     order it receives ids, so the caller controls publication order.
+//   - SearchPostIDs empty + SearchPostID non-zero: the scalar is sent as the
+//     sole id (the legacy single-post path).
+//   - both set: RewriteSearchPost/ImportSearchPost error before any request
+//     (ambiguous intent — pass only one).
+//   - both empty: RewriteSearchPost/ImportSearchPost error before any request
+//     (nothing to copy).
+//
+// CopySearchPost (PUT /posts/copy) uses a different wire shape — it serializes
+// SearchPostID as the singular search_post_id int directly and does NOT send
+// the ids string; the batch slice does not apply to that endpoint.
+//
+// UNDOCUMENTED: PUT /posts/copy, POST /posts with as_copy=1, and
+// PUT /posts/import are not in the public OpenAPI spec.
 type CopySearchPostPayload struct {
-	SearchPostID        int              `json:"search_post_id"`             // ID from GET /posts-search (REQUIRED)
+	SearchPostID        int              `json:"search_post_id"`             // single scraped post ID (legacy; used by CopySearchPost, and by Rewrite/Import when SearchPostIDs is empty)
+	SearchPostIDs       []int            `json:"search_post_ids,omitempty"`  // batch of scraped post IDs; when non-empty, wins over SearchPostID on Rewrite/Import (comma-joined in caller order). CopySearchPost REFUSES a non-empty slice before any request — PUT /posts/copy takes a singular search_post_id int and silently ignores search_post_ids, so a batch slice on that endpoint is a phantom (it would marshal onto the wire with err == nil); the slice is honoured only by RewriteSearchPost/ImportSearchPost, which join it into the ids wire field.
 	PublicationWhenType int              `json:"publication_when_type"`      // 1=now, 2=at specific time, 3=by schedule
 	PublicationHowType  int              `json:"publication_how_type"`       // 1
 	SelectedPagesIDs    []int            `json:"selected_pages_ids"`         // for when_type=1 or 2

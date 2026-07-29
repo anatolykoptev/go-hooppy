@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -906,7 +907,12 @@ func registerSearch(root *cobra.Command) {
 	var copyWhenType, copyHowType int
 	var copySchedules string
 	var copyDate, copyHours, copyMinutes string
-	copyCmd.Flags().IntVar(&copyPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED)")
+	// copy does NOT offer --post-ids: PUT /posts/copy takes a singular
+	// search_post_id int, and the batch slice is silently dropped on that
+	// endpoint (the server does not read search_post_ids — probed: a batch
+	// payload reaches the wire with search_post_id:0 and an unread array,
+	// no error). Use `search rewrite` or `search import` for a batch.
+	copyCmd.Flags().IntVar(&copyPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED). copy is single-post only — for a batch use 'search rewrite --post-ids' or 'search import --post-ids' (PUT /posts/copy takes one search_post_id).")
 	copyCmd.Flags().StringVar(&copyPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
 	copyCmd.Flags().IntVar(&copyWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
 	copyCmd.Flags().IntVar(&copyHowType, "how-type", 1, "publication how type (1=default)")
@@ -915,37 +921,9 @@ func registerSearch(root *cobra.Command) {
 	copyCmd.Flags().StringVar(&copyHours, "hours", "", "publication hours HH (for when-type 2)")
 	copyCmd.Flags().StringVar(&copyMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
 	copyCmd.Run = func(_ *cobra.Command, _ []string) {
-		if copyPostID == 0 {
-			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
-			os.Exit(1)
-		}
-		if copyWhenType == 2 && (copyDate == "" || copyHours == "" || copyMinutes == "") {
-			fmt.Fprintln(os.Stderr, "error: --date, --hours, --minutes are required for --when-type 2")
-			os.Exit(1)
-		}
-		if copyWhenType == 3 && len(parseIntList(copySchedules)) == 0 {
-			fmt.Fprintln(os.Stderr, "error: --schedules is required for --when-type 3 (by schedule) — a schedule-driven copy targeted at no schedule publishes to nothing")
-			os.Exit(1)
-		}
+		payload, err := buildCopyPayload(copyPostID, copyWhenType, copyHowType, copyPages, copySchedules, copyDate, copyHours, copyMinutes)
+		die(err)
 		c := mustClient()
-		payload := hooppy.CopySearchPostPayload{
-			SearchPostID:        copyPostID,
-			PublicationWhenType: copyWhenType,
-			PublicationHowType:  copyHowType,
-		}
-		switch copyWhenType {
-		case 3:
-			payload.SchedulesIDs = parseIntList(copySchedules)
-		case 2:
-			payload.SelectedPagesIDs = parseIntList(copyPages)
-			payload.PublicationDate = &hooppy.PublicationDate{
-				Date:    copyDate,
-				Hours:   copyHours,
-				Minutes: copyMinutes,
-			}
-		default:
-			payload.SelectedPagesIDs = parseIntList(copyPages)
-		}
 		resp, err := c.CopySearchPost(context.Background(), payload)
 		die(err)
 		printJSON(resp)
@@ -957,12 +935,14 @@ func registerSearch(root *cobra.Command) {
 		Short: "Rewrite a scraped post with custom text and publish to your pages",
 	})
 	var rwPostID int
+	var rwPostIDs string
 	var rwText, rwPages, rwSchedules string
 	var rwWhenType, rwHowType int
 	var rwDate, rwHours, rwMinutes string
 	var rwNoAttachments bool
-	rewriteCmd.Flags().IntVar(&rwPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED)")
-	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (REQUIRED)")
+	rewriteCmd.Flags().IntVar(&rwPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
+	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). The server assigns schedule slots in the given order. Per-post attachment download is skipped in batch mode — use --post-id for attachment preservation. Batch rewrite CANNOT override text (the payload shape cannot express per-post text), so --text is rejected with --post-ids; --post-ids alone keeps each post's original text (like 'search import --post-ids').")
+	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (required for --post-id; NOT allowed with --post-ids — batch rewrite cannot express per-post text; omit --text with --post-ids to keep each post's original text)")
 	rewriteCmd.Flags().StringVar(&rwPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
 	rewriteCmd.Flags().IntVar(&rwWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
 	rewriteCmd.Flags().IntVar(&rwHowType, "how-type", 1, "publication how type (1=default)")
@@ -972,43 +952,15 @@ func registerSearch(root *cobra.Command) {
 	rewriteCmd.Flags().StringVar(&rwMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
 	rewriteCmd.Flags().BoolVar(&rwNoAttachments, "no-attachments", false, "strip all attachments (photos, links, etc.) from the scraped post")
 	rewriteCmd.Run = func(_ *cobra.Command, _ []string) {
-		if rwPostID == 0 {
-			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
-			os.Exit(1)
-		}
-		if rwText == "" {
-			fmt.Fprintln(os.Stderr, "error: --text is required")
-			os.Exit(1)
-		}
-		if rwWhenType == 2 && (rwDate == "" || rwHours == "" || rwMinutes == "") {
-			fmt.Fprintln(os.Stderr, "error: --date, --hours, --minutes are required for --when-type 2")
-			os.Exit(1)
-		}
-		if rwWhenType == 3 && len(parseIntList(rwSchedules)) == 0 {
-			fmt.Fprintln(os.Stderr, "error: --schedules is required for --when-type 3 (by schedule) — a schedule-driven rewrite targeted at no schedule publishes to nothing")
-			os.Exit(1)
-		}
+		payload, err := buildRewritePayload(rwPostID, rwPostIDs, rwText, rwWhenType, rwHowType, rwPages, rwSchedules, rwDate, rwHours, rwMinutes)
+		die(err)
 		c := mustClient()
-		payload := hooppy.CopySearchPostPayload{
-			SearchPostID:        rwPostID,
-			PublicationWhenType: rwWhenType,
-			PublicationHowType:  rwHowType,
-			Texts:               []hooppy.PostText{{Text: rwText, SourceID: 0}},
-		}
-		switch rwWhenType {
-		case 3:
-			payload.SchedulesIDs = parseIntList(rwSchedules)
-		case 2:
-			payload.SelectedPagesIDs = parseIntList(rwPages)
-			payload.PublicationDate = &hooppy.PublicationDate{
-				Date:    rwDate,
-				Hours:   rwHours,
-				Minutes: rwMinutes,
-			}
-		default:
-			payload.SelectedPagesIDs = parseIntList(rwPages)
-		}
-		if !rwNoAttachments {
+		batch := rwPostIDs != ""
+		// Per-post attachment download only applies to the single-post form:
+		// it fetches GetSearchPostEdit for --post-id and re-uploads photos.
+		// A batch (--post-ids) spans multiple scraped posts, so there is no
+		// single edit to fetch — skip the block (equivalent to --no-attachments).
+		if !rwNoAttachments && !batch {
 			// By default, preserve ALL attachments from the scraped post:
 			// - Photos: download from edit endpoint URLs → re-upload via UploadMedia
 			//   (server doesn't download automatically; MediaItem must have id/name/folder/file_path)
@@ -1056,50 +1008,47 @@ func registerSearch(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// search import — copy one scraped post via PUT /posts/import with full text + attachments
+	// search import — copy one or more scraped posts via PUT /posts/import with full text + attachments
 	importCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
 		Name:  "import",
 		Short: "Copy a scraped post with full text + photos/videos via PUT /posts/import (server downloads photos async)",
 	})
 	var impPostID int
+	var impPostIDs string
 	var impSchedules string
 	var impWhenType, impHowType int
 	var impNoAttachments bool
-	importCmd.Flags().IntVar(&impPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED)")
+	importCmd.Flags().IntVar(&impPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
+	importCmd.Flags().StringVar(&impPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). The server assigns schedule slots in the given order. Batch import keeps each post's ORIGINAL text (no per-post text override) and strips attachments — the server downloads photos async from the ids it receives. Use --post-id for a single post to pull its text/attachments from the edit endpoint.")
 	importCmd.Flags().IntVar(&impWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule")
 	importCmd.Flags().IntVar(&impHowType, "how-type", 2, "publication how type (2=by schedule pages)")
 	importCmd.Flags().StringVar(&impSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
 	importCmd.Flags().BoolVar(&impNoAttachments, "no-attachments", false, "strip all attachments (photos, videos, links, etc.)")
 	importCmd.Run = func(_ *cobra.Command, _ []string) {
-		if impPostID == 0 {
-			fmt.Fprintln(os.Stderr, "error: --post-id is required (see 'hooppy search posts')")
-			os.Exit(1)
-		}
-		if impWhenType == 3 && len(parseIntList(impSchedules)) == 0 {
-			fmt.Fprintln(os.Stderr, "error: --schedules is required for --when-type 3 (by schedule) — a schedule-driven import targeted at no schedule publishes to nothing")
-			os.Exit(1)
-		}
-		c := mustClient()
-		// Get edit data for text + attachments
-		edit, err := c.GetSearchPostEdit(context.Background(), impPostID)
+		payload, err := buildImportPayload(impPostID, impPostIDs, impWhenType, impHowType, impSchedules)
 		die(err)
-		// Extract original text
-		text := ""
-		if len(edit.Texts) > 0 {
-			text = edit.Texts[0].Text
-		}
-		// Build attachments — photos AND videos grouped into {type: "photos"} (UI behavior)
-		var attachments []hooppy.Attachment
-		if !impNoAttachments {
-			attachments = hooppy.SearchPostEditAttachments(edit.Attachments)
-		}
-		payload := hooppy.CopySearchPostPayload{
-			SearchPostID:        impPostID,
-			PublicationWhenType: impWhenType,
-			PublicationHowType:  impHowType,
-			SchedulesIDs:        parseIntList(impSchedules),
-			Texts:               []hooppy.PostText{{Text: text, SourceID: 0}},
-			Attachments:         attachments,
+		c := mustClient()
+		batch := impPostIDs != ""
+		// Get edit data for text + attachments — only applies to the
+		// single-post form. A batch (--post-ids) spans multiple scraped
+		// posts, so there is no single edit to fetch. In batch mode the
+		// builder sets Texts to an empty (non-nil) slice so the server
+		// keeps each post's original text (ImportSearchPost only replaces
+		// a nil slice, so an empty slice passes through unchanged) and
+		// attachments stay empty (the server downloads photos async from
+		// the ids it receives).
+		if !batch {
+			edit, err := c.GetSearchPostEdit(context.Background(), impPostID)
+			die(err)
+			text := ""
+			if len(edit.Texts) > 0 {
+				text = edit.Texts[0].Text
+			}
+			payload.Texts = []hooppy.PostText{{Text: text, SourceID: 0}}
+			if !impNoAttachments {
+				// Build attachments — photos AND videos grouped into {type: "photos"} (UI behavior)
+				payload.Attachments = hooppy.SearchPostEditAttachments(edit.Attachments)
+			}
 		}
 		resp, err := c.ImportSearchPost(context.Background(), payload)
 		die(err)
@@ -1107,22 +1056,208 @@ func registerSearch(root *cobra.Command) {
 	}
 }
 
-func parseIntList(s string) []int {
+// parseIntListErr parses a comma-separated int list, returning an error
+// naming the offending token on a parse failure. Unlike parseIntList it does
+// not os.Exit — safe to call from testable builders.
+//
+// An empty string is the unset sentinel and returns (nil, nil). An empty
+// ELEMENT within a non-empty string ("2001,,2003") is a typo and errors — it
+// is NOT silently dropped. This unifies the contract with the MCP strict
+// parser (parseOrderedIDListStr): previously the CLI silently dropped an
+// empty element while the MCP parser errored on the identical input, so the
+// same --post-ids value gave two different results across the two surfaces.
+func parseIntListErr(s string) ([]int, error) {
+	if s == "" {
+		return nil, nil
+	}
 	parts := strings.Split(s, ",")
-	var ids []int
+	ids := make([]int, 0, len(parts))
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if p == "" {
-			continue
+			return nil, fmt.Errorf("empty element in %q — expected a comma-separated list of IDs", s)
 		}
 		n, err := strconv.Atoi(p)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid page ID %q: %v\n", p, err)
-			os.Exit(1)
+			return nil, fmt.Errorf("invalid ID %q: %v", p, err)
 		}
 		ids = append(ids, n)
 	}
+	return ids, nil
+}
+
+func parseIntList(s string) []int {
+	ids, err := parseIntListErr(s)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	return ids
+}
+
+// buildCopyPayload validates search copy flags and builds the payload. copy
+// does NOT support --post-ids: PUT /posts/copy takes a singular
+// search_post_id int, and the batch slice is silently dropped on that
+// endpoint (the server does not read search_post_ids). Use `search rewrite`
+// or `search import` for a batch.
+func buildCopyPayload(postID, whenType, howType int, pages, schedules, date, hours, minutes string) (hooppy.CopySearchPostPayload, error) {
+	if postID == 0 {
+		return hooppy.CopySearchPostPayload{}, errors.New("--post-id is required (see 'hooppy search posts'); copy does not support --post-ids — use 'search rewrite' or 'search import' for a batch (PUT /posts/copy takes a single search_post_id)")
+	}
+	if whenType == 2 && (date == "" || hours == "" || minutes == "") {
+		return hooppy.CopySearchPostPayload{}, errors.New("--date, --hours, --minutes are required for --when-type 2")
+	}
+	schedIDs, err := parseIntListErr(schedules)
+	if err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
+	if whenType == 3 && len(schedIDs) == 0 {
+		return hooppy.CopySearchPostPayload{}, errors.New("--schedules is required for --when-type 3 (by schedule) — a schedule-driven copy targeted at no schedule publishes to nothing")
+	}
+	pageIDs, err := parseIntListErr(pages)
+	if err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
+	payload := hooppy.CopySearchPostPayload{
+		SearchPostID:        postID,
+		PublicationWhenType: whenType,
+		PublicationHowType:  howType,
+	}
+	switch whenType {
+	case 3:
+		payload.SchedulesIDs = schedIDs
+	case 2:
+		payload.SelectedPagesIDs = pageIDs
+		payload.PublicationDate = &hooppy.PublicationDate{Date: date, Hours: hours, Minutes: minutes}
+	default:
+		payload.SelectedPagesIDs = pageIDs
+	}
+	return payload, nil
+}
+
+// buildRewritePayload validates search rewrite flags and builds the payload
+// (without attachments — the per-post photo download is a network step the
+// Run closure performs for the single-post form). --post-id and --post-ids
+// are mutually exclusive.
+//
+// Text handling is form-dependent (finding 4): rewrite exists to OVERRIDE
+// text, but the payload shape (a single texts array alongside N ids) cannot
+// express per-post text — one text for N posts is either a broadcast or a
+// positional pairing that blanks posts 2..N, neither of which is what a
+// batch rewrite caller means. So:
+//   - SINGLE-post (--post-id): --text is REQUIRED (the override).
+//   - BATCH (--post-ids): --text is NOT allowed — the combination errors
+//     naming the reason. --post-ids alone behaves like batch import: no
+//     text override, so the server keeps each post's original text (an empty
+//     non-nil Texts slice is sent, matching buildImportPayload's batch form).
+//     A per-post text override for a batch is not expressible through this
+//     payload shape; callers who need it must issue one rewrite per post.
+func buildRewritePayload(postID int, postIDs, text string, whenType, howType int, pages, schedules, date, hours, minutes string) (hooppy.CopySearchPostPayload, error) {
+	if postID != 0 && postIDs != "" {
+		return hooppy.CopySearchPostPayload{}, errors.New("--post-id and --post-ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
+	}
+	if postID == 0 && postIDs == "" {
+		return hooppy.CopySearchPostPayload{}, errors.New("--post-id or --post-ids is required (see 'hooppy search posts')")
+	}
+	batch := postIDs != ""
+	// Batch rewrite cannot express per-post text through this payload shape
+	// (one texts array for N ids is a broadcast or a positional pairing that
+	// blanks posts 2..N). Refuse the combination; --post-ids alone means no
+	// text override (the server keeps each post's original text, like import).
+	if batch && text != "" {
+		return hooppy.CopySearchPostPayload{}, errors.New("--text is not allowed with --post-ids — batch rewrite cannot express per-post text through this payload shape (one texts array for N ids is a broadcast or a positional pairing that blanks posts 2..N); omit --text to keep each post's original text, or rewrite one post at a time with --post-id")
+	}
+	if !batch && text == "" {
+		return hooppy.CopySearchPostPayload{}, errors.New("--text is required for --post-id (rewrite overrides the single post's text)")
+	}
+	if whenType == 2 && (date == "" || hours == "" || minutes == "") {
+		return hooppy.CopySearchPostPayload{}, errors.New("--date, --hours, --minutes are required for --when-type 2")
+	}
+	schedIDs, err := parseIntListErr(schedules)
+	if err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
+	if whenType == 3 && len(schedIDs) == 0 {
+		return hooppy.CopySearchPostPayload{}, errors.New("--schedules is required for --when-type 3 (by schedule) — a schedule-driven rewrite targeted at no schedule publishes to nothing")
+	}
+	pageIDs, err := parseIntListErr(pages)
+	if err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
+	idList, err := parseIntListErr(postIDs)
+	if err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
+	payload := hooppy.CopySearchPostPayload{
+		PublicationWhenType: whenType,
+		PublicationHowType:  howType,
+	}
+	if batch {
+		payload.SearchPostIDs = idList
+		// Empty (non-nil) slice: RewriteSearchPost only replaces a nil slice,
+		// so this passes through as `[]` on the wire and the server keeps each
+		// post's original text (same shape as batch import). NOT
+		// []PostText{{Text: ""}} — that sends an explicit empty-text entry
+		// which risks publishing blank across the whole batch.
+		payload.Texts = []hooppy.PostText{}
+	} else {
+		payload.SearchPostID = postID
+		payload.Texts = []hooppy.PostText{{Text: text, SourceID: 0}}
+	}
+	switch whenType {
+	case 3:
+		payload.SchedulesIDs = schedIDs
+	case 2:
+		payload.SelectedPagesIDs = pageIDs
+		payload.PublicationDate = &hooppy.PublicationDate{Date: date, Hours: hours, Minutes: minutes}
+	default:
+		payload.SelectedPagesIDs = pageIDs
+	}
+	return payload, nil
+}
+
+// buildImportPayload validates search import flags and builds the base
+// payload. In batch mode (--post-ids) Texts is an empty (non-nil) slice so
+// ImportSearchPost's nil-normalisation leaves it as-is and the server keeps
+// each post's original text — sending an explicit empty-text entry
+// ([]PostText{{Text: ""}}) risks the server publishing blank across the whole
+// batch. In single-post mode Texts is left nil for the Run closure to fill
+// from GetSearchPostEdit.
+func buildImportPayload(postID int, postIDs string, whenType, howType int, schedules string) (hooppy.CopySearchPostPayload, error) {
+	if postID != 0 && postIDs != "" {
+		return hooppy.CopySearchPostPayload{}, errors.New("--post-id and --post-ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
+	}
+	if postID == 0 && postIDs == "" {
+		return hooppy.CopySearchPostPayload{}, errors.New("--post-id or --post-ids is required (see 'hooppy search posts')")
+	}
+	schedIDs, err := parseIntListErr(schedules)
+	if err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
+	if whenType == 3 && len(schedIDs) == 0 {
+		return hooppy.CopySearchPostPayload{}, errors.New("--schedules is required for --when-type 3 (by schedule) — a schedule-driven import targeted at no schedule publishes to nothing")
+	}
+	idList, err := parseIntListErr(postIDs)
+	if err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
+	payload := hooppy.CopySearchPostPayload{
+		PublicationWhenType: whenType,
+		PublicationHowType:  howType,
+		SchedulesIDs:        schedIDs,
+	}
+	if postIDs != "" {
+		payload.SearchPostIDs = idList
+		// Empty (non-nil) slice: ImportSearchPost only replaces a nil slice,
+		// so this passes through as `[]` on the wire and the server keeps
+		// each post's original text. NOT []PostText{{Text: ""}} — that sends
+		// an explicit empty-text entry which risks publishing blank.
+		payload.Texts = []hooppy.PostText{}
+	} else {
+		payload.SearchPostID = postID
+		// Texts left nil; Run fills from GetSearchPostEdit.
+	}
+	return payload, nil
 }
 
 func downloadPhoto(url, dest string) error {
