@@ -19,8 +19,8 @@ func TestListSearchPosts(t *testing.T) {
 			t.Errorf("GET /posts-search, got %s %s", r.Method, r.URL.Path)
 		}
 		q := r.URL.Query()
-		if q.Get("source_resource_id") != "123" {
-			t.Errorf("source_resource_id = %q, want 123", q.Get("source_resource_id"))
+		if q.Get("source_type") != "1" {
+			t.Errorf("source_type = %q, want 1", q.Get("source_type"))
 		}
 		if q.Get("text") != "test query" {
 			t.Errorf("text = %q, want test query", q.Get("text"))
@@ -46,8 +46,8 @@ func TestListSearchPosts(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
-		SourceResourceID: 123,
-		Text:             "test query",
+		SourceType: 1,
+		Text:       "test query",
 	})
 	if err != nil {
 		t.Fatalf("ListSearchPosts: %v", err)
@@ -387,15 +387,14 @@ func TestListSearchPosts_FilterVocabularyPinned(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	// Populate every VALID filter (no metric thresholds — those are refused
-	// by the guard and never reach the wire; see TestListSearchPosts_MetricFiltersRejected).
+	// by the guard and never reach the wire; see TestListSearchPosts_MetricFiltersRejected;
+	// no source_id/source_resource_id/owner_id — those are phantom on
+	// /posts-search and refused, see TestPhantomFilterSweep).
 	_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{
 		Text:                "query",
 		DateFrom:            "01.01.2026",
 		DateTo:              "31.01.2026",
 		SourceType:          1,
-		SourceID:            1,
-		SourceResourceID:    123,
-		OwnerID:             100,
 		Page:                2,
 		SortBy:              "likes",
 		SortDirection:       "desc",

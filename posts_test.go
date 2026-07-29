@@ -157,8 +157,6 @@ func TestListPosts_AllFilters(t *testing.T) {
 		IsPublished:     &pub,
 		PublicationDate: "15.06.2026",
 		SourceID:        6,
-		AccountID:       100,
-		PageID:          200,
 		ScheduleID:      300,
 		ProjectID:       400,
 		Page:            2,
@@ -166,7 +164,9 @@ func TestListPosts_AllFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPosts: %v", err)
 	}
-	for _, param := range []string{"is_published=1", "publication_date=15.06.2026", "source_id=6", "account_id=100", "page_id=200", "schedule_id=300", "project_id=400", "page=2"} {
+	// account_id and page_id are phantom on /posts (issues #67, #73) and
+	// are refused — they are not on the wire. See TestPhantomFilterSweep.
+	for _, param := range []string{"is_published=1", "publication_date=15.06.2026", "source_id=6", "schedule_id=300", "project_id=400", "page=2"} {
 		if !contains(capturedURL, param) {
 			t.Errorf("URL should contain %s, got: %s", param, capturedURL)
 		}

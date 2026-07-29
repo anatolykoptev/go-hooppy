@@ -21,7 +21,40 @@ type ListPostsFilter struct {
 }
 
 // ListPosts returns posts matching the given filter.
+//
+// Two phantom parameters were found in the same sweep as the /posts-search
+// phantoms (issues #67, #73): page_id and account_id are accepted by the
+// server and silently dropped — an impossible id returns the full collection
+// that looks filtered. They are refused before any request with the same
+// shape as the min_* guard on ListSearchPosts. Use schedule_id, source_id,
+// or project_id to narrow. Note that source_id WORKS on /posts but is
+// phantom on /posts-search — same name, two endpoints, opposite behaviour —
+// so the fix is per-endpoint, never per-name.
+//
+// # Method notes for the next investigator (both cost a wrong answer)
+//
+//  1. total_rows CAPS AT 10000. A filter over a large collection looks
+//     phantom because both the filtered and unfiltered sides read the cap.
+//     Judge by RETURNED ROW CONTENT, not total_rows.
+//
+//  2. An impossible enum value is NOT a probe: the server ignores an
+//     unrecognised enum rather than matching nothing, so it returns
+//     everything — indistinguishable from a phantom. Use a different VALID
+//     value to prove a filter works.
+//
+// These two notes are why this issue took three rounds to characterise.
 func (c *Client) ListPosts(ctx context.Context, f ListPostsFilter) (*PostsResponse, error) {
+	// Refuse the two phantom ID filters before any request (issues #67,
+	// #73): page_id and account_id are accepted by the server and silently
+	// dropped — an impossible id returns the full collection that looks
+	// filtered. Measured by returned row content (not total_rows, which
+	// caps at 10000 — see the method notes above). Same defect class as
+	// the min_* and /posts-search phantom guards. The fields stay on the
+	// struct (source-compatible) but any non-zero value now errors. Use
+	// schedule_id, source_id, or project_id to narrow.
+	if f.PageID != 0 || f.AccountID != 0 {
+		return nil, fmt.Errorf("hooppy: ListPosts: page_id/account_id are not server-side filters on /posts — the API accepts and silently ignores them, returning the full collection that looks filtered (measured by row content, not total_rows which caps at 10000); use schedule_id, source_id, or project_id to narrow (issues #67, #73)")
+	}
 	params := url.Values{}
 	if f.IsPublished != nil {
 		val := 0
@@ -38,18 +71,13 @@ func (c *Client) ListPosts(ctx context.Context, f ListPostsFilter) (*PostsRespon
 	// result that looks filtered. Same defect class as the posts-search
 	// ID/page guards (see posts_search.go). Reachable from the shipped CLI
 	// (cmd/hooppy binds these with IntVar; pflag accepts negatives). Zero
-	// stays the unset sentinel.
-	if f.SourceID < 0 || f.AccountID < 0 || f.PageID < 0 || f.ScheduleID < 0 || f.ProjectID < 0 || f.Page < 0 {
-		return nil, fmt.Errorf("hooppy: ListPosts: source_id/account_id/page_id/schedule_id/project_id/page must be non-negative (got source_id=%d, account_id=%d, page_id=%d, schedule_id=%d, project_id=%d, page=%d); pass 0 to leave any unset", f.SourceID, f.AccountID, f.PageID, f.ScheduleID, f.ProjectID, f.Page)
+	// stays the unset sentinel. AccountID/PageID are no longer here — they
+	// are phantom and refused above on != 0.
+	if f.SourceID < 0 || f.ScheduleID < 0 || f.ProjectID < 0 || f.Page < 0 {
+		return nil, fmt.Errorf("hooppy: ListPosts: source_id/schedule_id/project_id/page must be non-negative (got source_id=%d, schedule_id=%d, project_id=%d, page=%d); pass 0 to leave any unset", f.SourceID, f.ScheduleID, f.ProjectID, f.Page)
 	}
 	if f.SourceID > 0 {
 		params.Set("source_id", strconv.Itoa(f.SourceID))
-	}
-	if f.AccountID > 0 {
-		params.Set("account_id", strconv.Itoa(f.AccountID))
-	}
-	if f.PageID > 0 {
-		params.Set("page_id", strconv.Itoa(f.PageID))
 	}
 	if f.ScheduleID > 0 {
 		params.Set("schedule_id", strconv.Itoa(f.ScheduleID))

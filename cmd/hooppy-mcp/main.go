@@ -212,8 +212,8 @@ type listPostsInput struct {
 	IsPublished     *bool  `json:"is_published,omitempty" jsonschema:"Filter by publication status. true=published, false=unpublished, omit=no filter."`
 	PublicationDate string `json:"publication_date,omitempty" jsonschema:"Filter by date in dd.mm.yyyy format."`
 	SourceID        int    `json:"source_id,omitempty" jsonschema:"Filter by social network source ID."`
-	AccountID       int    `json:"account_id,omitempty" jsonschema:"Filter by account ID."`
-	PageID          int    `json:"page_id,omitempty" jsonschema:"Filter by group/page ID."`
+	AccountID       int    `json:"account_id,omitempty" jsonschema:"DEPRECATED/no-op: the API silently ignores account_id on /posts; use schedule_id, source_id, or project_id to narrow. Setting this errors."`
+	PageID          int    `json:"page_id,omitempty" jsonschema:"DEPRECATED/no-op: the API silently ignores page_id on /posts; use schedule_id, source_id, or project_id to narrow. Setting this errors."`
 	ScheduleID      int    `json:"schedule_id,omitempty" jsonschema:"Filter by schedule ID."`
 	ProjectID       int    `json:"project_id,omitempty" jsonschema:"Filter by project ID."`
 	Page            int    `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page)."`
@@ -224,7 +224,7 @@ func registerListPosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_posts",
-			Description: "List posts on Hooppy with optional filters by status, date, social network, account, page, schedule, or project. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
+			Description: "List posts on Hooppy with optional filters by status, date, social network, schedule, or project. page_id and account_id are NOT server-side on this endpoint — the API silently ignores them; setting either errors, so use schedule_id, source_id, or project_id to narrow. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listPostsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -1043,9 +1043,9 @@ type listSearchPostsInput struct {
 	DateFrom            string  `json:"date_from,omitempty" jsonschema:"Filter by date from (dd.mm.yyyy)."`
 	DateTo              string  `json:"date_to,omitempty" jsonschema:"Filter by date to (dd.mm.yyyy)."`
 	SourceType          int     `json:"source_type,omitempty" jsonschema:"Source type: 1=social, 2=RSS. 0=no filter."`
-	SourceID            int     `json:"source_id,omitempty" jsonschema:"Social network ID (1=VK, 7=Instagram, etc.). 0=no filter."`
-	SourceResourceID    int     `json:"source_resource_id,omitempty" jsonschema:"Source resource ID (from list_source_resources). 0=no filter."`
-	OwnerID             int     `json:"owner_id,omitempty" jsonschema:"Page ID within source. 0=no filter."`
+	SourceID            int     `json:"source_id,omitempty" jsonschema:"DEPRECATED/no-op: the API silently ignores source_id on /posts-search; use source_type, content_types, photos_amount, video_duration, or text to narrow. 0=no filter (setting non-zero errors)."`
+	SourceResourceID    int     `json:"source_resource_id,omitempty" jsonschema:"DEPRECATED/no-op: the API silently ignores source_resource_id on /posts-search; use source_type, content_types, photos_amount, video_duration, or text to narrow. 0=no filter (setting non-zero errors)."`
+	OwnerID             int     `json:"owner_id,omitempty" jsonschema:"DEPRECATED/no-op: the API silently ignores owner_id on /posts-search; use source_type, content_types, photos_amount, video_duration, or text to narrow. 0=no filter (setting non-zero errors)."`
 	Page                int     `json:"page,omitempty" jsonschema:"Pagination page number."`
 	SortBy              string  `json:"sort_by,omitempty" jsonschema:"Sort field: publication_date, likes, reposts, comments, views, involvement."`
 	SortDirection       string  `json:"sort_direction,omitempty" jsonschema:"Sort direction: desc (default) or asc."`
@@ -1064,7 +1064,7 @@ func registerListSearchPosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_search_posts",
-			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. Supports sorting by metrics (sort_by: likes, views, comments, reposts, involvement) and filtering by content types, photo count, and video duration. Metric THRESHOLD filters (min_likes/min_views/min_comments/min_reposts/min_involvement) are NOT server-side — the API silently ignores them; setting any of them errors, so use sort_by to rank by a metric instead. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. Supports sorting by metrics (sort_by: likes, views, comments, reposts, involvement) and filtering by content types, photo count, and video duration. Metric THRESHOLD filters (min_likes/min_views/min_comments/min_reposts/min_involvement) are NOT server-side — the API silently ignores them; setting any of them errors, so use sort_by to rank by a metric instead. source_id, source_resource_id, and owner_id are also NOT server-side on this endpoint — the API accepts and silently ignores them; setting any of them errors, so use source_type, content_types, photos_amount, video_duration, or text to narrow. UNDOCUMENTED endpoint — may change without notice.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listSearchPostsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
