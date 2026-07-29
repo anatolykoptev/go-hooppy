@@ -360,11 +360,105 @@ type PostIDResponse struct {
 	ID int `json:"id"`
 }
 
-// Post is a minimal post representation. The live API returns many more
-// fields depending on context; callers needing them should decode the raw
-// response body directly.
+// Post is a post returned by GET /posts (the user's own posts). The live
+// API returns twenty-four fields per row; they are modelled here so the
+// decode boundary keeps them instead of discarding twenty-three.
+//
+// Field types are derived from the evidence available without calling the
+// live API: the OpenAPI spec (which documents only id), the sibling
+// SearchPost struct (scraped posts — a DIFFERENT API surface), and
+// PostEditResponse (the own-post edit endpoint). Where the evidence for a
+// field's type was genuinely absent, the field is json.RawMessage — the
+// one choice that cannot abort the entire unmarshal on a wrong guess
+// (a JSON number fails to decode into a Go string, and vice versa). Each
+// such field says so in its doc comment.
+//
+// Credential hygiene: Pages reuses the narrow Page struct, which models
+// only id/source/social-ids/name/photo — never the access_token,
+// bot_token, refresh_token, password, wp_app_password, or
+// access_token_secret that page objects carry elsewhere in this API.
+// See TestPost_DecodeCredentialHygiene for the guard.
 type Post struct {
-	ID int `json:"id"`
+	ID   int    `json:"id"`
+	Text string `json:"text"`
+	// PublicationDate is the slot a schedule assigned. It is an OBJECT,
+	// not a string — a different shape from the PublicationDate used by
+	// the publish/edit payloads (date/hours/minutes). See
+	// PostPublicationDate for the measured {date, time, timestamp,
+	// source_timestamp} shape.
+	PublicationDate *PostPublicationDate `json:"publication_date"`
+	// is_published: 0/1 flag (API boolean convention — Schedule.IsDeleted,
+	// SearchPost.IsUsed, ListPostsFilter.is_published all use int 0/1).
+	IsPublished int `json:"is_published"`
+	// is_ad: the vendor's own advertising flag (0/1, API boolean convention).
+	IsAd int `json:"is_ad"`
+	// is_repeated: 0/1 flag (API boolean convention; SchedulePayload.IsPostsRepeated).
+	IsRepeated int `json:"is_repeated"`
+	// is_attachments_in_process: 0/1 flag — direct sibling evidence from
+	// SearchPost.IsAttachmentsInProcess (int).
+	IsAttachmentsInProcess int `json:"is_attachments_in_process"`
+	// is_planned_by_networks: 0/1 flag (API boolean convention; SchedulePayload.PlanByNetwork).
+	IsPlannedByNetworks int `json:"is_planned_by_networks"`
+	// is_planning_by_networks_needed: 0/1 flag (API boolean convention).
+	IsPlanningByNetworksNeeded int `json:"is_planning_by_networks_needed"`
+	// views, likes, comments, reposts: engagement metrics. SearchPost
+	// (a DIFFERENT, scraped-post surface) receives these as
+	// thousands-separated STRINGS ("334,881"); the own-post list surface
+	// may return numbers or strings — evidence is genuinely absent
+	// (OpenAPI documents only id). Modelled as json.RawMessage so a wrong
+	// guess cannot abort the whole decode; callers parse the bytes
+	// themselves. No parse accessor exists on SearchPost to reuse.
+	Views    json.RawMessage `json:"views"`
+	Likes    json.RawMessage `json:"likes"`
+	Comments json.RawMessage `json:"comments"`
+	Reposts  json.RawMessage `json:"reposts"`
+	// link: URL of the published post (SearchPost.Link is string).
+	Link string `json:"link"`
+	// source_link: URL of the original source (URL convention, same as link/repost_link).
+	SourceLink string `json:"source_link"`
+	// repost_link / repost_title: the reposted source (Repost.Link / Repost.Title are strings).
+	RepostLink  string `json:"repost_link"`
+	RepostTitle string `json:"repost_title"`
+	// photo: cover/thumbnail photo URL (SearchPostOwner.Photo, Page.SocialPagePhoto,
+	// Account.SocialAccountPhoto are all string URLs).
+	Photo string `json:"photo"`
+	// photos_amount: photo count (SearchPostsFilter.PhotosAmount is int).
+	PhotosAmount int `json:"photos_amount"`
+	// pages: the page targets this post publishes to. Reuses the narrow
+	// Page struct (id/source/social-ids/name/photo only) so the OAuth
+	// tokens page objects carry elsewhere CANNOT reach the marshalled
+	// output. See TestPost_DecodeCredentialHygiene.
+	Pages []Page `json:"pages"`
+	// post_schedules: nested schedule references. Evidence for their
+	// shape in the list response is absent (OpenAPI documents only id);
+	// json.RawMessage so a wrong guess cannot abort the decode. Not
+	// page-shaped, so no credential leak risk through the raw bytes.
+	PostSchedules json.RawMessage `json:"post_schedules"`
+	// post_projects: nested project references. Evidence absent; json.RawMessage.
+	// Not page-shaped, so no credential leak risk.
+	PostProjects json.RawMessage `json:"post_projects"`
+	// created_by: user id of the post's author (PostEditResponse.CreatedBy is int).
+	CreatedBy int `json:"created_by"`
+	// errors_for_source_ids: per-post publication failures — the same
+	// signal doctor reconstructs from the account-wide notification log,
+	// attached to the post that failed. Evidence for its shape is absent;
+	// json.RawMessage so a wrong guess cannot abort the decode.
+	ErrorsForSourceIDs json.RawMessage `json:"errors_for_source_ids"`
+}
+
+// PostPublicationDate is the publication_date object returned in a GET
+// /posts row. It is a DIFFERENT shape from the PublicationDate used by the
+// publish/edit payloads (which is {date, hours, minutes}): the list row
+// carries {date, time, timestamp, source_timestamp}, where date is a
+// "29 Июля"-style display string, time is a "12:25"-style display string,
+// and the two timestamps are integers that differ from each other (one
+// appears to carry a timezone offset). Both timestamps are kept; they are
+// not collapsed.
+type PostPublicationDate struct {
+	Date            string `json:"date"`             // "29 Июля"-style display date
+	Time            string `json:"time"`             // "12:25"-style display time
+	Timestamp       int64  `json:"timestamp"`        // unix timestamp
+	SourceTimestamp int64  `json:"source_timestamp"` // unix timestamp (carries a timezone offset)
 }
 
 // Photo is an uploaded photo attachment.
