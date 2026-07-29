@@ -219,10 +219,11 @@ func (r DoctorReport) MarshalJSON() ([]byte, error) {
 //
 // What the unique < firstTotal rule does NOT catch (it is a directional
 // check for net loss, not a proof of completeness):
-//   - Concurrent growth MASKS truncation. Two rows inserted mid-walk plus
-//     one row skipped by the offset shift gives unique == firstTotal (the
-//     two new ids replace the one missing in the count) and no flag, even
-//     though a row was lost.
+//   - Concurrent growth MASKS truncation. One row inserted mid-walk and
+//     served plus one row skipped by the offset shift gives
+//     unique == firstTotal (the new id replaces the missing one in the
+//     count) and no flag, even though a row was lost. More generally, any
+//     case where inserts served ≥ rows skipped masks the loss.
 //   - A SHRINKING collection false-positives. A row that ages out or is
 //     pruned mid-walk drops the server's total_rows below the first-page
 //     value, so unique < firstTotal on a walk that missed nothing. Whether

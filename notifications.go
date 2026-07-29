@@ -72,7 +72,7 @@ func (c *Client) ListAllNotificationsWithTotal(ctx context.Context) ([]Notificat
 // benign mid-walk insert (lastTotalRows > firstTotalRows) — the distinction
 // NewAllListEnvelope cannot make because it receives only one total.
 // doctor uses this to avoid false-alarms on the high-churn /notifications
-// log. The remaining NewAllListEnvelope callers walk projects and schedules
+// log. The low-churn NewAllListEnvelope callers walk projects and schedules
 // only (low-churn collections where a mid-walk shift is rare); the posts
 // caller is high-churn and is NOT covered by the first-total rule — see
 // NewAllListEnvelope for the per call-site table and the open follow-up
