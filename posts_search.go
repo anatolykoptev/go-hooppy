@@ -644,6 +644,15 @@ func SearchPostEditAttachments(editAttachments []Attachment) []Attachment {
 //     explicit empty-text entry ([]PostText{{Text: ""}}) for a batch — that
 //     risks publishing blank across the whole batch.
 //
+// Attachments follow the SAME form-dependent rule (measured, not inferred
+// from the text parallel): the BATCH form auto-fetches attachments
+// server-side from the source ids (send attachments:[] → post gets its
+// photos); the SINGLE form does NOT auto-fetch — send attachments:[] on a
+// single import and the created post has ZERO attachments. So the explicit
+// attachment send on the CLI single-post and strip-batch paths is
+// load-bearing, not redundant. See the runImport doc comment in
+// cmd/hooppy/import_text.go for the three-row probe table.
+//
 // UNDOCUMENTED: PUT /posts/import is not in the public OpenAPI spec.
 func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
 	ids, err := copySearchPostIDs(payload)

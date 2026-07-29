@@ -214,7 +214,25 @@ func detectAdMarkers(text string) []string {
 //     calls instead of 1 — the flag changes the cost profile, which is why it
 //     is opt-in.
 //
-// Attachment delivery divergence (the operator must see this, never hidden):
+// Attachment delivery divergence (the operator must see this, never hidden).
+// This is MEASURED, not inferred from the text parallel — the three-row
+// probe below is the grounding, and the explicit-attachment code on the
+// strip path is LOAD-BEARING: sending attachments: [] on the single form
+// produces a post with NO attachments. Someone reading that code as
+// redundant complexity and deleting it would silently publish photo-less
+// posts. The comment is what stops them.
+//
+// Measured against the live endpoint (PUT /posts/import, attachments field
+// inspected on the created post):
+//
+//   - batch (ids "a,b"), attachments []            → 2 photos each (server fetched)
+//   - single (ids "a"),  attachments explicit/edit → 1 photo
+//   - single (ids "a"),  attachments []            → 0 photos
+//
+// So: the BATCH form auto-fetches attachments server-side; the SINGLE form
+// does not, and sends nothing unless the client sends it. The same
+// form-dependent asymmetry already documented for text, now confirmed for
+// attachments.
 //   - BATCH, flag OFF: the batch import sends NO attachments on the wire —
 //     the server downloads photos async from the source ids it receives
 //     (is_attachments_in_process). See buildImportPayload: the batch payload
@@ -223,16 +241,18 @@ func detectAdMarkers(text string) []string {
 //     (SearchPostID, not SearchPostIDs) because the batch form cannot express
 //     per-post text — one texts array for N ids is a broadcast that blanks
 //     posts 2..N (the same constraint buildRewritePayload refuses). The
-//     single-id form does NOT trigger the server's async photo fetch the way
-//     the batch form does, so each per-post request sends its attachments
-//     explicitly, read from the edit response (SearchPostEditAttachments).
-//     So turning on a TEXT-hygiene flag also changes ATTACHMENT delivery.
-//     This is NOT fixable on the strip path without a per-post-text-capable
-//     batch endpoint, which the API does not offer; the divergence is stated
-//     on stderr on every strip-mode batch so it is never hit unknowingly.
+//     single-id form does NOT auto-fetch attachments server-side (measured
+//     above), so each per-post request MUST send its attachments explicitly,
+//     read from the edit response (SearchPostEditAttachments). Sending []
+//     instead would publish each post with no photos. So turning on a
+//     TEXT-hygiene flag also changes ATTACHMENT delivery. This is NOT fixable
+//     on the strip path without a per-post-text-capable batch endpoint,
+//     which the API does not offer; the divergence is stated on stderr on
+//     every strip-mode batch so it is never hit unknowingly.
 //   - SINGLE post: both flag-off and flag-on send attachments explicitly from
-//     the edit (the single form has always required explicit attachments, the
-//     same way it requires explicit text) — no divergence there.
+//     the edit — the single form does NOT auto-fetch (measured: single +
+//     attachments:[] → 0 photos), so the explicit send is required, not
+//     redundant. No divergence between flag-off and flag-on there.
 func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, args importArgs) int {
 	// Validate flags via the existing builder (reuses the tested validation).
 	payload, err := buildImportPayload(args.postID, args.postIDs, args.whenType, args.howType, args.schedules)
