@@ -9,6 +9,16 @@ on:
 # The Go module proxy fetches the tag automatically after release-please cuts it.
 permissions: {}
 
+# Auth: a dedicated release-bot GitHub App signs the release PR + tag, NOT the
+# default GITHUB_TOKEN. This is deliberate and load-bearing: GitHub deliberately
+# does not trigger workflows (incl. required `preflight` check-runs) for events
+# originating from `secrets.GITHUB_TOKEN`, so a GITHUB_TOKEN-opened release PR
+# shows zero check-runs and is permanently BLOCKED by branch protection — the
+# release can only ship via a manual close/reopen (issue #89). An App-created
+# PR receives real CI runs, and an App-created tag triggers downstream
+# `on: push: tags` workflows. Do NOT "simplify" this back to GITHUB_TOKEN.
+# Creds: vars.RELEASE_BOT_APP_ID + secrets.RELEASE_BOT_PRIVATE_KEY (fleet standard).
+
 jobs:
   release-please:
     name: Release PR / tag
@@ -21,10 +31,17 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
       version: ${{ steps.release.outputs.version }}
     steps:
+      - name: Mint release-bot App token
+        uses: actions/create-github-app-token@v2
+        id: bot-token
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
       - name: Run release-please
         uses: googleapis/release-please-action@v5.0.0
         id: release
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.bot-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
