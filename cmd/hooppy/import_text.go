@@ -22,11 +22,33 @@ type importArgs struct {
 	stripVK       bool
 }
 
-// adMarkerSubstrings are the Russian advertising-disclosure markers the tool
-// scans for. They are NEVER auto-removed: a disclosure that genuinely is our
+// adMarkers are the Russian advertising-disclosure markers the tool scans
+// for. They are NEVER auto-removed: a disclosure that genuinely is our
 // advertising must stay, and the tool cannot tell the two cases apart. This
 // table exists only to drive the warning, never a transformation.
-var adMarkerSubstrings = []string{"Erid", "Реклама.", "ИНН"}
+//
+// Case sensitivity is per-marker, decided by false-positive risk:
+//   - "Erid" is matched case-INSENSITIVELY. It is a Latin token and the
+//     surrounding disclosure text is Cyrillic, so the lower-case "erid:"
+//     form (written at least as often as "Erid:") cannot appear inside a
+//     Russian word — no false-positive cost. Matching it case-sensitively
+//     missed the common form of the single most important marker. Do NOT
+//     "fix" this back to case-sensitive: the Latin-token-in-Cyrillic-body
+//     invariant is what makes the fold safe.
+//   - "Реклама." and "ИНН" stay case-SENSITIVE. They are Cyrillic; the
+//     lower-case "реклама." is an ordinary Russian word ("это реклама.
+//     хорошая.") and would fire on non-disclosure text, so folding those
+//     would trade a real false-positive cost for no gain.
+type adMarker struct {
+	needle   string
+	foldCase bool
+}
+
+var adMarkers = []adMarker{
+	{needle: "Erid", foldCase: true},
+	{needle: "Реклама.", foldCase: false},
+	{needle: "ИНН", foldCase: false},
+}
 
 // stripVKMarkup converts VK wiki-link markup [url|text] to text, and the
 // internal-page form [[page|display]] to display. It is deliberately
@@ -152,12 +174,19 @@ func detectVKMarkup(text string) []string {
 // detectAdMarkers returns the lines in text that contain at least one
 // advertising-disclosure marker (Erid, Реклама., ИНН), or nil if none. The
 // matched LINE is returned (not just the marker) so the warning can show the
-// operator exactly what would be published.
+// operator exactly what would be published. See adMarkers for the per-marker
+// case-sensitivity decision.
 func detectAdMarkers(text string) []string {
 	var hits []string
 	for _, line := range strings.Split(text, "\n") {
-		for _, marker := range adMarkerSubstrings {
-			if strings.Contains(line, marker) {
+		for _, m := range adMarkers {
+			var found bool
+			if m.foldCase {
+				found = strings.Contains(strings.ToLower(line), strings.ToLower(m.needle))
+			} else {
+				found = strings.Contains(line, m.needle)
+			}
+			if found {
 				hits = append(hits, line)
 				break
 			}
@@ -175,7 +204,8 @@ func detectAdMarkers(text string) []string {
 // Cost profile (the operator must see this, never hidden):
 //   - SINGLE post (--post-id): one GetSearchPostEdit + one ImportSearchPost,
 //     same as today. Detection runs on the already-fetched edit text at no
-//     extra cost.
+//     extra cost. Stripping is also free here — the single path already sends
+//     client-side text, so the flag changes the text and nothing else.
 //   - BATCH (--post-ids), flag OFF: N GetSearchPostEdit (one per post, for
 //     detection) + ONE batch ImportSearchPost. The N edit fetches are the
 //     cost of always-on detection — the import itself is still a single call.
@@ -183,6 +213,26 @@ func detectAdMarkers(text string) []string {
 //     (one per post, each carrying its own transformed text). This is N import
 //     calls instead of 1 — the flag changes the cost profile, which is why it
 //     is opt-in.
+//
+// Attachment delivery divergence (the operator must see this, never hidden):
+//   - BATCH, flag OFF: the batch import sends NO attachments on the wire —
+//     the server downloads photos async from the source ids it receives
+//     (is_attachments_in_process). See buildImportPayload: the batch payload
+//     never sets Attachments.
+//   - BATCH, flag ON: the per-post path MUST use the single-id import form
+//     (SearchPostID, not SearchPostIDs) because the batch form cannot express
+//     per-post text — one texts array for N ids is a broadcast that blanks
+//     posts 2..N (the same constraint buildRewritePayload refuses). The
+//     single-id form does NOT trigger the server's async photo fetch the way
+//     the batch form does, so each per-post request sends its attachments
+//     explicitly, read from the edit response (SearchPostEditAttachments).
+//     So turning on a TEXT-hygiene flag also changes ATTACHMENT delivery.
+//     This is NOT fixable on the strip path without a per-post-text-capable
+//     batch endpoint, which the API does not offer; the divergence is stated
+//     on stderr on every strip-mode batch so it is never hit unknowingly.
+//   - SINGLE post: both flag-off and flag-on send attachments explicitly from
+//     the edit (the single form has always required explicit attachments, the
+//     same way it requires explicit text) — no divergence there.
 func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, args importArgs) int {
 	// Validate flags via the existing builder (reuses the tested validation).
 	payload, err := buildImportPayload(args.postID, args.postIDs, args.whenType, args.howType, args.schedules)
@@ -200,6 +250,13 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 			return 1
 		}
 		fmt.Fprintf(errOut, "warn: --strip-vk-markup: routing %d post(s) through the per-post import path (%d import requests instead of 1 batch call)\n", len(ids), len(ids))
+		// The per-post single-id form cannot express "let the server fetch
+		// attachments from the ids" the way the batch form does, so each
+		// request sends its attachments explicitly from the edit response.
+		// State it on every strip-mode batch so the divergence is never hit
+		// unknowingly — turning on a text-hygiene flag also changes
+		// attachment delivery. See the runImport doc comment for the why.
+		fmt.Fprintf(errOut, "warn: --strip-vk-markup: attachments are sent explicitly per post (read from each edit response), NOT fetched server-side from the source ids as the batch form does — a text-hygiene flag also changes attachment delivery on a batch\n")
 		results := make([]hooppy.PostIDResponse, 0, len(ids))
 		for _, id := range ids {
 			edit, err := c.GetSearchPostEdit(ctx, id)
@@ -211,7 +268,7 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 			if len(edit.Texts) > 0 {
 				text = edit.Texts[0].Text
 			}
-			warnPostHygiene(errOut, id, text, args.stripVK)
+			warnPostHygiene(errOut, id, text, args.stripVK, true)
 			transformed := stripVKMarkup(text)
 			perPostPayload := hooppy.CopySearchPostPayload{
 				SearchPostID:        id,
@@ -253,7 +310,7 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 		if len(edit.Texts) > 0 {
 			text = edit.Texts[0].Text
 		}
-		warnPostHygiene(errOut, args.postID, text, args.stripVK)
+		warnPostHygiene(errOut, args.postID, text, args.stripVK, false)
 		if args.stripVK {
 			text = stripVKMarkup(text)
 		}
@@ -291,7 +348,7 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 		if len(edit.Texts) > 0 {
 			text = edit.Texts[0].Text
 		}
-		warnPostHygiene(errOut, id, text, args.stripVK)
+		warnPostHygiene(errOut, id, text, args.stripVK, true)
 	}
 	resp, err := c.ImportSearchPost(ctx, payload)
 	if err != nil {
@@ -311,8 +368,13 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 // VK wiki-link markup and advertising-disclosure markers are reported
 // regardless of whether --strip-vk-markup is set. When VK markup is detected
 // but the flag is OFF, the warning names the flag and states the cost so the
-// operator can act without reading the source.
-func warnPostHygiene(errOut io.Writer, postID int, text string, stripVK bool) {
+// operator can act without reading the source. The cost message is MODE-AWARE:
+// stripping a SINGLE post costs no extra API call (the single path already
+// sends client-side text), so the warning tells a single-post caller the flag
+// is free; only a BATCH fans out to N import calls, so only the batch warning
+// names the N-calls cost. Telling a single-post caller the flag "costs one API
+// call per post" would discourage a free correctness win.
+func warnPostHygiene(errOut io.Writer, postID int, text string, stripVK, batch bool) {
 	vkHits := detectVKMarkup(text)
 	for _, raw := range vkHits {
 		fmt.Fprintf(errOut, "warn: post %d: VK wiki-link markup found: %s\n", postID, raw)
@@ -322,6 +384,10 @@ func warnPostHygiene(errOut io.Writer, postID int, text string, stripVK bool) {
 		fmt.Fprintf(errOut, "warn: post %d: advertising-disclosure marker found on line: %q\n", postID, line)
 	}
 	if len(vkHits) > 0 && !stripVK {
-		fmt.Fprintf(errOut, "warn: post %d: %d VK wiki-link marker(s) detected; --strip-vk-markup converts [url|text] to text but routes each post through its own import request (N import calls instead of 1 batch call)\n", postID, len(vkHits))
+		if batch {
+			fmt.Fprintf(errOut, "warn: post %d: %d VK wiki-link marker(s) detected; --strip-vk-markup converts [url|text] to text but routes each post through its own import request (N import calls instead of 1 batch call)\n", postID, len(vkHits))
+		} else {
+			fmt.Fprintf(errOut, "warn: post %d: %d VK wiki-link marker(s) detected; --strip-vk-markup converts [url|text] to text at no extra cost (a single post is already one import call)\n", postID, len(vkHits))
+		}
 	}
 }
