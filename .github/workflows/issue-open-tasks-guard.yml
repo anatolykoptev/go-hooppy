@@ -1,0 +1,42 @@
+name: issue-open-tasks-guard
+
+# Re-opens issues that were closed while their task-list still had unchecked
+# boxes. A closing PR keyword closes the issue even when only part of the work
+# is done; this guard makes that loud instead of silent. Issues closed as
+# not_planned are skipped — a deliberately abandoned issue is not the failure
+# this guards against.
+#
+# The whole behaviour (parse -> decide -> build comment -> call the REST API)
+# lives in scripts/issue_open_tasks.py, which is unit-tested by
+# scripts/test_issue_open_tasks.py (run via `make preflight`). This workflow is
+# a thin caller: checkout, run the script, done. No inline JavaScript, no
+# actions/github-script — the previous inline-JS variant had `env:` nested under
+# `with:`, which YAML parses happily but GitHub silently treats as an action
+# input named `env`, so process.env.PAYLOAD was always undefined and the guard
+# never fired. Keeping the logic in Python makes it testable.
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: issue-open-tasks-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    if: github.event.issue.state_reason != 'not_planned'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: guard
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_REPOSITORY (owner/repo) is set by Actions automatically.
+        run: python3 scripts/issue_open_tasks.py
