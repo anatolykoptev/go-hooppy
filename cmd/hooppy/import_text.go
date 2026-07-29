@@ -22,6 +22,20 @@ type importArgs struct {
 	stripVK       bool
 }
 
+// perPostResult is one entry in the strip-batch stdout "per_post" array. It
+// records the outcome of every post attempted so a re-run after a partial
+// failure has the information to skip what already landed: a "created" entry
+// carries the published post id; a "failed" entry carries the error. The
+// strip-batch path is NOT atomic (it issues N import calls instead of 1), so
+// unlike the single-call paths, work already done MUST NOT be discarded on a
+// later failure — see runImport's doc comment.
+type perPostResult struct {
+	SearchPostID int    `json:"search_post_id"`
+	Status       string `json:"status"` // "created" or "failed"
+	PostID       int    `json:"post_id,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
 // adMarkers are the Russian advertising-disclosure markers the tool scans
 // for. They are NEVER auto-removed: a disclosure that genuinely is our
 // advertising must stay, and the tool cannot tell the two cases apart. This
@@ -35,10 +49,16 @@ type importArgs struct {
 //     missed the common form of the single most important marker. Do NOT
 //     "fix" this back to case-sensitive: the Latin-token-in-Cyrillic-body
 //     invariant is what makes the fold safe.
-//   - "Реклама." and "ИНН" stay case-SENSITIVE. They are Cyrillic; the
-//     lower-case "реклама." is an ordinary Russian word ("это реклама.
-//     хорошая.") and would fire on non-disclosure text, so folding those
-//     would trade a real false-positive cost for no gain.
+//   - "ИНН" is matched case-INSENSITIVELY. It is a Cyrillic ABBREVIATION,
+//     not a word — the lower-case "инн" is not an ordinary Russian word, so
+//     folding has no false-positive cost (a hit is one extra warning, never
+//     corruption), and the miss is real: "инн 1234567890" in a sloppy source
+//     escapes detection when the marker is case-sensitive.
+//   - "Реклама." stays case-SENSITIVE. It is a Cyrillic WORD as well as a
+//     disclosure marker; the lower-case "реклама." is an ordinary Russian
+//     word ("это реклама. хорошая.") and would fire on non-disclosure text,
+//     so folding would trade a real false-positive cost for no gain. The
+//     word/abbreviation distinction is why ИНН folds and Реклама. does not.
 type adMarker struct {
 	needle   string
 	foldCase bool
@@ -47,14 +67,15 @@ type adMarker struct {
 var adMarkers = []adMarker{
 	{needle: "Erid", foldCase: true},
 	{needle: "Реклама.", foldCase: false},
-	{needle: "ИНН", foldCase: false},
+	{needle: "ИНН", foldCase: true},
 }
 
 // stripVKMarkup converts VK wiki-link markup [url|text] to text, and the
 // internal-page form [[page|display]] to display. It is deliberately
 // conservative: a malformed marker (no closing bracket, no pipe, empty
-// brackets, an unterminated [[) is left byte-untouched. Mangling text on the
-// way into a live publishing queue is worse than leaving markup in.
+// brackets, an unterminated [[, or a "[" inside the inner text) is left
+// byte-untouched. Mangling text on the way into a live publishing queue is
+// worse than leaving markup in.
 //
 // Parsing rules (decided from the markup grammar, not a regex, so a `|` inside
 // the display text is handled correctly — the FIRST `|` is the separator):
@@ -64,10 +85,19 @@ var adMarkers = []adMarker{
 //   - [url]             → left untouched (no pipe = not a wiki-link)
 //   - []                → left untouched
 //   - unterminated [    → left untouched
+//   - unterminated [[   → left untouched (BOTH "[" copied, scan continues
+//     after them — advancing one would re-enter the
+//     single-bracket parser on the second "[" and
+//     mangle "[[a|b]|c]" into "[b|c]")
+//   - inner containing "[" → left untouched (nested/broken markup such as
+//     "[[a|[c|d]]]" or "[url|[x|y]]"; a "[" inside the
+//     inner means the marker was never valid, and
+//     transforming it is non-idempotent)
 //
 // The function operates on a byte-by-byte scan with strings.Index for the
 // closing bracket, so it never half-rewrites a malformed marker: if the close
-// is missing, the opening bracket is copied verbatim and scanning continues.
+// is missing, the opening bracket(s) are copied verbatim and scanning
+// continues.
 func stripVKMarkup(text string) string {
 	var b strings.Builder
 	b.Grow(len(text))
@@ -83,12 +113,25 @@ func stripVKMarkup(text string) string {
 			rest := text[i+2:]
 			end := strings.Index(rest, "]]")
 			if end < 0 {
-				// No closing ]] — leave the '[' untouched, continue after it.
-				b.WriteByte(text[i])
-				i++
+				// No closing ]] — leave BOTH "[" untouched and advance past
+				// them. Advancing by one would re-enter the single-bracket
+				// parser on the second "[", which can find a later "]" and
+				// "|" and transform text that was never a valid marker
+				// ("[[a|b]|c]" was mangled into "[b|c]"). A malformed marker
+				// must pass through byte-identical.
+				b.WriteString(text[i : i+2])
+				i += 2
 				continue
 			}
 			inner := rest[:end]
+			if strings.Contains(inner, "[") {
+				// A "[" inside a [[...]] inner means nested/broken markup
+				// ("[[a|[c|d]]]"). Leave the whole marker byte-untouched so
+				// it is not half-rewritten or made non-idempotent.
+				b.WriteString(text[i : i+2+end+2])
+				i += 2 + end + 2
+				continue
+			}
 			pipe := strings.Index(inner, "|")
 			if pipe < 0 {
 				// [[page]] — no display text; leave the whole marker untouched.
@@ -111,6 +154,15 @@ func stripVKMarkup(text string) string {
 			continue
 		}
 		inner := rest[:end]
+		if strings.Contains(inner, "[") {
+			// A "[" inside a [url|text] inner means nested/broken markup
+			// ("[url|[x|y]]" would otherwise lose the outer bracket and
+			// become non-idempotent: pass1="[x|y]", pass2="y"). Leave the
+			// whole marker byte-untouched.
+			b.WriteString(text[i : i+1+end+1])
+			i += 1 + end + 1
+			continue
+		}
 		pipe := strings.Index(inner, "|")
 		if pipe < 0 {
 			// [url] or [] — no pipe, not a wiki-link; leave untouched.
@@ -212,7 +264,14 @@ func detectAdMarkers(text string) []string {
 //   - BATCH (--post-ids), flag ON: N GetSearchPostEdit + N ImportSearchPost
 //     (one per post, each carrying its own transformed text). This is N import
 //     calls instead of 1 — the flag changes the cost profile, which is why it
-//     is opt-in.
+//     is opt-in. Unlike the other paths (which are a single API call and so
+//     atomic), this path is NOT atomic: a failure at post K of N leaves
+//     posts 1..K-1 already live in the queue. runImport therefore continues
+//     past a per-post failure, ALWAYS encodes a per-post result array to
+//     stdout (each post marked "created" with its id or "failed" with its
+//     error), and exits non-zero only AFTER stdout is written. Do NOT
+//     re-simplify this back to an early return — that would hide published
+//     posts from stdout and invite a duplicate-spawning re-run.
 //
 // Attachment delivery divergence (the operator must see this, never hidden).
 // This is MEASURED, not inferred from the text parallel — the three-row
@@ -277,12 +336,23 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 		// unknowingly — turning on a text-hygiene flag also changes
 		// attachment delivery. See the runImport doc comment for the why.
 		fmt.Fprintf(errOut, "warn: --strip-vk-markup: attachments are sent explicitly per post (read from each edit response), NOT fetched server-side from the source ids as the batch form does — a text-hygiene flag also changes attachment delivery on a batch\n")
-		results := make([]hooppy.PostIDResponse, 0, len(ids))
+		// This path is NOT atomic: it issues N import calls instead of 1
+		// batch call, so a failure at post K of N leaves posts 1..K-1 already
+		// live in the queue. Returning early before encoding would hide the
+		// published posts from stdout and invite a re-run that duplicates
+		// them. So: continue past any per-post failure, record every outcome
+		// (created with its id, or failed with its error), ALWAYS encode the
+		// full result to stdout, and only THEN exit non-zero if any post
+		// failed. A re-run reads stdout to skip what already landed.
+		results := make([]perPostResult, 0, len(ids))
+		anyFailed := false
 		for _, id := range ids {
 			edit, err := c.GetSearchPostEdit(ctx, id)
 			if err != nil {
+				anyFailed = true
 				fmt.Fprintf(errOut, "error: GetSearchPostEdit(%d): %v\n", id, err)
-				return 1
+				results = append(results, perPostResult{SearchPostID: id, Status: "failed", Error: fmt.Sprintf("GetSearchPostEdit: %v", err)})
+				continue
 			}
 			text := ""
 			if len(edit.Texts) > 0 {
@@ -302,11 +372,16 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 			}
 			resp, err := c.ImportSearchPost(ctx, perPostPayload)
 			if err != nil {
+				anyFailed = true
 				fmt.Fprintf(errOut, "error: ImportSearchPost(%d): %v\n", id, err)
-				return 1
+				results = append(results, perPostResult{SearchPostID: id, Status: "failed", Error: fmt.Sprintf("ImportSearchPost: %v", err)})
+				continue
 			}
-			results = append(results, *resp)
+			results = append(results, perPostResult{SearchPostID: id, Status: "created", PostID: resp.ID})
 		}
+		// ALWAYS encode the full result, even on partial failure — stdout is
+		// the operator's record of what landed. Exit non-zero only AFTER the
+		// encode, so a caller parsing stdout never loses already-published ids.
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(map[string]interface{}{
@@ -314,6 +389,9 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 			"per_post":        results,
 		}); err != nil {
 			fmt.Fprintf(errOut, "error encoding output: %v\n", err)
+			return 1
+		}
+		if anyFailed {
 			return 1
 		}
 		return 0
@@ -361,8 +439,16 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 	for _, id := range ids {
 		edit, err := c.GetSearchPostEdit(ctx, id)
 		if err != nil {
-			fmt.Fprintf(errOut, "error: GetSearchPostEdit(%d): %v\n", id, err)
-			return 1
+			// A detection-read failure must NOT abort the import. This GET
+			// exists only to produce a hygiene warning; the import itself
+			// (the single batch call below) does not need it. Before this
+			// path existed the import made zero such calls, so failing the
+			// whole batch on a detection read would turn N optional reads
+			// into N fatal dependencies. Warn on stderr naming the post and
+			// stating it was not scanned, so a silent gap in coverage is not
+			// mistaken for a clean scan — then continue.
+			fmt.Fprintf(errOut, "warn: post %d: detection read failed (%v); post was NOT scanned for VK markup or ad markers, import continues\n", id, err)
+			continue
 		}
 		text := ""
 		if len(edit.Texts) > 0 {

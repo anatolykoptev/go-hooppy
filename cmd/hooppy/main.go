@@ -1100,7 +1100,7 @@ func registerSearch(root *cobra.Command) {
 	importCmd.Flags().IntVar(&impHowType, "how-type", 2, "publication how type (2=by schedule pages)")
 	importCmd.Flags().StringVar(&impSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
 	importCmd.Flags().BoolVar(&impNoAttachments, "no-attachments", false, "strip all attachments (photos, videos, links, etc.)")
-	importCmd.Flags().BoolVar(&impStripVK, "strip-vk-markup", false, "convert VK wiki-link markup [url|text] to text (opt-in). On a batch this routes each post through its own import request (N import calls instead of 1 batch call) — the cost-profile change is why the flag is opt-in. Advertising disclosures (Erid/Реклама./ИНН) are NEVER auto-removed: a disclosure that genuinely is our advertising must stay, and the tool cannot tell the two apart.")
+	importCmd.Flags().BoolVar(&impStripVK, "strip-vk-markup", false, "convert VK wiki-link markup [url|text] to text (opt-in). On a batch this routes each post through its own import request (N import calls instead of 1 batch call) — the cost-profile change is why the flag is opt-in. On a batch the stdout JSON shape also changes: instead of a single PostIDResponse, it emits {\"strip_vk_markup\":true,\"per_post\":[{search_post_id,status(\"created\"|\"failed\"),post_id?,error?}]} listing every post attempted, so a partial failure (this path is NOT atomic) leaves a record of what already landed. Advertising disclosures (Erid/Реклама./ИНН) are NEVER auto-removed: a disclosure that genuinely is our advertising must stay, and the tool cannot tell the two apart.")
 	importCmd.Run = func(_ *cobra.Command, _ []string) {
 		os.Exit(runImport(context.Background(), mustClient(), os.Stdout, os.Stderr, importArgs{
 			postID:        impPostID,

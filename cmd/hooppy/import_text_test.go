@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,12 +87,82 @@ func TestStripVKMarkup(t *testing.T) {
 			in:   "[https://vk.com/x|text] stuff]",
 			want: "text stuff]",
 		},
+		// F1: a malformed marker must pass through byte-identical, including
+		// when valid-looking markup appears later in the same text. The old
+		// unterminated-[[ branch emitted only the first "[" and advanced by
+		// one, so the second "[" re-entered the single-bracket parser, found
+		// a later "]" and "|", and transformed text that was never a valid
+		// marker. Each case below was mangled before the fix; all must now be
+		// byte-identical.
+		{
+			name: "unterminated [[ with later ] and | passes through byte-identical",
+			in:   "[[a|b]|c]",
+			want: "[[a|b]|c]",
+		},
+		{
+			name: "unterminated [[ with later ] and space passes through byte-identical",
+			in:   "[[page|Display] text]",
+			want: "[[page|Display] text]",
+		},
+		{
+			name: "nested broken [[ with inner [ passes through byte-identical",
+			in:   "[[a|[c|d]]]",
+			want: "[[a|[c|d]]]",
+		},
+		// F5: a "[" inside a [url|text] inner is nested/broken markup — leave
+		// it byte-untouched so strip is idempotent (the old first-close rule
+		// turned "[url|[x|y]]" into "[x|y]" on pass 1 and "y" on pass 2).
+		{
+			name: "single bracket with inner [ passes through byte-identical (idempotence)",
+			in:   "[url|[x|y]]",
+			want: "[url|[x|y]]",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := stripVKMarkup(tc.in)
 			if got != tc.want {
 				t.Errorf("stripVKMarkup(%q) =\n  %q\nwant\n  %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStripVKMarkup_Idempotent pins strip(strip(x)) == strip(x) over the whole
+// table, so the idempotence property is asserted rather than incidental. A
+// non-idempotent strip is a corruption vector on a live publishing queue: a
+// caller that pre-transforms and then re-transforms would get a different
+// result, and the first-close rule could leave a "[" in the output that
+// re-parses on the second pass.
+func TestStripVKMarkup_Idempotent(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"single link", "See [https://vk.com/x|Заголовок] for details"},
+		{"multiple links", "[https://vk.com/a|First] and [https://vk.com/b|Second]"},
+		{"pipe in display", "[https://vk.com/x|text|with|pipes]"},
+		{"unterminated single", "Text [https://vk.com/x|Заголовок without close"},
+		{"no pipe", "See [https://vk.com/x] here"},
+		{"empty brackets", "See [] here"},
+		{"double-bracket display", "See [[page_name|Display Text]] here"},
+		{"double-bracket no pipe", "See [[page_name]] here"},
+		{"unterminated double-bracket", "See [[page_name|Display without close"},
+		{"plain text", "Plain text with no markup at all.\nSecond line."},
+		{"spaced", "  spaced text  "},
+		{"adjacent links", "[https://vk.com/a|One][https://vk.com/b|Two]"},
+		{"first-close display", "[https://vk.com/x|text] stuff]"},
+		{"F1 unterminated [[ with later pipe", "[[a|b]|c]"},
+		{"F1 unterminated [[ with space", "[[page|Display] text]"},
+		{"F1 nested broken [[", "[[a|[c|d]]]"},
+		{"F5 single bracket with inner [", "[url|[x|y]]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			once := stripVKMarkup(tc.in)
+			twice := stripVKMarkup(once)
+			if once != twice {
+				t.Errorf("strip not idempotent on %q:\n  pass1=%q\n  pass2=%q", tc.in, once, twice)
 			}
 		})
 	}
@@ -174,7 +245,7 @@ func TestDetectAdMarkers(t *testing.T) {
 			// Regression guard: "Реклама." stays case-sensitive. The lower-case
 			// "реклама." is an ordinary Russian word ("this is an ad. a good
 			// one.") and would fire on non-disclosure text.
-			name:      "lower-case реклама. NOT matched (Cyrillic, false-positive risk)",
+			name:      "lower-case реклама. NOT matched (Cyrillic word, false-positive risk)",
 			in:        "это реклама. хорошая.",
 			wantLines: nil,
 		},
@@ -187,6 +258,16 @@ func TestDetectAdMarkers(t *testing.T) {
 			name:      "ИНН marker matched",
 			in:        "ИНН 1234567890",
 			wantLines: []string{"ИНН 1234567890"},
+		},
+		{
+			// F4: "ИНН" is a Cyrillic ABBREVIATION, not a word — the lower-case
+			// "инн" is not an ordinary Russian word, so folding has no
+			// false-positive cost (a hit is one extra warning, never
+			// corruption), and the miss is real: "инн 1234567890" in a sloppy
+			// source escapes detection when the marker is case-sensitive.
+			name:      "lower-case инн matched (Cyrillic abbreviation, fold-safe)",
+			in:        "инн 1234567890",
+			wantLines: []string{"инн 1234567890"},
 		},
 		{
 			name: "full advertising block matched as one line",
@@ -647,5 +728,237 @@ func TestRunImport_CostWarning_SingleIsFree(t *testing.T) {
 	}
 	if strings.Contains(stderr, "N import calls instead of 1 batch call") {
 		t.Errorf("single-post warning leaks the batch N-calls cost message; got:\n%s", stderr)
+	}
+}
+
+// importStubServerFailingNth is like importStubServer but the failNth-th
+// PUT /posts/import request (1-based) returns 500, so the per-post import
+// path sees a failure on exactly one post. Used to pin that a partial batch
+// failure does not discard already-published posts.
+func importStubServerFailingNth(t *testing.T, editBodies map[int]string, failNth int) *httptest.Server {
+	t.Helper()
+	var importCount int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/posts-search/"), "/edit")
+			id := 0
+			for _, ch := range idStr {
+				id = id*10 + int(ch-'0')
+			}
+			body, ok := editBodies[id]
+			if !ok {
+				t.Errorf("stub: no edit body for id %d (path %s)", id, r.URL.Path)
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(body))
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			mu.Lock()
+			importCount++
+			n := importCount
+			mu.Unlock()
+			if n == failNth {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"simulated failure"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			// Distinct ids per call so the test can assert which landed.
+			fmt.Fprintf(w, `{"id":%d}`, 7000+n)
+		default:
+			t.Errorf("stub: unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestRunImport_StripBatch_PartialFailurePreservesPublished pins F3: a
+// per-post import failure mid-batch must NOT discard the posts already
+// published. The strip-batch path is NOT atomic (N import calls), so
+// returning early before encoding would hide live-in-queue posts from stdout
+// and invite a duplicate-spawning re-run. The fix: continue past the failure,
+// always encode a per-post result array, exit non-zero only AFTER stdout is
+// written. Asserted by PARSING stdout (not substring), so the shape contract
+// is pinned.
+func TestRunImport_StripBatch_PartialFailurePreservesPublished(t *testing.T) {
+	editBodies := map[int]string{
+		5001: editBodyFor("post one"),
+		5002: editBodyFor("post two"),
+		5003: editBodyFor("post three"),
+		5004: editBodyFor("post four"),
+		5005: editBodyFor("post five"),
+	}
+	// Fail the 3rd of 5 imports.
+	srv := importStubServerFailingNth(t, editBodies, 3)
+	c := newImportTestClient(t, srv)
+
+	var out, errOut strings.Builder
+	code := runImport(context.Background(), c, &out, &errOut, importArgs{
+		postIDs:  "5001,5002,5003,5004,5005",
+		whenType: 1,
+		howType:  1,
+		stripVK:  true,
+	})
+	// Exit non-zero — a post failed.
+	if code == 0 {
+		t.Fatalf("exit 0; want non-zero (one import failed); stderr=%s", errOut.String())
+	}
+	// Parse stdout (NOT substring) — the shape contract is the point.
+	var parsed struct {
+		StripVKMarkup bool `json:"strip_vk_markup"`
+		PerPost       []struct {
+			SearchPostID int    `json:"search_post_id"`
+			Status       string `json:"status"`
+			PostID       int    `json:"post_id,omitempty"`
+			Error        string `json:"error,omitempty"`
+		} `json:"per_post"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &parsed); err != nil {
+		t.Fatalf("stdout not valid JSON: %v\nstdout=%s", err, out.String())
+	}
+	if !parsed.StripVKMarkup {
+		t.Errorf("strip_vk_markup = false, want true")
+	}
+	if got, want := len(parsed.PerPost), 5; got != want {
+		t.Fatalf("per_post len = %d, want %d (every post attempted must be listed); stdout=%s", got, want, out.String())
+	}
+	// Count outcomes: 2 created before the failure, 1 failed, 2 created after.
+	var created, failed int
+	createdIDs := map[int]bool{}
+	for _, r := range parsed.PerPost {
+		switch r.Status {
+		case "created":
+			created++
+			createdIDs[r.PostID] = true
+		case "failed":
+			failed++
+		default:
+			t.Errorf("per_post status = %q, want created or failed", r.Status)
+		}
+	}
+	if created != 4 {
+		t.Errorf("created count = %d, want 4 (2 before failure + 2 after)", created)
+	}
+	if failed != 1 {
+		t.Errorf("failed count = %d, want 1 (the 3rd import)", failed)
+	}
+	// The failed entry must be the 3rd post and carry an error.
+	if parsed.PerPost[2].Status != "failed" || parsed.PerPost[2].SearchPostID != 5003 {
+		t.Errorf("per_post[2] = {id:%d status:%q}, want {id:5003 status:failed}", parsed.PerPost[2].SearchPostID, parsed.PerPost[2].Status)
+	}
+	if parsed.PerPost[2].Error == "" {
+		t.Errorf("per_post[2] error empty, want the failure reason")
+	}
+	// The 2 successful ids BEFORE the failure must be present and parseable.
+	for _, wantID := range []int{7001, 7002} {
+		if !createdIDs[wantID] {
+			t.Errorf("created post_id %d not in stdout per_post (already-published posts must be recorded); got %v", wantID, createdIDs)
+		}
+	}
+	// The 2 attempted-after must also be present and created.
+	for _, wantID := range []int{7004, 7005} {
+		if !createdIDs[wantID] {
+			t.Errorf("created post_id %d not in stdout per_post (posts after the failure must still be attempted); got %v", wantID, createdIDs)
+		}
+	}
+	// stderr must name the failed import.
+	if !strings.Contains(errOut.String(), "ImportSearchPost(5003)") {
+		t.Errorf("stderr does not name the failed import; got:\n%s", errOut.String())
+	}
+}
+
+// importStubServerEditFailing is like importStubServer but the GET edit for
+// failID returns 500. Used to pin F2: a detection-read failure in batch
+// flag-off mode must NOT abort the import (the GET exists only to produce a
+// warning; the import itself does not need it).
+func importStubServerEditFailing(t *testing.T, editBodies map[int]string, failID int) (*httptest.Server, *importCapturer) {
+	t.Helper()
+	cap := &importCapturer{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/posts-search/"), "/edit")
+			id := 0
+			for _, ch := range idStr {
+				id = id*10 + int(ch-'0')
+			}
+			if id == failID {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"simulated edit fetch failure"}`))
+				return
+			}
+			body, ok := editBodies[id]
+			if !ok {
+				t.Errorf("stub: no edit body for id %d (path %s)", id, r.URL.Path)
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(body))
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			raw, _ := io.ReadAll(r.Body)
+			cap.add(raw)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":7001}`))
+		default:
+			t.Errorf("stub: unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, cap
+}
+
+// TestRunImport_BatchFlagOff_DetectionReadFailureNonFatal pins F2: in batch
+// flag-off mode, a failed detection GetSearchPostEdit must NOT abort the
+// import — that GET exists only to produce a warning, and before this PR the
+// path made zero such calls. The fix: warn on stderr naming the post id and
+// stating it was NOT scanned, then continue. The import still issues its
+// single batch call and succeeds.
+func TestRunImport_BatchFlagOff_DetectionReadFailureNonFatal(t *testing.T) {
+	editBodies := map[int]string{
+		6001: editBodyFor("post one"),
+		6002: editBodyFor("post two"),
+		6003: editBodyFor("post three"),
+	}
+	// Fail the edit GET for post 6002.
+	srv, cap := importStubServerEditFailing(t, editBodies, 6002)
+	c := newImportTestClient(t, srv)
+
+	var out, errOut strings.Builder
+	code := runImport(context.Background(), c, &out, &errOut, importArgs{
+		postIDs:  "6001,6002,6003",
+		whenType: 1,
+		howType:  1,
+		stripVK:  false,
+	})
+	// The import MUST still succeed — the detection read is optional.
+	if code != 0 {
+		t.Fatalf("exit %d; want 0 (detection-read failure must not abort the import); stderr=%s", code, errOut.String())
+	}
+	// Exactly ONE batch import call (not aborted before it).
+	if got, want := cap.count(), 1; got != want {
+		t.Fatalf("import call count = %d, want %d (the single batch call must still fire)", got, want)
+	}
+	// stderr must name the unscanned post and state it was NOT scanned, so a
+	// silent gap in coverage is not mistaken for a clean scan.
+	stderr := errOut.String()
+	if !strings.Contains(stderr, "6002") {
+		t.Errorf("stderr does not name the unscanned post id 6002; got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "NOT scanned") {
+		t.Errorf("stderr does not state the post was NOT scanned; got:\n%s", stderr)
+	}
+	// stdout must still be valid JSON.
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(out.String()), &parsed); err != nil {
+		t.Fatalf("stdout not valid JSON: %v\nstdout=%s", err, out.String())
 	}
 }
