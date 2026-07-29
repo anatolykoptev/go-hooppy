@@ -50,6 +50,17 @@ func TestUpdateScheduleTool_DescriptionPreservesFields(t *testing.T) {
 	if !strings.Contains(tool.Description, "page targets") {
 		t.Errorf("hooppy_update_schedule description must name page targets as a preserved field — missing \"page targets\": %q", tool.Description)
 	}
+	// The WARNING STANCE must be pinned, not just the preservation phrases.
+	// A reword that keeps "read-modify-write", "preserving every other field",
+	// "posting times", and "page targets" while DROPPING "do not expect a
+	// partial update" would pass the four checks above and silently remove
+	// the only sentence that tells the LLM this is NOT a partial update. The
+	// stance is the load-bearing claim; the phrases are its evidence. Pin the
+	// stance too, case-insensitively so a "Do NOT"/"do not" casing tweak does
+	// not let it slip.
+	if !strings.Contains(strings.ToLower(tool.Description), "do not expect a partial update") {
+		t.Errorf("hooppy_update_schedule description must carry the warning stance \"do not expect a partial update\" — the four phrase checks above pass without it; missing the stance: %q", tool.Description)
+	}
 }
 
 // TestUpdateScheduleTool_WireBodyPreservesUnmodelledFields drives the real

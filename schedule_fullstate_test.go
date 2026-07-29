@@ -1,6 +1,7 @@
 package hooppy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,6 +10,22 @@ import (
 	"strings"
 	"testing"
 )
+
+// compactRaw normalises a json.RawMessage by removing insignificant
+// whitespace, so two values that differ only in formatting compare equal.
+// It does NOT touch number precision — 9007199254740993 stays
+// 9007199254740993 (only whitespace is stripped), which is what makes the
+// byte-identity test able to detect a float64 round trip that would mangle
+// it to 9007199254740992. Used instead of decoding into
+// map[string]interface{} (float64), which would hide that precision loss.
+func compactRaw(t *testing.T, raw json.RawMessage) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		t.Fatalf("compact raw JSON: %v (raw=%s)", err, raw)
+	}
+	return buf.Bytes()
+}
 
 // --- Mode invariant guard (issue #66) ---
 
@@ -143,11 +160,18 @@ func TestCreateSchedule_UnsatisfiablePayloadRefused(t *testing.T) {
 //     mangle them (int 0 vs. the original string).
 //
 // Every KEY and every VALUE TYPE is as the server sends them. IDs are small
-// integers; names are "A"/"B"; URLs are example.invalid.
+// integers; names are "A"/"B"; URLs are example.invalid. ONE synthetic key
+// (large_id_probe) is a precision probe: its value 9007199254740993 is 2^53+1,
+// which a float64 round trip mangles to 2^53 (9007199254740992). It exists so
+// the byte-identity test can DETECT a precision regression — a comparison
+// that decodes both sides into map[string]interface{} (float64) and
+// re-marshals would see 9007199254740992 on both sides and pass, hiding the
+// loss. Comparing the raw json.RawMessage bytes catches it.
 const scheduleEditFullResponse = `{
 	"id": 42,
 	"name": "A",
 	"user_id": 1,
+	"large_id_probe": 9007199254740993,
 	"position": 0,
 	"state": 1,
 	"is_deleted": 0,
@@ -237,20 +261,28 @@ const scheduleEditFullResponse = `{
 // posts_location, etc.) and the KNOWN-HOSTILE string fields
 // (publish_as_story_source_ids="1,2,7,9", share_stories_to_feed_source_ids).
 //
-// The test decodes the PUT request body as map[string]interface{} and asserts
-// EVERY key from the original fixture is present with the same value — except
-// the overridden key ("name"). It does NOT assert on the Go struct, which by
-// definition cannot show the fields it does not model.
+// The test decodes BOTH the fixture and the PUT body into
+// map[string]json.RawMessage and compares the RAW BYTES of each key's value
+// — NOT map[string]interface{} (float64). A float64 comparison would hide a
+// precision regression: the fixture's large_id_probe (2^53+1) round-trips
+// through float64 as 2^53 on both sides and passes. Comparing the raw
+// json.RawMessage bytes catches it. It does NOT assert on the Go struct,
+// which by definition cannot show the fields it does not model.
 //
 // RED-on-revert: drop one unmodelled field from the read-modify-write body
 // (e.g. revert UpdateScheduleFromEdit to decode into ScheduleEditResponse and
 // re-marshal, which drops the 36 unmodelled keys) → the test fails, naming
-// every dropped key. The test is designed so that even a SINGLE dropped key
+// every dropped key. Revert the comparison to float64 + re-marshalled bytes
+// and introduce a precision-losing change → the test STILL fails on
+// large_id_probe, proving the strengthened comparison detects what the old
+// one could not. The test is designed so that even a SINGLE dropped key
 // produces a failure with the key name.
 func TestUpdateScheduleFromEdit_ByteIdentity(t *testing.T) {
-	// Decode the fixture once to get the set of keys + values to compare against.
-	var fixtureMap map[string]interface{}
-	if err := json.Unmarshal([]byte(scheduleEditFullResponse), &fixtureMap); err != nil {
+	// Decode the fixture into map[string]json.RawMessage to carry the raw
+	// value bytes for comparison — NOT float64, which would mangle
+	// large_id_probe (2^53+1 → 2^53) and hide a precision regression.
+	var fixtureRaw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(scheduleEditFullResponse), &fixtureRaw); err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
 
@@ -289,18 +321,19 @@ func TestUpdateScheduleFromEdit_ByteIdentity(t *testing.T) {
 		t.Errorf("response name = %q, want New Name", resp.Schedules[0].Name)
 	}
 
-	// Decode the PUT body as a generic map — NOT as a Go struct, which by
-	// definition cannot show the fields it does not model.
-	var putMap map[string]interface{}
-	if err := json.Unmarshal(capturedPUTBody, &putMap); err != nil {
+	// Decode the PUT body as map[string]json.RawMessage — NOT as a Go struct
+	// (which by definition cannot show the fields it does not model) and NOT
+	// as map[string]interface{} (float64, which mangles large_id_probe).
+	var putRaw map[string]json.RawMessage
+	if err := json.Unmarshal(capturedPUTBody, &putRaw); err != nil {
 		t.Fatalf("decode PUT body: %v", err)
 	}
 
 	// Assert EVERY key from the fixture is present in the PUT body.
 	// This is the byte-identity check: no unmodelled field may be dropped.
 	var missingKeys []string
-	for key := range fixtureMap {
-		if _, ok := putMap[key]; !ok {
+	for key := range fixtureRaw {
+		if _, ok := putRaw[key]; !ok {
 			missingKeys = append(missingKeys, key)
 		}
 	}
@@ -308,38 +341,49 @@ func TestUpdateScheduleFromEdit_ByteIdentity(t *testing.T) {
 		t.Errorf("PUT body is missing %d key(s) from the /edit response — the read-modify-write helper dropped unmodelled fields: %v", len(missingKeys), missingKeys)
 	}
 
-	// Assert every key has the SAME VALUE as the fixture, except the overridden
-	// key ("name"). Compare via re-marshalled JSON bytes to avoid float64/map
-	// comparison issues.
-	for key, expectedVal := range fixtureMap {
+	// Assert every key has the SAME RAW BYTES as the fixture, except the
+	// overridden key ("name"). Compare the json.RawMessage bytes via
+	// compactRaw (whitespace-normalised) — NOT float64-decoded +
+	// re-marshalled, which would hide a precision regression on
+	// large_id_probe (2^53+1 → 2^53 on both sides). compactRaw strips only
+	// insignificant whitespace; number digits stay exact.
+	for key, expectedRaw := range fixtureRaw {
 		if key == "name" {
 			continue // this is the field we overrode
 		}
-		gotVal, ok := putMap[key]
+		gotRaw, ok := putRaw[key]
 		if !ok {
 			continue // already reported in missingKeys
 		}
-		expectedBytes, _ := json.Marshal(expectedVal)
-		gotBytes, _ := json.Marshal(gotVal)
-		if string(expectedBytes) != string(gotBytes) {
-			t.Errorf("PUT body key %q = %s, want %s (byte-identity violated — the read-modify-write helper altered an unmodelled field)", key, gotBytes, expectedBytes)
+		if string(compactRaw(t, expectedRaw)) != string(compactRaw(t, gotRaw)) {
+			t.Errorf("PUT body key %q = %s, want %s (byte-identity violated — the read-modify-write helper altered an unmodelled field's raw bytes)", key, gotRaw, expectedRaw)
 		}
 	}
 
-	// The overridden key must have the new value.
-	if putMap["name"] != "New Name" {
-		t.Errorf("PUT body name = %v, want \"New Name\" (the override was not applied)", putMap["name"])
+	// The overridden key must have the new value. Its RawMessage is a JSON
+	// string, so compare against the quoted form (no whitespace to normalise).
+	if string(putRaw["name"]) != `"New Name"` {
+		t.Errorf("PUT body name = %s, want \"New Name\" (the override was not applied)", putRaw["name"])
 	}
 
 	// The KNOWN-HOSTILE string fields must be preserved byte-identically.
 	// These are typed int in SchedulePayload but the server carries them as
 	// comma-separated strings. A Go struct round trip would mangle them
-	// (int 0 vs. "1,2,7,9"). The map[string]json.RawMessage path preserves them.
-	if putMap["publish_as_story_source_ids"] != "1,2,7,9" {
-		t.Errorf("publish_as_story_source_ids = %v, want \"1,2,7,9\" (KNOWN-HOSTILE string field mangled by round trip)", putMap["publish_as_story_source_ids"])
+	// (int 0 vs. "1,2,7,9"). The map[string]json.RawMessage path preserves
+	// them — assert on the raw bytes (quoted strings, no whitespace).
+	if string(putRaw["publish_as_story_source_ids"]) != `"1,2,7,9"` {
+		t.Errorf("publish_as_story_source_ids = %s, want \"1,2,7,9\" (KNOWN-HOSTILE string field mangled by round trip)", putRaw["publish_as_story_source_ids"])
 	}
-	if putMap["share_stories_to_feed_source_ids"] != "1,2,7,9" {
-		t.Errorf("share_stories_to_feed_source_ids = %v, want \"1,2,7,9\" (KNOWN-HOSTILE string field mangled by round trip)", putMap["share_stories_to_feed_source_ids"])
+	if string(putRaw["share_stories_to_feed_source_ids"]) != `"1,2,7,9"` {
+		t.Errorf("share_stories_to_feed_source_ids = %s, want \"1,2,7,9\" (KNOWN-HOSTILE string field mangled by round trip)", putRaw["share_stories_to_feed_source_ids"])
+	}
+
+	// The precision probe must survive byte-identically. A float64 round
+	// trip (the old comparison) would mangle 9007199254740993 to
+	// 9007199254740992 on BOTH sides and pass; the raw-byte comparison
+	// catches any precision loss introduced by the helper.
+	if string(putRaw["large_id_probe"]) != `9007199254740993` {
+		t.Errorf("large_id_probe = %s, want 9007199254740993 (precision loss — a float64 round trip would mangle 2^53+1 to 2^53; the raw-byte comparison catches it)", putRaw["large_id_probe"])
 	}
 }
 
@@ -420,4 +464,124 @@ func TestUpdateScheduleFromEdit_ZeroIDRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "id is required") {
 		t.Errorf("error must name the requirement, got: %v", err)
 	}
+}
+
+// TestUpdateScheduleFromEdit_RecognisableScheduleGuard is the RED-on-revert
+// test for the critical guard against a zero-key or near-empty /edit
+// response wiping a live schedule. `{}` is VALID JSON: json.Unmarshal
+// succeeds, fullState is an empty map, the overrides are applied to nothing,
+// and the PUT body becomes the overrides alone (e.g. {"name":"X"}). That
+// writes a near-empty object over a live schedule and destroys every field
+// not in the overrides — page targets, times, captions, buttons, start/stop
+// dates. Irreversible, silent, reported as success.
+//
+// A one- or two-key response is nearly as destructive, so a `len == 0` test
+// just moves the cliff. The guard requires the state to be RECOGNISABLY a
+// schedule: the structural keys a /edit response always carries — id, name,
+// publication_how_type. Refuse before applying overrides; never issue the
+// PUT. The failure must be an error return, not a partial write.
+//
+// The stub FAILS THE TEST if any PUT arrives — that assertion IS the guard.
+//
+// RED-on-revert: remove the recognisably-a-schedule guard → the `{}` and
+// truncated cases send a PUT to the stub → the stub's t.Errorf fires and the
+// test fails. The full-fixture case must still proceed unchanged.
+func TestUpdateScheduleFromEdit_RecognisableScheduleGuard(t *testing.T) {
+	overrides, err := ScheduleOverride("name", "New Name")
+	if err != nil {
+		t.Fatalf("ScheduleOverride: %v", err)
+	}
+
+	// editResponseStub serves the given /edit body and FAILS if any PUT
+	// arrives. Returns the server plus a pointer to a flag set when a PUT
+	// was (wrongly) received.
+	editResponseStub := func(t *testing.T, editBody string) (*httptest.Server, *bool) {
+		t.Helper()
+		var putReceived bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/posts/schedules/42/edit":
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(editBody))
+			case r.Method == http.MethodPut && r.URL.Path == "/posts/schedules/42":
+				putReceived = true
+				t.Errorf("unexpected PUT reached the server — a near-empty /edit response must be refused BEFORE any PUT; the guard failed")
+				w.WriteHeader(http.StatusInternalServerError)
+			default:
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv, &putReceived
+	}
+
+	t.Run("empty_object_refused_no_PUT", func(t *testing.T) {
+		// `{}` is valid JSON: unmarshal succeeds, fullState is empty. Without
+		// the guard, the PUT body would be {"name":"New Name"} alone.
+		srv, putPtr := editResponseStub(t, `{}`)
+		c := newTestClient(t, srv)
+		_, err := c.UpdateScheduleFromEdit(context.Background(), 42, overrides)
+		if err == nil {
+			t.Fatal("expected error for empty-object /edit response, got nil — the guard must refuse a zero-key state before any PUT")
+		}
+		if !strings.Contains(err.Error(), "not a recognisable schedule") {
+			t.Errorf("error must name the recognisable-schedule refusal, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "missing structural key") {
+			t.Errorf("error must name the missing structural keys, got: %v", err)
+		}
+		if *putPtr {
+			t.Fatal("a PUT reached the server — the guard must refuse BEFORE any PUT on a zero-key /edit response")
+		}
+	})
+
+	t.Run("truncated_single_key_refused_no_PUT", func(t *testing.T) {
+		// A plausible-but-truncated object (only id) unmarshals fine and has
+		// one key — a `len == 0` test would pass this through. The guard must
+		// refuse it: name and publication_how_type are still missing.
+		srv, putPtr := editResponseStub(t, `{"id":123}`)
+		c := newTestClient(t, srv)
+		_, err := c.UpdateScheduleFromEdit(context.Background(), 42, overrides)
+		if err == nil {
+			t.Fatal("expected error for truncated single-key /edit response, got nil — a one-key state is nearly as destructive as empty")
+		}
+		if !strings.Contains(err.Error(), "not a recognisable schedule") {
+			t.Errorf("error must name the recognisable-schedule refusal, got: %v", err)
+		}
+		if *putPtr {
+			t.Fatal("a PUT reached the server — the guard must refuse BEFORE any PUT on a truncated /edit response")
+		}
+	})
+
+	t.Run("full_fixture_proceeds_PUT_unchanged", func(t *testing.T) {
+		// The full fixture carries all structural keys — the guard must
+		// pass it through and the PUT proceeds with unchanged behaviour.
+		var putReceived bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/posts/schedules/42/edit":
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(scheduleEditFullResponse))
+			case r.Method == http.MethodPut && r.URL.Path == "/posts/schedules/42":
+				putReceived = true
+				w.Write([]byte(`{"schedules":[{"id":42,"name":"New Name"}]}`))
+			default:
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer srv.Close()
+		c := newTestClient(t, srv)
+		resp, err := c.UpdateScheduleFromEdit(context.Background(), 42, overrides)
+		if err != nil {
+			t.Fatalf("full fixture must proceed unchanged, got error: %v", err)
+		}
+		if !putReceived {
+			t.Fatal("the PUT must proceed on the full fixture — the guard must not refuse a recognisable schedule")
+		}
+		if resp.Schedules[0].Name != "New Name" {
+			t.Errorf("response name = %q, want New Name", resp.Schedules[0].Name)
+		}
+	})
 }

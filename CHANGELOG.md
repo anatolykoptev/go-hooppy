@@ -25,6 +25,7 @@
 
 ### Changed
 
+* **BEHAVIOUR CHANGE — `schedules update --name` no longer forces the schedule active** (#88): the CLI `schedules update` `--state` flag default moved from `1` to `0`. Previously a name-only update (`hooppy schedules update <id> --name X`) silently forced `state=1` (active) on every call, because the old default populated the `state` override. Now `--state=0` means "leave unchanged" — the read-modify-write omits the `state` override entirely, so a name-only change preserves the schedule's existing active/deferred/stopped state. This is the correct behaviour for a read-modify-write (the point is to change only what the caller asked for), but it is a semantic change to a flag default: someone scripting `schedules update --name X` today gets a different outcome than before — the schedule keeps its prior state instead of being forced active. Pass `--state=1` explicitly to keep the old behaviour. The MCP `hooppy_update_schedule` tool and the library `UpdateScheduleFromEdit` helper were already state-omitting and are unchanged.
 * `APIError` struct gains a `RetryAfter time.Duration` field (additive, zero value = no behavior change).
 * `Schedule` struct expanded with `UserID`, `Position`, `State`, `StopDate`, `StartDate`, `IsDeleted`, `PublicationHowType`, `PublicationWhereType` fields (additive, omitempty).
 * `ScheduleResponse` includes `Success` bool field (returned by DELETE).

@@ -501,25 +501,11 @@ func registerSchedules(root *cobra.Command) {
 		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
-		if schedUpdName == "" && schedUpdState == 0 {
-			fmt.Fprintln(os.Stderr, "hooppy: schedules update: at least one of --name or --state is required")
-			os.Exit(1)
-		}
-		overrides := map[string]json.RawMessage{}
-		if schedUpdName != "" {
-			b, err := json.Marshal(schedUpdName)
-			die(err)
-			overrides["name"] = b
-		}
-		if schedUpdState != 0 {
-			b, err := json.Marshal(schedUpdState)
-			die(err)
-			overrides["state"] = b
-		}
-		c := mustClient()
-		resp, err := c.UpdateScheduleFromEdit(context.Background(), id, overrides)
-		die(err)
-		printJSON(resp)
+		os.Exit(runScheduleUpdate(context.Background(), mustClient(), os.Stdout, os.Stderr, scheduleUpdateArgs{
+			id:    id,
+			name:  schedUpdName,
+			state: schedUpdState,
+		}))
 	}
 
 	// schedules times — print a schedule's posting slots per weekday

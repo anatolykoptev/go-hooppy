@@ -385,14 +385,48 @@ func (c *Client) UpdateScheduleFromEdit(ctx context.Context, id int, overrides m
 	if err := json.Unmarshal(rawBody, &fullState); err != nil {
 		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: decode /edit response: %w", err)
 	}
-	// 3. Apply overrides — replace the RawMessage for each overridden key.
+	// 3. Refuse a near-empty /edit response before it can become the base of
+	//    a full-state write. A 200 with `{}` or a truncated object unmarshals
+	//    successfully (json.Unmarshal of `{}` into a map is a no-op success),
+	//    so the existing malformed-response guards (non-2xx, empty body, HTML
+	//    — each fails to unmarshal) all pass through `{}`. Applying overrides
+	//    to an empty map and PUTting the result would write a near-empty
+	//    object over a live schedule and silently destroy every field the
+	//    overrides do not touch — page targets, times, captions, buttons,
+	//    start/stop dates. Irreversible, and reported as success.
+	//
+	//    A zero-key or near-empty 200 is not exotic: a server-side bug, a
+	//    transient 200 with an empty object, a proxy that strips the body, an
+	//    auth edge that returns `{}` instead of 401. A `len == 0` test just
+	//    moves the cliff — a one- or two-key response is nearly as
+	//    destructive. Require the state to be RECOGNISABLY a schedule before
+	//    it can be used as the base of a full-state write: the structural keys
+	//    a /edit response always carries — id (identity), name (the human
+	//    handle, a required field), and publication_how_type (the mode
+	//    invariant: 1=manual, 2=by-project — the structural choice that
+	//    defines what the schedule IS and which other fields are required).
+	//    A response missing any of these is not a schedule's editable state,
+	//    whatever else it carries — refuse, name what was missing and how
+	//    many keys did arrive, never issue the PUT. The failure is an error
+	//    return, not a partial write.
+	requiredStructuralKeys := []string{"id", "name", "publication_how_type"}
+	var missing []string
+	for _, k := range requiredStructuralKeys {
+		if _, ok := fullState[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: /edit response is not a recognisable schedule (got %d key(s), missing structural key(s) %v) — refusing to use a truncated/empty state as the base of a full-state write that would destroy every field not in the overrides", len(fullState), missing)
+	}
+	// 4. Apply overrides — replace the RawMessage for each overridden key.
 	for key, val := range overrides {
 		if len(val) == 0 {
 			return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: override for %q is empty (nil json.RawMessage)", key)
 		}
 		fullState[key] = val
 	}
-	// 4. Marshal the complete map and PUT it.
+	// 5. Marshal the complete map and PUT it.
 	body, err := json.Marshal(fullState)
 	if err != nil {
 		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: encode body: %w", err)
