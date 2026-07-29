@@ -1133,7 +1133,9 @@ type SearchPostsFilter struct {
 	// PhotosAmount, VideoDuration, or Text to narrow.
 	OwnerID int
 	Page    int // 1-indexed; must be non-negative (0 = unset = first page); negatives are rejected before any request — a negative drops the param and the server silently returns page 1
-	// Sorting (empirically verified).
+	// Sorting — reaches the wire but NOT differentially measured (see the
+	// "assumed" group in TestPhantomFilterSweep). Classified `works` on
+	// wire-reach only; a differential run would promote it to measured.
 	SortBy        string // publication_date, likes, reposts, comments, views, involvement
 	SortDirection string // desc (default) or asc
 	// Metric thresholds — NOT server-side filters (#63); a non-zero value

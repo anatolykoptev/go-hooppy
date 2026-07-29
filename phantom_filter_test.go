@@ -11,7 +11,8 @@ import (
 )
 
 // TestPhantomFilterSweep is the single gate that prevents a fourth issue
-// in the phantom-filter series (#63, #67, #73). It enumerates EVERY field
+// in the phantom-filter series (#63, #67, #73) shipping unclassified. It
+// enumerates EVERY field
 // of all four list-filter structs — SearchPostsFilter, ListPostsFilter,
 // ListAccountsFilter, and ListPagesFilter — via reflection and checks each
 // against a table that marks it `works` or `phantom`:
@@ -43,46 +44,75 @@ import (
 //
 // # Per-endpoint measurement evidence
 //
-// /posts-search (SearchPostsFilter) — measured by row content:
+// Two groups, explicitly labelled. A field is in the FIRST group only if
+// a differential run was recorded (with/without/different valid value,
+// judged by RETURNED ROW CONTENT, not total_rows — see method note 1).
+// Anything without recorded differential evidence goes in the SECOND
+// group by definition: it reaches the wire (the sweep asserts that) but
+// was NOT measured differentially, so a `works` classification there is
+// an assumption, not a measurement. Downgrade the claim; do not upgrade
+// the prose. The live API is not called from this repo, so anything
+// without recorded evidence stays in the second group until a
+// differential run is recorded and pasted here.
+//
+// ## measured (differential run, row content compared)
+//
+// /posts-search (SearchPostsFilter):
 //   - source_id=7 (Instagram) returns rows whose own source_id is 1 → phantom.
 //   - source_resource_id=2228 (Instagram-only) returns rows with
 //     source_id: [1] → phantom.
 //   - owner_id=<real> returns four different owners → phantom.
 //   - source_type=2 (RSS) returns 0 rows vs source_type=1 returns rows → works.
-//   - text, sort_by, sort_direction, photos_amount, video_duration,
-//     content_types, content_types_exclude, page: all reach the wire → works.
+//   - DateFrom/DateTo: no filter oldest=18.06.2024;
+//     date_from=20.07.2026 oldest=19.07.2026 10:00;
+//     date_to=10.07.2026 newest=10.07.2026 09:50 → works. The window is
+//     offset (asking from the 20th yields rows from the 19th at 10:00) —
+//     that is the separate defect tracked in #62 (an off-by-one in the
+//     date window), NOT a phantom.
+//   - photos_amount: 1→9294, 5→566, 6→742, 10→2172, 99→2172 (saturates,
+//     "N or more", not "exactly N") → works. See posts_search.go:157-164.
+//   - video_duration: 0→4194, 1→710, 2→159, 3→3525, 4→4036, 5→4128,
+//     6→4161, 7→644, 8→677; 9,10 server error → works. See
+//     posts_search.go:140-155.
 //
-// /posts (ListPostsFilter) — measured by row content:
+// /posts (ListPostsFilter):
 //   - account_id=<impossible> returns the full collection → phantom.
 //   - page_id=<impossible> returns the full collection → phantom.
-//   - source_id, schedule_id, project_id, page, is_published,
-//     publication_date: all reach the wire → works.
 //
-// /accounts (ListAccountsFilter) — measured by row content:
+// /accounts (ListAccountsFilter):
 //   - source_id=1 → rows all carry source_id 1; source_id=7 → rows all
 //     carry source_id 7 → works.
-//   - page → works (pagination).
 //
-// /accounts/pages (ListPagesFilter) — measured by row content:
+// /accounts/pages (ListPagesFilter):
 //   - account_id=<a> → rows all carry that account_id → works.
 //   - source_id=3 → rows all carry source_id 3 → works.
-//   - page → works (pagination).
+//
+// ## assumed — reaches the wire only, NOT differentially measured
+//
+// These fields reach the query string (the sweep asserts the wire value)
+// but no differential run was recorded, so classifying them `works` is an
+// assumption, not a measurement. They are NOT phantom (a phantom is
+// refused by the guard and never reaches the wire); they are
+// unmeasured-working. A differential run would promote any of these to
+// the measured group above.
+//
+// /posts-search (SearchPostsFilter):
+//   - Text, SortBy, SortDirection, ContentTypes, ContentTypesExclude, Page
+//
+// /posts (ListPostsFilter):
+//   - IsPublished, PublicationDate, SourceID, ScheduleID, ProjectID, Page
+//
+// /accounts (ListAccountsFilter):
+//   - Page
+//
+// /accounts/pages (ListPagesFilter):
+//   - Page
 //
 // Note the cross-endpoint pair worth stating: account_id is a WORKING
-// filter on /accounts/pages and a PHANTOM on /posts — two endpoints, one
-// name, opposite behaviour. This is the second such pair in the repo after
-// source_id (works on /posts, phantom on /posts-search). The fix is
-// per-endpoint, never per-name.
-//
-// DateFrom/DateTo on /posts-search were classified `works` on no evidence;
-// the classification is now confirmed by differential measurement:
-//   - no filter:        oldest of 20 rows → 18.06.2024
-//   - date_from=20.07.2026: oldest → 19.07.2026 10:00
-//   - date_to=10.07.2026:   newest → 10.07.2026 09:50
-//
-// Both genuinely filter. The window is offset — asking from the 20th
-// yields rows from the 19th at 10:00 — which is the separate defect
-// tracked in #62 (an off-by-one in the date window), NOT a phantom.
+// filter on /accounts/pages (measured) and a PHANTOM on /posts (measured)
+// — two endpoints, one name, opposite behaviour. This is the second such
+// pair in the repo after source_id (works on /posts [assumed], phantom on
+// /posts-search [measured]). The fix is per-endpoint, never per-name.
 //
 // # Method notes — read before re-probing (both cost a wrong answer)
 //
@@ -252,7 +282,7 @@ func assertFilterSweep(t *testing.T, specs map[string]fieldSpec, typ reflect.Typ
 	for i := 0; i < typ.NumField(); i++ {
 		name := typ.Field(i).Name
 		if _, ok := specs[name]; !ok {
-			t.Errorf("field %q on %s is not listed in the phantom sweep table — every field must be classified as works or phantom (this test prevents a fourth issue in the phantom-filter series, #67/#73)", name, typ.Name())
+			t.Errorf("field %q on %s is not listed in the phantom sweep table — every field must be classified as works or phantom (this test prevents a fourth issue in the phantom-filter series shipping unclassified, #67/#73)", name, typ.Name())
 		}
 	}
 	// Reverse: no stale table entries for non-existent fields.

@@ -234,20 +234,28 @@ paths:
           example: 1
         - name: account_id
           in: query
-          description: Фильтр по аккаунту соц сети
+          description: |
+            Deprecated: measured no-op on /posts (#67, #73) — the API accepts
+            account_id and silently drops it, returning the full collection that
+            looks filtered. The go-hooppy client refuses a non-zero value before
+            any request. Use schedule_id, source_id, or project_id to narrow.
           required: false
+          deprecated: true
           schema:
             type: integer
           example: 33125
-          # measured no-op, see #67/#73 — the API accepts account_id on /posts and silently drops it
         - name: page_id
           in: query
-          description: Фильтр по группе в соц сети
+          description: |
+            Deprecated: measured no-op on /posts (#67, #73) — the API accepts
+            page_id and silently drops it, returning the full collection that
+            looks filtered. The go-hooppy client refuses a non-zero value before
+            any request. Use schedule_id, source_id, or project_id to narrow.
           required: false
+          deprecated: true
           schema:
             type: integer
           example: 44567
-          # measured no-op, see #67/#73 — the API accepts page_id on /posts and silently drops it
         - name: schedule_id
           in: query
           description: Фильтр по расписанию

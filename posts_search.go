@@ -108,8 +108,9 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	if f.Page > 0 {
 		params.Set("page", strconv.Itoa(f.Page))
 	}
-	// Sorting (empirically verified — not in filters_plug, which describes
-	// filters only, not sorting or pagination).
+	// Sorting — reaches the wire but is NOT differentially measured (see
+	// the "assumed" group in TestPhantomFilterSweep). Not in filters_plug,
+	// which describes filters only, not sorting or pagination.
 	if f.SortBy != "" {
 		params.Set("sort_by", f.SortBy)
 	}
