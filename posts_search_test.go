@@ -249,6 +249,38 @@ func TestListSearchPosts_PhotosAmountNegative(t *testing.T) {
 	}
 }
 
+// TestListSearchPosts_PhotosAmountPassThrough covers issue #65 item 3: the
+// no-hardcoded-enum policy is guarded for VideoDuration (re-adding
+// `|| f.VideoDuration > 4` goes RED), but PhotosAmount had no equivalent
+// pass-through test — adding `|| f.PhotosAmount > 5` stayed GREEN across
+// the full suite. Nothing stopped the same enum mistake being remade on
+// the field whose own measurement table is the proof a ceiling would be
+// wrong. This test asserts keys 6, 10 and 99 reach the wire verbatim;
+// reverting to a `> 5` (or any upper-bound) guard makes it RED. Key 10
+// and 99 return identical counts (saturation — "N or more", not "exactly
+// N"), so both are included to pin the saturation semantics too.
+func TestListSearchPosts_PhotosAmountPassThrough(t *testing.T) {
+	for _, key := range []int{6, 10, 99} {
+		t.Run(fmt.Sprintf("key=%d", key), func(t *testing.T) {
+			var gotPA string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPA = r.URL.Query().Get("photos_amount")
+				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+
+			_, err := c.ListSearchPosts(context.Background(), SearchPostsFilter{PhotosAmount: key})
+			if err != nil {
+				t.Fatalf("ListSearchPosts with PhotosAmount=%d: expected pass-through, got error: %v — the valid key space is not enumerable client-side; a hardcoded upper bound must not be re-introduced (issue #65 item 3)", key, err)
+			}
+			if gotPA != strconv.Itoa(key) {
+				t.Fatalf("ListSearchPosts with PhotosAmount=%d: photos_amount on wire = %q, want %q — pass-through must send the value verbatim", key, gotPA, strconv.Itoa(key))
+			}
+		})
+	}
+}
+
 // TestListSearchPosts_IDPageNegative covers issue #65 item 1: the five
 // ID/page filters (SourceType, SourceID, SourceResourceID, OwnerID,
 // Page) were gated on `> 0` — the same silent-negative hole this PR closed

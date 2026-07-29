@@ -691,11 +691,11 @@ type SearchPostsFilter struct {
 	Text             string
 	DateFrom         string // dd.mm.yyyy
 	DateTo           string // dd.mm.yyyy
-	SourceType       int    // 1=social, 2=RSS
-	SourceID         int    // social network ID (1=VK, 7=Instagram, etc.)
-	SourceResourceID int    // source resource ID (from ListSourceResources)
-	OwnerID          int    // page ID within source
-	Page             int
+	SourceType       int    // 1=social, 2=RSS; must be non-negative (0 = unset); negatives are rejected before any request (see ListSearchPosts)
+	SourceID         int    // social network ID (1=VK, 7=Instagram, etc.); must be non-negative (0 = unset); negatives are rejected before any request
+	SourceResourceID int    // source resource ID (from ListSourceResources); must be non-negative (0 = unset); negatives are rejected before any request
+	OwnerID          int    // page ID within source; must be non-negative (0 = unset); negatives are rejected before any request
+	Page             int    // 1-indexed; must be non-negative (0 = unset = first page); negatives are rejected before any request — a negative drops the param and the server silently returns page 1
 	// Sorting (empirically verified).
 	SortBy        string // publication_date, likes, reposts, comments, views, involvement
 	SortDirection string // desc (default) or asc
@@ -706,8 +706,8 @@ type SearchPostsFilter struct {
 	MinReposts     int
 	MinInvolvement float64
 	// Content filters (empirically verified).
-	PhotosAmount        int    // photo count bucket; measured to filter the result set (filters_plug values:[] — keys not discoverable from the descriptor)
-	VideoDuration       int    // video duration bucket; measured (video content only) that keys 1-4 are accepted and each changes the result set — counts overlap so these are overlapping/cumulative ranges, not disjoint buckets; the vendor does not document the range semantics and filters_plug values:[] is empty, so the meaning of each key is unknown
+	PhotosAmount        int    // photo-count bucket key (video content only is VideoDuration); must be non-negative (0 = unset); negatives are rejected before any request. Pass-through: any positive key is sent verbatim — the valid key space is NOT enumerable client-side (filters_plug values:[] is empty). Saturates: keys 10 and 99 return identical counts, so the semantics are "N or more photos", not "exactly N". See the measured table in ListSearchPosts.
+	VideoDuration       int    // video-duration bucket key (video content only); must be non-negative (0 = unset); negatives are rejected before any request. Pass-through: any positive key is sent verbatim — the valid key space is NOT enumerable client-side (filters_plug values:[] is empty). A prior guard hardcoded a 1..4 enum from a narrow measurement; a wider measurement found keys 5-8 are real and each returns a distinct result set, so the enum was removed. Do NOT re-introduce a hardcoded upper bound. See the measured table in ListSearchPosts.
 	ContentTypes        string // comma-separated: photos, videos, audios, documents, links (AND filter)
 	ContentTypesExclude string // comma-separated — exclude posts with these types
 }
