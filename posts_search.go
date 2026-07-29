@@ -364,6 +364,15 @@ func TelegramButtonsAttachment(buttons []TelegramButton) Attachment {
 //   - SearchPostID non-zero → strconv.Itoa (single, the legacy path).
 //   - both empty → error before any request (nothing to copy).
 //
+// Validation: every element of SearchPostIDs must be positive (id > 0); a
+// zero or negative id is rejected with the offending index
+// (SearchPostIDs[i] = v — ids must be positive), matching the scalar path
+// which rejects SearchPostID == 0. Duplicates are KEPT — the same source post
+// in two schedule slots may be intentional, and the order contract means the
+// caller is authoritative over the ids list. The function reads the slice
+// only; it does NOT mutate payload.SearchPostIDs (no sort, no dedupe, no
+// reorder) — the slice header shares backing storage with the caller's array.
+//
 // CopySearchPost does NOT use this helper — it posts the payload directly and
 // serializes SearchPostID as the singular search_post_id int (different wire
 // shape, different endpoint).
@@ -374,6 +383,9 @@ func copySearchPostIDs(payload CopySearchPostPayload) (string, error) {
 	if len(payload.SearchPostIDs) > 0 {
 		parts := make([]string, len(payload.SearchPostIDs))
 		for i, id := range payload.SearchPostIDs {
+			if id <= 0 {
+				return "", fmt.Errorf("hooppy: SearchPostIDs[%d] = %d — ids must be positive", i, id)
+			}
 			parts[i] = strconv.Itoa(id)
 		}
 		return strings.Join(parts, ","), nil

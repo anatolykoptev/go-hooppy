@@ -118,6 +118,34 @@ func parseIntListStr(s string) []int {
 	return ids
 }
 
+// parseOrderedIDListStr parses a comma-separated id list STRICTLY: any
+// unparseable or empty element returns an error naming the offending token.
+// Use this for ORDER-SIGNIFICANT id lists (search_post_ids on rewrite/import)
+// where the lenient parseIntListStr would silently drop a bad entry and shift
+// every later post's schedule slot by one — one post not copied plus a silent
+// slot reassignment is worse than the fully-invalid case (which errors via
+// the both-empty guard). Do NOT reuse the lenient helper on an ordered id
+// list.
+func parseOrderedIDListStr(s string) ([]int, error) {
+	if s == "" {
+		return nil, nil
+	}
+	parts := strings.Split(s, ",")
+	ids := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil, fmt.Errorf("search_post_ids: empty element in %q — expected a comma-separated list of positive IDs", s)
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("search_post_ids: invalid ID %q: %v", p, err)
+		}
+		ids = append(ids, n)
+	}
+	return ids, nil
+}
+
 // --- list_accounts ---
 
 type listAccountsInput struct {
@@ -1261,6 +1289,20 @@ func registerRewriteSearchPost(server *mcp.Server) {
 			if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
 				return errResult("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
 			}
+			// search_post_ids is ORDER-SIGNIFICANT (the server assigns schedule
+			// slots in the given order), so parse it STRICTLY: a lenient parse
+			// that skips a bad entry ("2001,abc,2003" → [2001,2003]) silently
+			// drops one post and shifts every later slot by one. The fully-
+			// invalid case errors via the both-empty guard above; the partial
+			// drop is the worse half and must error too, naming the bad token.
+			var batchIDs []int
+			if in.SearchPostIDs != "" {
+				ids, err := parseOrderedIDListStr(in.SearchPostIDs)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				batchIDs = ids
+			}
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
@@ -1271,7 +1313,7 @@ func registerRewriteSearchPost(server *mcp.Server) {
 				Texts:               []hooppy.PostText{{Text: in.Text, SourceID: 0}},
 			}
 			if in.SearchPostIDs != "" {
-				payload.SearchPostIDs = parseIntListStr(in.SearchPostIDs)
+				payload.SearchPostIDs = batchIDs
 			} else {
 				payload.SearchPostID = in.SearchPostID
 			}

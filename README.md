@@ -185,10 +185,12 @@ hooppy search posts --source-resource-id <id> --text "search query" --date-from 
 hooppy search status                           # check if parsing is in progress
 hooppy search parse --source-resource-id <id> --account-id <id>  # start scraping
 hooppy search stop                             # stop in-progress scraping
-hooppy search copy --post-id <id> --to <page-id>  # copy scraped post to your page
+hooppy search copy --post-id <id> --to <page-id>  # copy a scraped post to your page (single-post only; PUT /posts/copy takes one search_post_id)
 hooppy search rewrite --post-id <id> --text "..." --to <page-id>  # rewrite with custom text (attachments preserved)
 hooppy search rewrite --post-id <id> --text "..." --to <page-id> --no-attachments  # rewrite, strip attachments
-hooppy search import --post-id <id> --schedules <sched-id>  # batch-copy via PUT /posts/import (server downloads photos async, preserves videos)
+hooppy search rewrite --post-ids "id1,id2,id3" --text "..." --to <page-id>  # batch rewrite (server assigns schedule slots in the given order; attachments skipped in batch)
+hooppy search import --post-id <id> --schedules <sched-id>  # copy a scraped post via PUT /posts/import (server downloads photos async, preserves videos)
+hooppy search import --post-ids "id1,id2,id3" --schedules <sched-id>  # batch import (keeps each post's original text; server downloads photos async from the ids)
 
 # Diagnose broken connections (read-only). GET /accounts reports status: 1
 # even when an account's OAuth token is dead — the notification log is the

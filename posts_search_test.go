@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -1040,10 +1042,18 @@ func TestRewriteSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
 }
 
 // TestRewriteSearchPost_BatchIDsOrder verifies the batch form: a slice of
-// three SearchPostIDs reaches the wire as a comma-joined ids string in the
+// SearchPostIDs reaches the wire as a comma-joined ids string in the
 // CALLER's order. The server assigns schedule slots in the order it receives
 // ids, so order preservation is load-bearing. Decodes the body (does not
 // substring-match) and asserts the exact ids string.
+//
+// The fixture is deliberately NON-MONOTONIC with a REPEAT ({2003, 2001, 2002,
+// 2001}): an ascending-distinct fixture makes a sort and a dedupe both no-ops,
+// so the test stays green even if copySearchPostIDs silently sorts or dedupes
+// the slice — proven by mutation (injecting sort.Ints + a dedupe pass left the
+// suite green under the old {2001,2002,2003} fixture). This fixture
+// discriminates against both at once: a sort yields "2001,2001,2002,2003", a
+// dedupe yields "2003,2001,2002", and either mutation now goes RED here.
 func TestRewriteSearchPost_BatchIDsOrder(t *testing.T) {
 	var capturedBody map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1058,7 +1068,7 @@ func TestRewriteSearchPost_BatchIDsOrder(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001, 2002, 2003},
+		SearchPostIDs:       []int{2003, 2001, 2002, 2001},
 		PublicationWhenType: 1,
 		PublicationHowType:  1,
 		SelectedPagesIDs:    []int{123456},
@@ -1071,8 +1081,9 @@ func TestRewriteSearchPost_BatchIDsOrder(t *testing.T) {
 		t.Errorf("ID = %d, want 6003", resp.ID)
 	}
 	// Decoded assertion, not substring: the exact joined string in caller order.
-	if got, want := capturedBody["ids"], "2001,2002,2003"; got != want {
-		t.Errorf("ids = %v, want %q (caller order preserved)", got, want)
+	// Non-monotonic + repeat: a sort or dedupe mutation changes this string.
+	if got, want := capturedBody["ids"], "2003,2001,2002,2001"; got != want {
+		t.Errorf("ids = %v, want %q (caller order + duplicates preserved)", got, want)
 	}
 	if capturedBody["as_copy"].(float64) != 1 {
 		t.Errorf("as_copy = %v, want 1", capturedBody["as_copy"])
@@ -1080,8 +1091,10 @@ func TestRewriteSearchPost_BatchIDsOrder(t *testing.T) {
 }
 
 // TestImportSearchPost_BatchIDsOrder mirrors the rewrite batch test for the
-// import endpoint: a three-id slice reaches PUT /posts/import as a
-// comma-joined ids string in caller order.
+// import endpoint: a slice of SearchPostIDs reaches PUT /posts/import as a
+// comma-joined ids string in caller order. The fixture is non-monotonic with
+// a repeat ({3003, 3001, 3002, 3001}) so a silent sort or dedupe in
+// copySearchPostIDs goes RED here (same rationale as the rewrite test).
 func TestImportSearchPost_BatchIDsOrder(t *testing.T) {
 	var capturedBody map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1096,7 +1109,7 @@ func TestImportSearchPost_BatchIDsOrder(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{3001, 3002, 3003},
+		SearchPostIDs:       []int{3003, 3001, 3002, 3001},
 		PublicationWhenType: 1,
 		PublicationHowType:  1,
 		SelectedPagesIDs:    []int{123456},
@@ -1108,8 +1121,8 @@ func TestImportSearchPost_BatchIDsOrder(t *testing.T) {
 	if resp.ID != 7002 {
 		t.Errorf("ID = %d, want 7002", resp.ID)
 	}
-	if got, want := capturedBody["ids"], "3001,3002,3003"; got != want {
-		t.Errorf("ids = %v, want %q (caller order preserved)", got, want)
+	if got, want := capturedBody["ids"], "3003,3001,3002,3001"; got != want {
+		t.Errorf("ids = %v, want %q (caller order + duplicates preserved)", got, want)
 	}
 }
 
@@ -1268,5 +1281,120 @@ func TestImportSearchPost_BatchScheduleGuard(t *testing.T) {
 	}
 	if requestMade {
 		t.Fatal("ImportSearchPost issued a request despite batch when_type=3 + empty schedules — must fail before any request")
+	}
+}
+
+// TestCopySearchPostIDs_NonPositiveRejects verifies the batch validation the
+// scalar path has but the batch path lacked: a zero or negative id in
+// SearchPostIDs is rejected with the offending INDEX, before any request.
+// The scalar path rejects SearchPostID == 0 (nothing to copy); without this
+// guard the batch path joined "0,-5,2001" onto the wire with err=nil.
+//
+// RED-on-revert: drop the `id <= 0` check from copySearchPostIDs and this
+// test fails at the requestMade + err assertions.
+func TestCopySearchPostIDs_NonPositiveRejects(t *testing.T) {
+	cases := []struct {
+		name string
+		ids  []int
+		// wantIndex is the offending slice index named in the error.
+		wantIndex int
+	}{
+		{"zero at head", []int{0, 2001, 2002}, 0},
+		{"negative mid-list", []int{2001, -5, 2002}, 1},
+		{"zero tail", []int{2001, 2002, 0}, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requestMade := false
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestMade = true
+				w.Write([]byte(`{"id":6007}`))
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+
+			_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+				SearchPostIDs:       tc.ids,
+				PublicationWhenType: 1,
+				PublicationHowType:  1,
+				SelectedPagesIDs:    []int{123456},
+				Texts:               []PostText{{Text: "x", SourceID: 0}},
+			})
+			if err == nil {
+				t.Fatal("expected error for non-positive SearchPostIDs element, got nil")
+			}
+			if requestMade {
+				t.Fatal("RewriteSearchPost issued a request despite a non-positive id — must fail before any request")
+			}
+			want := fmt.Sprintf("SearchPostIDs[%d]", tc.wantIndex)
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name the offending index %q", err.Error(), want)
+			}
+		})
+	}
+}
+
+// TestCopySearchPostIDs_DuplicatesKept verifies the duplicate policy: the
+// same source post in two schedule slots may be intentional, so duplicates
+// are preserved on the wire (NOT deduped). The order test fixtures above
+// ({2003,2001,2002,2001}) already cover this on the wire; this test pins the
+// policy at the helper level and documents the decision.
+//
+// RED-on-revert: if a dedupe pass is added to copySearchPostIDs, the captured
+// ids string loses the repeat and this test fails.
+func TestCopySearchPostIDs_DuplicatesKept(t *testing.T) {
+	var capturedBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Write([]byte(`{"id":6008}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{2001, 2001, 2002},
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err != nil {
+		t.Fatalf("duplicates must be accepted, got error: %v", err)
+	}
+	if got, want := capturedBody["ids"], "2001,2001,2002"; got != want {
+		t.Errorf("ids = %v, want %q (duplicates preserved, not deduped)", got, want)
+	}
+}
+
+// TestCopySearchPostIDs_NoSliceMutation verifies that copySearchPostIDs does
+// NOT mutate the caller's slice — the payload is passed by value but the
+// slice header shares backing storage with the caller's array, and a library
+// that reorders a caller's slice in place is a nasty surprise. The caller's
+// slice must be byte-identical after the call.
+//
+// RED-on-revert: if copySearchPostIDs sorts/dedupes payload.SearchPostIDs in
+// place, the caller's slice changes and this test fails.
+func TestCopySearchPostIDs_NoSliceMutation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":6009}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	original := []int{2003, 2001, 2002, 2001}
+	originalCopy := append([]int(nil), original...)
+	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       original,
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err != nil {
+		t.Fatalf("RewriteSearchPost: %v", err)
+	}
+	if !reflect.DeepEqual(original, originalCopy) {
+		t.Errorf("copySearchPostIDs mutated the caller's slice: got %v, want %v (slice must be read-only)", original, originalCopy)
 	}
 }
