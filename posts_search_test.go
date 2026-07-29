@@ -1038,3 +1038,235 @@ func TestRewriteSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
 		t.Fatal("RewriteSearchPost issued a request despite when_type=3 + empty schedules")
 	}
 }
+
+// TestRewriteSearchPost_BatchIDsOrder verifies the batch form: a slice of
+// three SearchPostIDs reaches the wire as a comma-joined ids string in the
+// CALLER's order. The server assigns schedule slots in the order it receives
+// ids, so order preservation is load-bearing. Decodes the body (does not
+// substring-match) and asserts the exact ids string.
+func TestRewriteSearchPost_BatchIDsOrder(t *testing.T) {
+	var capturedBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/posts" {
+			t.Errorf("POST /posts, got %s %s", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Write([]byte(`{"id":6003}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{2001, 2002, 2003},
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "Batch rewrite", SourceID: 0}},
+	})
+	if err != nil {
+		t.Fatalf("RewriteSearchPost batch: %v", err)
+	}
+	if resp.ID != 6003 {
+		t.Errorf("ID = %d, want 6003", resp.ID)
+	}
+	// Decoded assertion, not substring: the exact joined string in caller order.
+	if got, want := capturedBody["ids"], "2001,2002,2003"; got != want {
+		t.Errorf("ids = %v, want %q (caller order preserved)", got, want)
+	}
+	if capturedBody["as_copy"].(float64) != 1 {
+		t.Errorf("as_copy = %v, want 1", capturedBody["as_copy"])
+	}
+}
+
+// TestImportSearchPost_BatchIDsOrder mirrors the rewrite batch test for the
+// import endpoint: a three-id slice reaches PUT /posts/import as a
+// comma-joined ids string in caller order.
+func TestImportSearchPost_BatchIDsOrder(t *testing.T) {
+	var capturedBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/posts/import" {
+			t.Errorf("PUT /posts/import, got %s %s", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Write([]byte(`{"id":7002}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{3001, 3002, 3003},
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "Batch import", SourceID: 0}},
+	})
+	if err != nil {
+		t.Fatalf("ImportSearchPost batch: %v", err)
+	}
+	if resp.ID != 7002 {
+		t.Errorf("ID = %d, want 7002", resp.ID)
+	}
+	if got, want := capturedBody["ids"], "3001,3002,3003"; got != want {
+		t.Errorf("ids = %v, want %q (caller order preserved)", got, want)
+	}
+}
+
+// TestRewriteSearchPost_BothEmpty verifies the precedence guard: when both
+// SearchPostIDs (empty/nil) and SearchPostID (zero) are unset, the wrapper
+// errors before issuing any request — there is nothing to copy.
+func TestRewriteSearchPost_BothEmpty(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":6004}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected error for both SearchPostIDs and SearchPostID empty, got nil")
+	}
+	if requestMade {
+		t.Fatal("RewriteSearchPost issued a request despite both id fields empty — must fail before any request")
+	}
+}
+
+// TestImportSearchPost_BothEmpty mirrors the both-empty guard for import.
+func TestImportSearchPost_BothEmpty(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":7003}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected error for both SearchPostIDs and SearchPostID empty, got nil")
+	}
+	if requestMade {
+		t.Fatal("ImportSearchPost issued a request despite both id fields empty — must fail before any request")
+	}
+}
+
+// TestRewriteSearchPost_BothSet verifies the precedence guard: setting both
+// SearchPostIDs and SearchPostID is ambiguous and must error before any
+// request, rather than silently preferring one.
+func TestRewriteSearchPost_BothSet(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":6005}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        2001,
+		SearchPostIDs:       []int{2002, 2003},
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected error for both SearchPostIDs and SearchPostID set, got nil")
+	}
+	if requestMade {
+		t.Fatal("RewriteSearchPost issued a request despite both id fields set — must fail before any request")
+	}
+}
+
+// TestImportSearchPost_BothSet mirrors the both-set guard for import.
+func TestImportSearchPost_BothSet(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":7004}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        3001,
+		SearchPostIDs:       []int{3002, 3003},
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected error for both SearchPostIDs and SearchPostID set, got nil")
+	}
+	if requestMade {
+		t.Fatal("ImportSearchPost issued a request despite both id fields set — must fail before any request")
+	}
+}
+
+// TestRewriteSearchPost_BatchScheduleGuard verifies the fail-closed schedule
+// guard fires for the BATCH form too: when_type=3 + an empty schedule list
+// with a multi-id batch must error before any request. A batch of twenty
+// posts targeted at no schedule is twenty times the damage of one.
+func TestRewriteSearchPost_BatchScheduleGuard(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":6006}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{2001, 2002, 2003},
+		PublicationWhenType: 3,
+		PublicationHowType:  1,
+		SchedulesIDs:        nil, // empty — the trap
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected fail-closed error for batch when_type=3 with empty schedules, got nil")
+	}
+	if requestMade {
+		t.Fatal("RewriteSearchPost issued a request despite batch when_type=3 + empty schedules — must fail before any request")
+	}
+}
+
+// TestImportSearchPost_BatchScheduleGuard mirrors the batch schedule guard
+// for the import endpoint.
+func TestImportSearchPost_BatchScheduleGuard(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":7005}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{3001, 3002, 3003},
+		PublicationWhenType: 3,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{}, // explicit empty
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected fail-closed error for batch when_type=3 with empty schedules, got nil")
+	}
+	if requestMade {
+		t.Fatal("ImportSearchPost issued a request despite batch when_type=3 + empty schedules — must fail before any request")
+	}
+}

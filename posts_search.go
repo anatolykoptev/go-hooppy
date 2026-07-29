@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // ListSearchPosts returns posts scraped from external social media pages,
@@ -352,17 +353,55 @@ func TelegramButtonsAttachment(buttons []TelegramButton) Attachment {
 	return Attachment{Type: "telegram_buttons", Data: TelegramButtons{List: buttons}}
 }
 
-// RewriteSearchPost rewrites a scraped post (from GET /posts-search) and
-// publishes it to the user's own pages. Pass custom text in payload.Texts to
-// override the original. To keep the original photos, call GetSearchPostEdit
-// first, use SearchPostPhotos to extract them, and pass the result in
-// payload.Attachments.
+// copySearchPostIDs resolves the ids wire field shared by RewriteSearchPost
+// and ImportSearchPost. The server's ids field is a comma-separated string of
+// scraped post IDs; the server assigns schedule slots in the order it
+// receives them, so the caller's slice order is preserved on the wire.
 //
-// Uses POST /posts with as_copy=1 (same as the Hooppy UI). The search_post_id
-// is passed in the request so the server knows the source.
+// Precedence (enforced, not just documented — see CopySearchPostPayload doc):
+//   - SearchPostIDs non-empty AND SearchPostID non-zero → error (ambiguous).
+//   - SearchPostIDs non-empty → joined with ',' in caller order (batch).
+//   - SearchPostID non-zero → strconv.Itoa (single, the legacy path).
+//   - both empty → error before any request (nothing to copy).
 //
-// UNDOCUMENTED: POST /posts with as_copy=1 + search_post_id is not in the public OpenAPI spec.
+// CopySearchPost does NOT use this helper — it posts the payload directly and
+// serializes SearchPostID as the singular search_post_id int (different wire
+// shape, different endpoint).
+func copySearchPostIDs(payload CopySearchPostPayload) (string, error) {
+	if len(payload.SearchPostIDs) > 0 && payload.SearchPostID != 0 {
+		return "", fmt.Errorf("hooppy: SearchPostIDs and SearchPostID are mutually exclusive — pass only one (the slice for a batch, the scalar for a single post)")
+	}
+	if len(payload.SearchPostIDs) > 0 {
+		parts := make([]string, len(payload.SearchPostIDs))
+		for i, id := range payload.SearchPostIDs {
+			parts[i] = strconv.Itoa(id)
+		}
+		return strings.Join(parts, ","), nil
+	}
+	if payload.SearchPostID != 0 {
+		return strconv.Itoa(payload.SearchPostID), nil
+	}
+	return "", fmt.Errorf("hooppy: SearchPostIDs/SearchPostID is required — pass the slice for a batch copy or the scalar for a single post")
+}
+
+// RewriteSearchPost rewrites one or more scraped posts (from GET /posts-search)
+// and publishes them to the user's own pages. Pass custom text in
+// payload.Texts to override the original(s). To keep the original photos for
+// a single-post rewrite, call GetSearchPostEdit first, use SearchPostPhotos to
+// extract them, and pass the result in payload.Attachments.
+//
+// Uses POST /posts with as_copy=1 (same as the Hooppy UI). The scraped post
+// ID(s) are passed in the ids field: a single id via payload.SearchPostID, or
+// a batch via payload.SearchPostIDs (comma-joined in caller order — the server
+// assigns schedule slots in that order). See CopySearchPostPayload for the
+// precedence and mutual-exclusion rules.
+//
+// UNDOCUMENTED: POST /posts with as_copy=1 + ids is not in the public OpenAPI spec.
 func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
+	ids, err := copySearchPostIDs(payload)
+	if err != nil {
+		return nil, err
+	}
 	if payload.Texts == nil {
 		payload.Texts = []PostText{}
 	}
@@ -377,7 +416,8 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	}
 	// Fail closed: a schedule-driven rewrite (when_type=3) targeted at an
 	// empty schedules list publishes to nothing. Refuse before issuing any
-	// request.
+	// request. Fires for the batch form too — a batch of N posts targeted
+	// at no schedule is N times the damage of one.
 	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
 		return nil, fmt.Errorf("hooppy: RewriteSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
 	}
@@ -403,7 +443,7 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 		PublicationDate:      payload.PublicationDate,
 		Texts:                payload.Texts,
 		Attachments:          payload.Attachments,
-		IDs:                  strconv.Itoa(payload.SearchPostID),
+		IDs:                  ids,
 	}
 	var resp PostIDResponse
 	if err := c.doPOST(ctx, pathPosts, body, &resp); err != nil {
@@ -463,13 +503,13 @@ func SearchPostEditAttachments(editAttachments []Attachment) []Attachment {
 	return result
 }
 
-// ImportSearchPost copies a scraped post via PUT /posts/import. Unlike
-// RewriteSearchPost (POST /posts with as_copy=1), the import endpoint
+// ImportSearchPost copies one or more scraped posts via PUT /posts/import.
+// Unlike RewriteSearchPost (POST /posts with as_copy=1), the import endpoint
 // accepts comma-separated search post IDs in its ids field and can copy
-// multiple posts in one request. This wrapper sends a SINGLE id:
-// payload.SearchPostID is serialized (via strconv.Itoa) as the sole entry
-// in ids. A batch (multi-id) form is scoped to issue #54 and is not
-// implemented here.
+// multiple posts in one request. Pass a single id via payload.SearchPostID or
+// a batch via payload.SearchPostIDs (comma-joined in caller order — the server
+// assigns schedule slots in that order). See CopySearchPostPayload for the
+// precedence and mutual-exclusion rules.
 //
 // The server downloads photos async (is_attachments_in_process=1 → 0) when
 // attachments contain photo objects with a `url` field. Videos are stored as
@@ -478,6 +518,10 @@ func SearchPostEditAttachments(editAttachments []Attachment) []Attachment {
 //
 // UNDOCUMENTED: PUT /posts/import is not in the public OpenAPI spec.
 func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
+	ids, err := copySearchPostIDs(payload)
+	if err != nil {
+		return nil, err
+	}
 	if payload.Texts == nil {
 		payload.Texts = []PostText{}
 	}
@@ -493,7 +537,9 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 	// Fail closed: a schedule-driven import (when_type=3) targeted at an
 	// empty schedules list publishes to nothing. Refuse before issuing any
 	// request — the CLI `search import` command defaults to when_type=3
-	// with an empty --schedules, which is exactly this trap.
+	// with an empty --schedules, which is exactly this trap. Fires for the
+	// batch form too — a batch of N posts targeted at no schedule is N times
+	// the damage of one.
 	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
 		return nil, fmt.Errorf("hooppy: ImportSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
 	}
@@ -518,7 +564,7 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 		PublicationDate:      payload.PublicationDate,
 		Texts:                payload.Texts,
 		Attachments:          payload.Attachments,
-		IDs:                  strconv.Itoa(payload.SearchPostID),
+		IDs:                  ids,
 	}
 	var resp PostIDResponse
 	if err := c.doPUT(ctx, pathPostsImport, body, &resp); err != nil {

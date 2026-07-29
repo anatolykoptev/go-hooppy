@@ -1230,8 +1230,9 @@ func registerCopySearchPost(server *mcp.Server) {
 // --- rewrite_search_post ---
 
 type rewriteSearchPostInput struct {
-	SearchPostID        int    `json:"search_post_id" jsonschema:"ID of the scraped post (from list_search_posts). REQUIRED."`
-	Text                string `json:"text" jsonschema:"New text for the post. REQUIRED."`
+	SearchPostID        int    `json:"search_post_id,omitempty" jsonschema:"ID of a single scraped post (from list_search_posts). Mutually exclusive with search_post_ids; pass exactly one."`
+	SearchPostIDs       string `json:"search_post_ids,omitempty" jsonschema:"Comma-separated IDs of scraped posts (from list_search_posts) for a batch rewrite. Mutually exclusive with search_post_id; pass exactly one. The server assigns schedule slots in the given order."`
+	Text                string `json:"text" jsonschema:"New text for the post(s). REQUIRED."`
 	PublicationWhenType int    `json:"publication_when_type" jsonschema:"1=publish now, 2=at specific time, 3=by schedule."`
 	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default)."`
 	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
@@ -1245,11 +1246,14 @@ func registerRewriteSearchPost(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_rewrite_search_post",
-			Description: "Rewrite a scraped post (from list_search_posts) with custom text and publish to your pages. To keep original photos, use copy_search_post with scraped photo IDs instead, or upload photos via upload_media first. UNDOCUMENTED endpoint.",
+			Description: "Rewrite one or more scraped posts (from list_search_posts) with custom text and publish to your pages. Pass a single id via search_post_id, or a batch via search_post_ids (comma-separated; the server assigns schedule slots in the given order). To keep original photos for a single-post rewrite, use copy_search_post or upload photos via upload_media first. UNDOCUMENTED endpoint.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in rewriteSearchPostInput) (*mcp.CallToolResult, error) {
-			if in.SearchPostID == 0 {
-				return errResult("search_post_id is required (use list_search_posts to find IDs)")
+			if in.SearchPostID != 0 && in.SearchPostIDs != "" {
+				return errResult("search_post_id and search_post_ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
+			}
+			if in.SearchPostID == 0 && in.SearchPostIDs == "" {
+				return errResult("search_post_id or search_post_ids is required (use list_search_posts to find IDs)")
 			}
 			if in.Text == "" {
 				return errResult("text is required")
@@ -1262,10 +1266,14 @@ func registerRewriteSearchPost(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			payload := hooppy.CopySearchPostPayload{
-				SearchPostID:        in.SearchPostID,
 				PublicationWhenType: in.PublicationWhenType,
 				PublicationHowType:  in.PublicationHowType,
 				Texts:               []hooppy.PostText{{Text: in.Text, SourceID: 0}},
+			}
+			if in.SearchPostIDs != "" {
+				payload.SearchPostIDs = parseIntListStr(in.SearchPostIDs)
+			} else {
+				payload.SearchPostID = in.SearchPostID
 			}
 			switch in.PublicationWhenType {
 			case 3:
