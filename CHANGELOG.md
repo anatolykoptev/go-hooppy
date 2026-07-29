@@ -40,6 +40,46 @@
 * **`parseMetricFloat`/`parseMetricInt` silent 1000×-wrong value on a decimal comma** (#65): the accessors stripped commas before `ParseFloat`/`Atoi`, so a decimal-comma string from the vendor's Russian locale (`"0,520"` = the ratio 0.520) silently became `520.0` with `err==nil`, and `"1,2,3"` became `123` on the int path — the exact silent-wrongness class these accessors exist to prevent. The shape is now validated BEFORE stripping: only a plain decimal or a comma-thousands-grouped number is accepted; a leading-zero head followed by a comma (`"0,520"`), non-thousands-grouped commas (`"1,2,3"`, `"3,14"`), and other-locale separators (`"1 234"`, `"1.234,56"`) return an error.
 * **Negative metric thresholds fell through the refusal guard** (#65): the guard used `> 0`, so a caller passing `-1` (directly, or from a computed threshold like `avg-stddev` going negative) took neither branch — no error, no parameter, an unfiltered result while the help stated the flag errors. The guard now fires on `!= 0` for the four ints and the float.
 * **BEHAVIOUR CHANGE — negative page/ID filters now error across all list endpoints** (#65): every list endpoint that took a page or ID filter gated on `> 0` had the same silent-negative hole — a negative took neither branch (no error, no parameter), so the server returned an unfiltered or first-page result that looked filtered. `ListAccounts`, `ListPages`, `ListPosts`, `ListSearchPosts`, `ListProjects`, `ListSchedules`, `ListWatermarks`, and `ListNotifications` now reject negative page/ID values with an error before any request is issued; zero stays the unset sentinel. This is BEHAVIOUR-CHANGING for consumers that previously passed a negative (e.g. `--page -1` via the CLI's signed `IntVar`, or a computed `page-1` that underflowed): they got a result set and now get an error. Under `release-please` this ships as a `fix:` patch bump; callers must pass 0 (or omit) to leave a filter unset.
+## [1.1.0](https://github.com/anatolykoptev/go-hooppy/compare/v1.0.0...v1.1.0) (2026-07-29)
+
+
+### Added
+
+* add attachment helpers for all UI-supported types ([232ddd9](https://github.com/anatolykoptev/go-hooppy/commit/232ddd9a2f294477ca3c876b086fbf0db86db80c))
+* add metric sorting and filtering to ListSearchPosts ([536d6b5](https://github.com/anatolykoptev/go-hooppy/commit/536d6b51dc71c412bd2dc37921aed279959b0587))
+* add RewriteSearchPost + ScrapedPhotoAttachment helper ([#44](https://github.com/anatolykoptev/go-hooppy/issues/44)) ([50ccfab](https://github.com/anatolykoptev/go-hooppy/commit/50ccfabef417a8b3773664eb40ab4b579200c453))
+* batch copy/rewrite/import of scraped posts via the ids wire field ([#71](https://github.com/anatolykoptev/go-hooppy/issues/71)) ([bd514dc](https://github.com/anatolykoptev/go-hooppy/commit/bd514dc4e742d57aaecff7a94bbeb42027d7229b))
+* **cli:** expose all undocumented endpoints as CLI subcommands ([#36](https://github.com/anatolykoptev/go-hooppy/issues/36)) ([ba2ef1d](https://github.com/anatolykoptev/go-hooppy/commit/ba2ef1d1f604586103987fde6e8fd9462eb28d0e))
+* detect VK markup and ad disclosures on import, opt-in --strip-vk-markup ([#83](https://github.com/anatolykoptev/go-hooppy/issues/83)) ([f64b994](https://github.com/anatolykoptev/go-hooppy/commit/f64b9942f99dbdad445ace58d56d8fb96dad8ea9))
+* full undocumented API surface — watermarks/proxies/user/notifications/cross-posting ([356ea49](https://github.com/anatolykoptev/go-hooppy/commit/356ea49538be88ad1f0df891b3f150f86a38ecb5))
+* hooppy doctor — surface publication failures the accounts API hides ([#64](https://github.com/anatolykoptev/go-hooppy/issues/64)) ([e26f556](https://github.com/anatolykoptev/go-hooppy/commit/e26f5566536e82ad48b26f9f44dadb7fa445d79e))
+* model all GET /posts fields so posts list answers the question ([#72](https://github.com/anatolykoptev/go-hooppy/issues/72)) ([0ceed0f](https://github.com/anatolykoptev/go-hooppy/commit/0ceed0f727477796568d14a8c87e48c80a57d665))
+* opt-in retry for 429/5xx (GET/DELETE) + HTTP client configurability ([547273f](https://github.com/anatolykoptev/go-hooppy/commit/547273f537fa8d8c91392f4184bfa928ea97255d))
+* opt-in retry for 429/5xx (GET/DELETE) + HTTP client configurability ([3c5fe26](https://github.com/anatolykoptev/go-hooppy/commit/3c5fe2697ccc000f0c82f75fca5badc4f0e447e3))
+* posts search / scraping — scrape posts from external social media pages ([#43](https://github.com/anatolykoptev/go-hooppy/issues/43)) ([24c127d](https://github.com/anatolykoptev/go-hooppy/commit/24c127dfefec37dca96d855c648727a28b22475b))
+* preserve attachments by default in rewrite, add --no-attachments ([8cbace7](https://github.com/anatolykoptev/go-hooppy/commit/8cbace73b2a42b332972abd8fbaa308a69effb11))
+* report the assigned publication slot, and read the schedule times the API hides ([#76](https://github.com/anatolykoptev/go-hooppy/issues/76)) ([2caf776](https://github.com/anatolykoptev/go-hooppy/commit/2caf776a37a6c1f21b6bd72a523e6b9451dcc62e))
+* schedule CRUD + project delete/update (undocumented endpoints) ([3551a04](https://github.com/anatolykoptev/go-hooppy/commit/3551a045971907463597b2ff74717b3d0f5bdd8f))
+* schedule CRUD + project delete/update (undocumented endpoints) ([028c22a](https://github.com/anatolykoptev/go-hooppy/commit/028c22addf5647044c35e418e0c360fab1e7a26c))
+
+
+### Fixed
+
+* enforce max batch delete limit (1000 IDs) + reject empty batch ([#31](https://github.com/anatolykoptev/go-hooppy/issues/31)) ([448a6fc](https://github.com/anatolykoptev/go-hooppy/commit/448a6fc162f0a3a98e495abdcc34b5a373d0cf44))
+* guard the schedule create invariant, make schedule writes full-state ([#88](https://github.com/anatolykoptev/go-hooppy/issues/88)) ([623c843](https://github.com/anatolykoptev/go-hooppy/commit/623c843ec6daaf523cfa3f72e7a33394858a2a99))
+* JWT expiry pre-validation + clear empty-token error message ([#29](https://github.com/anatolykoptev/go-hooppy/issues/29)) ([46cdbf4](https://github.com/anatolykoptev/go-hooppy/commit/46cdbf48c26f63ab1a27b10ae45aa387e3347bb3))
+* list pagination off-by-one, UpdatePostText page-target wipe, search import ([#47](https://github.com/anatolykoptev/go-hooppy/issues/47)) ([4fa9ccf](https://github.com/anatolykoptev/go-hooppy/commit/4fa9ccf129928fa90757fc3caf9d7b929324db92))
+* **mcp:** add schedule-safe hooppy_update_post_text, warn on hooppy_update_post ([#79](https://github.com/anatolykoptev/go-hooppy/issues/79)) ([9a9c071](https://github.com/anatolykoptev/go-hooppy/commit/9a9c07137c4f58c2613d37d96985c15fc64e2703))
+* PostPublishByProjectPayload requires schedules_ids + MCP attachments ([598462b](https://github.com/anatolykoptev/go-hooppy/commit/598462bef7d279254d38913c6c97737352d54fb9))
+* PostPublishByProjectPayload requires schedules_ids + MCP attachments ([c435e65](https://github.com/anatolykoptev/go-hooppy/commit/c435e657710d54331da7dcc91aaa14798e319296))
+* refuse phantom metric filters, add video_duration, parse metric strings ([#65](https://github.com/anatolykoptev/go-hooppy/issues/65)) ([efc1996](https://github.com/anatolykoptev/go-hooppy/commit/efc19969a50337dbb13f90fe579f3662024bbf28))
+* remove omitempty from attachments field in post payloads ([64cd32a](https://github.com/anatolykoptev/go-hooppy/commit/64cd32a176b6920b40903e91071e0a5322544b6e))
+* remove omitempty from attachments field in post payloads ([4af42ad](https://github.com/anatolykoptev/go-hooppy/commit/4af42adf8525c06d7955b7e97909979c7b35cf5a))
+* resolve all 5 repo-review-council bugs ([#37](https://github.com/anatolykoptev/go-hooppy/issues/37)-[#41](https://github.com/anatolykoptev/go-hooppy/issues/41)) ([#42](https://github.com/anatolykoptev/go-hooppy/issues/42)) ([b9a8b2e](https://github.com/anatolykoptev/go-hooppy/commit/b9a8b2e3f8d0cf43f18afbd5be2006e16f1c5cfa))
+* rewrite uses POST /posts with as_copy=1 + GetSearchPostEdit for photos ([aede865](https://github.com/anatolykoptev/go-hooppy/commit/aede86513c13e96019aa6c536fda0fb5d5d200c8))
+* streaming uploads, transport timeouts, response limits, dead code cleanup ([#27](https://github.com/anatolykoptev/go-hooppy/issues/27)) ([a08c074](https://github.com/anatolykoptev/go-hooppy/commit/a08c074c3ecd6b455916cef4ce1227a37d51eaf2))
+* sweep all phantom filter parameters across endpoints ([#75](https://github.com/anatolykoptev/go-hooppy/issues/75)) ([ee84cd5](https://github.com/anatolykoptev/go-hooppy/commit/ee84cd5f8f28fdeeef9447c40346ec1912f332a0))
+
 ## 1.0.0 (2026-07-28)
 
 
