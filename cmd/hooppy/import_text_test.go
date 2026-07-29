@@ -117,6 +117,17 @@ func TestStripVKMarkup(t *testing.T) {
 			in:   "[url|[x|y]]",
 			want: "[url|[x|y]]",
 		},
+		// A "[" inside the display text is NOT only nested/broken markup — it can
+		// be a legitimate link whose display contains "[". stripVKMarkup leaves
+		// such a marker byte-untouched DELIBERATELY to stay idempotent and avoid
+		// the nested-bracket corruption class, at the cost of not converting this
+		// rare valid form. This case pins the trade-off in the suite: the marker
+		// reaches the wire byte-identical, not mangled and not converted.
+		{
+			name: "link whose display text contains [ is left byte-untouched (trade-off pinned)",
+			in:   "[https://vk.com/x|see [note]]",
+			want: "[https://vk.com/x|see [note]]",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -156,6 +167,7 @@ func TestStripVKMarkup_Idempotent(t *testing.T) {
 		{"F1 unterminated [[ with space", "[[page|Display] text]"},
 		{"F1 nested broken [[", "[[a|[c|d]]]"},
 		{"F5 single bracket with inner [", "[url|[x|y]]"},
+		{"display text contains [ (trade-off)", "[https://vk.com/x|see [note]]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1068,5 +1080,98 @@ func TestRunImport_BatchFlagOff_DetectionReadFailureNonFatal(t *testing.T) {
 	var parsed map[string]interface{}
 	if err := json.Unmarshal([]byte(out.String()), &parsed); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\nstdout=%s", err, out.String())
+	}
+}
+
+// importStubServerZeroID is like importStubServer but PUT /posts/import
+// returns {"id":0} — a create response that carries no identity. Used to pin
+// that a zero-id create is not silently lossy on stdout: the record must make
+// the missing identity visible (post_id field present, distinct status) rather
+// than omitting the field.
+func importStubServerZeroID(t *testing.T, editBodies map[int]string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/posts-search/"), "/edit")
+			id := 0
+			for _, ch := range idStr {
+				id = id*10 + int(ch-'0')
+			}
+			body, ok := editBodies[id]
+			if !ok {
+				t.Errorf("stub: no edit body for id %d (path %s)", id, r.URL.Path)
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(body))
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":0}`))
+		default:
+			t.Errorf("stub: unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestRunImport_StripBatch_ZeroIDCreateIsVisible pins that a create response
+// with id 0 is not silently lossy on stdout. The whole premise of the F3
+// per-post record is that stdout is a complete record of what landed, so a
+// re-run can deduplicate; a "created" entry whose post_id field was omitted
+// (the old omitempty encoding) would be un-deduplicatable. The fix has two
+// parts, both asserted here by PARSING stdout (not substring):
+//   - the post_id field is PRESENT in the JSON object (not omitted), so a
+//     parser sees the key even when the value is 0;
+//   - the status is the distinct "created_no_id", not "created" — a created
+//     post whose identity is unknown is not the same thing as a created post.
+func TestRunImport_StripBatch_ZeroIDCreateIsVisible(t *testing.T) {
+	editBodies := map[int]string{7001: editBodyFor("post one")}
+	srv := importStubServerZeroID(t, editBodies)
+	c := newImportTestClient(t, srv)
+
+	var out, errOut strings.Builder
+	code := runImport(context.Background(), c, &out, &errOut, importArgs{
+		postIDs:  "7001",
+		whenType: 1,
+		howType:  1,
+		stripVK:  true,
+	})
+	// A zero-id create is NOT a failure — the post was created, the server
+	// just did not return its id. Exit zero.
+	if code != 0 {
+		t.Fatalf("exit %d; want 0 (zero-id create is not a failure); stderr=%s", code, errOut.String())
+	}
+	// Parse into a generic shape so we can assert KEY PRESENCE (omitempty
+	// would drop the key; a struct decode cannot distinguish 0-from-absent
+	// without a pointer field).
+	var parsed struct {
+		StripVKMarkup bool             `json:"strip_vk_markup"`
+		PerPost       []map[string]any `json:"per_post"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &parsed); err != nil {
+		t.Fatalf("stdout not valid JSON: %v\nstdout=%s", err, out.String())
+	}
+	if !parsed.StripVKMarkup {
+		t.Errorf("strip_vk_markup = false, want true")
+	}
+	if got, want := len(parsed.PerPost), 1; got != want {
+		t.Fatalf("per_post len = %d, want %d; stdout=%s", got, want, out.String())
+	}
+	rec := parsed.PerPost[0]
+	// The post_id key MUST be present — omitempty would have dropped it.
+	if _, ok := rec["post_id"]; !ok {
+		t.Errorf("per_post[0] has no post_id key (omitempty dropped it); got %v; stdout=%s", rec, out.String())
+	}
+	// The status MUST be the distinct "created_no_id", not "created".
+	if got, want := rec["status"], "created_no_id"; got != want {
+		t.Errorf("per_post[0] status = %v, want %q (a zero-id create is not reported as created); stdout=%s", got, want, out.String())
+	}
+	// And the post_id value MUST be 0 (present, not omitted).
+	if got, want := rec["post_id"], float64(0); got != want {
+		t.Errorf("per_post[0] post_id = %v, want 0 (present, not omitted); stdout=%s", got, out.String())
 	}
 }

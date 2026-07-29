@@ -29,10 +29,19 @@ type importArgs struct {
 // strip-batch path is NOT atomic (it issues N import calls instead of 1), so
 // unlike the single-call paths, work already done MUST NOT be discarded on a
 // later failure — see runImport's doc comment.
+//
+// PostID is serialized WITHOUT omitempty so a "created" entry ALWAYS carries
+// its id field, even when the id is 0. Omitting the field on a zero id would
+// make stdout lossy exactly where it must not be: a re-run reads stdout to
+// deduplicate, and a "created" record with no post_id is un-deduplicatable.
+// A zero id is reported as the distinct status "created_no_id" rather than
+// "created" — a created post whose identity is unknown is not the same thing
+// as a created post, and the operator must be able to tell them apart from
+// the record alone.
 type perPostResult struct {
 	SearchPostID int    `json:"search_post_id"`
-	Status       string `json:"status"` // "created" or "failed"
-	PostID       int    `json:"post_id,omitempty"`
+	Status       string `json:"status"` // "created", "created_no_id", or "failed"
+	PostID       int    `json:"post_id"`
 	Error        string `json:"error,omitempty"`
 }
 
@@ -89,10 +98,16 @@ var adMarkers = []adMarker{
 //     after them — advancing one would re-enter the
 //     single-bracket parser on the second "[" and
 //     mangle "[[a|b]|c]" into "[b|c]")
-//   - inner containing "[" → left untouched (nested/broken markup such as
-//     "[[a|[c|d]]]" or "[url|[x|y]]"; a "[" inside the
-//     inner means the marker was never valid, and
-//     transforming it is non-idempotent)
+//   - inner containing "[" → left untouched DELIBERATELY, not because such a
+//     marker is invalid. Display text CAN legitimately contain "["
+//     ("[https://vk.com/x|see [note]]" is a real link whose display is
+//     "see [note]"). The conversion is left untouched to keep stripVKMarkup
+//     idempotent and to avoid the nested-bracket corruption class (the old
+//     first-close rule turned "[url|[x|y]]" into "[x|y]" on pass 1 and "y"
+//     on pass 2). The COST of this trade-off is that a rare valid form whose
+//     display text contains "[" is NOT converted — the markup reaches the
+//     wire as-is. Handling that form correctly would require bracket-aware
+//     display parsing; until then, leaving it untouched is the safe choice.
 //
 // The function operates on a byte-by-byte scan with strings.Index for the
 // closing bracket, so it never half-rewrites a malformed marker: if the close
@@ -125,9 +140,11 @@ func stripVKMarkup(text string) string {
 			}
 			inner := rest[:end]
 			if strings.Contains(inner, "[") {
-				// A "[" inside a [[...]] inner means nested/broken markup
-				// ("[[a|[c|d]]]"). Leave the whole marker byte-untouched so
-				// it is not half-rewritten or made non-idempotent.
+				// A "[" inside the inner is left byte-untouched. It MAY be
+				// nested/broken markup ("[[a|[c|d]]]") OR a legitimate display
+				// text containing "[" — see the stripVKMarkup doc comment for
+				// the trade-off. Leaving it untouched keeps the conversion
+				// idempotent and avoids the nested-bracket corruption class.
 				b.WriteString(text[i : i+2+end+2])
 				i += 2 + end + 2
 				continue
@@ -155,10 +172,14 @@ func stripVKMarkup(text string) string {
 		}
 		inner := rest[:end]
 		if strings.Contains(inner, "[") {
-			// A "[" inside a [url|text] inner means nested/broken markup
-			// ("[url|[x|y]]" would otherwise lose the outer bracket and
-			// become non-idempotent: pass1="[x|y]", pass2="y"). Leave the
-			// whole marker byte-untouched.
+			// A "[" inside the inner is left byte-untouched. It MAY be
+			// nested/broken markup ("[url|[x|y]]" would lose the outer
+			// bracket and become non-idempotent: pass1="[x|y]", pass2="y")
+			// OR a legitimate display text containing "[" such as
+			// "[https://vk.com/x|see [note]]" — see the stripVKMarkup doc
+			// comment for the trade-off. Leaving it untouched keeps the
+			// conversion idempotent; the cost is the rare valid form is not
+			// converted.
 			b.WriteString(text[i : i+1+end+1])
 			i += 1 + end + 1
 			continue
@@ -179,14 +200,16 @@ func stripVKMarkup(text string) string {
 
 // detectVKMarkup returns the raw [url|text] and [[page|display]] markers found
 // in the text, or nil if none. Unterminated brackets are NOT reported (they
-// are not markers — they are literal text). A "[" inside a marker's inner
-// (nested/broken markup such as "[[a|[c|d]]]" or "[url|[x|y]]") is also NOT
-// reported: stripVKMarkup leaves such a marker byte-untouched (it is not a
-// valid VK marker), so reporting it would warn "VK markup found" and suggest
-// --strip-vk-markup — a flag that changes nothing. Detection and strip must
-// agree on what is a marker. [[page]] without a pipe IS reported: it is valid
-// VK wiki markup (an internal page reference), just without display text, and
-// the operator should know it is there even though strip leaves it untouched.
+// are not markers — they are literal text). A "[" inside a marker's inner is
+// also NOT reported: stripVKMarkup leaves such a marker byte-untouched (the
+// inner "[" may be nested/broken markup such as "[[a|[c|d]]]" OR a legitimate
+// display text containing "[" — see stripVKMarkup's doc comment for the
+// trade-off), so reporting it would warn "VK markup found" and suggest
+// --strip-vk-markup — a flag that changes nothing for that marker. Detection
+// and strip must agree on what is a marker. [[page]] without a pipe IS
+// reported: it is valid VK wiki markup (an internal page reference), just
+// without display text, and the operator should know it is there even though
+// strip leaves it untouched.
 func detectVKMarkup(text string) []string {
 	var hits []string
 	i := 0
@@ -210,11 +233,11 @@ func detectVKMarkup(text string) []string {
 				// real VK wiki markup the operator should know about.
 				hits = append(hits, text[i:i+2+end+2])
 			}
-			// A "[" inside the inner means nested/broken markup
-			// ("[[a|[c|d]]]"); stripVKMarkup leaves it byte-untouched, so
+			// A "[" inside the inner is left untouched by strip (may be
+			// nested/broken markup OR legitimate display text containing "[");
 			// detection MUST NOT report it — reporting it would suggest
-			// --strip-vk-markup, a flag that changes nothing for a malformed
-			// marker. Detection and strip must agree.
+			// --strip-vk-markup, a flag that changes nothing for that marker.
+			// Detection and strip must agree.
 			i += 2 + end + 2
 			continue
 		}
@@ -225,9 +248,9 @@ func detectVKMarkup(text string) []string {
 			continue
 		}
 		inner := rest[:end]
-		// Same guard as the [[...]] branch: a "[" inside the inner means
-		// nested/broken markup ("[url|[x|y]]"); strip leaves it untouched,
-		// so detection must not report it.
+		// Same guard as the [[...]] branch: a "[" inside the inner is left
+		// untouched by strip (nested/broken markup OR legitimate display text
+		// containing "["), so detection must not report it.
 		if !strings.Contains(inner, "[") && strings.Contains(inner, "|") {
 			hits = append(hits, text[i:i+1+end+1])
 		}
@@ -388,6 +411,15 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 				anyFailed = true
 				fmt.Fprintf(errOut, "error: ImportSearchPost(%d): %v\n", id, err)
 				results = append(results, perPostResult{SearchPostID: id, Status: "failed", Error: fmt.Sprintf("ImportSearchPost: %v", err)})
+				continue
+			}
+			// A zero id is a created post whose identity the server did not
+			// return. Report it as the distinct status "created_no_id" (still
+			// carrying post_id:0, never omitted) so a re-run can tell a
+			// published-but-unidentified post from a normally created one and
+			// from a failure — see perPostResult's doc comment.
+			if resp.ID == 0 {
+				results = append(results, perPostResult{SearchPostID: id, Status: "created_no_id", PostID: 0})
 				continue
 			}
 			results = append(results, perPostResult{SearchPostID: id, Status: "created", PostID: resp.ID})
