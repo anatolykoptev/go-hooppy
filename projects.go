@@ -476,3 +476,24 @@ func (c *Client) GetScheduleEdit(ctx context.Context, id int) (*ScheduleEditResp
 	}
 	return &resp, nil
 }
+
+// ListSchedulePosts returns a schedule's queue — its depth (TotalRows) and
+// per-day calendar (PostsByDays, keyed dd.mm.yyyy) — in ONE request via
+// GET /posts/schedules/{id}/posts. The LAST key in PostsByDays is the
+// booked-until date. One call returns the whole calendar; this method does
+// NOT page (issue #106 explicitly forbids a paged walk — the endpoint
+// returns the full calendar in one envelope, and paging would issue
+// multiple requests against a one-request contract).
+//
+// UNDOCUMENTED: GET /posts/schedules/{id}/posts is not in the public OpenAPI
+// spec. Discovered via API probing — may change without notice.
+func (c *Client) ListSchedulePosts(ctx context.Context, scheduleID int) (*SchedulePostsResponse, error) {
+	if scheduleID == 0 {
+		return nil, fmt.Errorf("hooppy: ListSchedulePosts: scheduleID is required (got 0)")
+	}
+	var resp SchedulePostsResponse
+	if err := c.doGET(ctx, fmt.Sprintf(pathSchedulePosts, scheduleID), nil, &resp, true); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}

@@ -46,6 +46,7 @@ func registerTools(server *mcp.Server) {
 	registerListProjects(server)
 	registerListSchedules(server)
 	registerGetScheduleEdit(server)
+	registerListSchedulePosts(server)
 	// Undocumented endpoints (not in OpenAPI spec v0.1.0)
 	registerCreateSchedule(server)
 	registerUpdateSchedule(server)
@@ -66,6 +67,8 @@ func registerTools(server *mcp.Server) {
 	registerDisconnectPage(server)
 	registerUpdatePost(server)
 	registerUpdatePostText(server)
+	registerMovePost(server)
+	registerBatchMovePosts(server)
 	// Posts search (scraping external pages) — UNDOCUMENTED
 	registerListSearchPosts(server)
 	registerListSourceResources(server)
@@ -947,6 +950,129 @@ func registerUpdatePostText(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			resp, err := c.UpdatePostText(ctx, in.ID, in.Text)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- move_post (undocumented, schedule-safe) ---
+
+type movePostInput struct {
+	ID           int `json:"id" jsonschema:"Post ID to move."`
+	ToScheduleID int `json:"to_schedule_id" jsonschema:"Target schedule ID to move the post to (REQUIRED). The post is re-slotted to the TAIL of the target queue; the server assigns the new publication_date, which is returned in the result."`
+}
+
+// registerMovePost wires the single-post move path. It delegates to
+// hooppy.MovePost, which fetches the current post via GET /posts/{id}/edit,
+// sends the full state back via PUT /posts/{id} with schedule_id overridden
+// to the target (preserving texts, attachments, page selection, per-source
+// text variants, and project_id), then recovers the new publication_date
+// from a post-move GET /posts/{id}/edit. The date is the load-bearing
+// output: a move re-slots to the tail, and moving into a booked schedule
+// is a silent months-long delay otherwise.
+func registerMovePost(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name: "hooppy_move_post",
+			Description: "Move a single existing post to another schedule, preserving its texts, attachments, page selection and per-source text variants. " +
+				"A move RE-SLOTS the post to the TAIL of the target queue — the server assigns the new publication_date, which is returned in the result. " +
+				"Moving into a booked schedule can delay the post by months (measured: into schedule 55576 → 15.01.2027); the returned publication_date is how the caller sees that delay. " +
+				"UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in movePostInput) (*mcp.CallToolResult, error) {
+			if in.ID == 0 {
+				return errResult("id is required")
+			}
+			if in.ToScheduleID == 0 {
+				return errResult("to_schedule_id is required — a move targeted at no schedule would publish to nothing")
+			}
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.MovePost(ctx, in.ID, in.ToScheduleID)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- batch_move_posts (undocumented) ---
+
+type batchMovePostsInput struct {
+	IDs          []int `json:"ids" jsonschema:"Post IDs to move (1 to 1000)."`
+	ToScheduleID int   `json:"to_schedule_id" jsonschema:"Target schedule ID to move the posts to (REQUIRED). Each post is re-slotted to the TAIL of the target queue; the server assigns each post's new publication_date, which is returned per post in the result."`
+}
+
+// registerBatchMovePosts wires the batch move path. It delegates to
+// hooppy.BatchMovePosts, which POSTs /posts/batch/move with posts_ids as a
+// comma-joined STRING (NOT a JSON array — a JSON array makes the live
+// server 500) and then recovers each post's new publication_date from a
+// post-move GET /posts/{id}/edit. The per-post dates are the load-bearing
+// output.
+func registerBatchMovePosts(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name: "hooppy_batch_move_posts",
+			Description: "Move multiple existing posts to another schedule in a single request. " +
+				"Each post is RE-SLOTTED to the TAIL of the target queue — the server assigns each post's new publication_date, which is returned per post in the result. " +
+				"Moving into a booked schedule can delay posts by months; the returned per-post publication_date values are how the caller sees that delay. " +
+				"UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in batchMovePostsInput) (*mcp.CallToolResult, error) {
+			if len(in.IDs) == 0 {
+				return errResult("ids is required (at least one post ID)")
+			}
+			if in.ToScheduleID == 0 {
+				return errResult("to_schedule_id is required — a move targeted at no schedule would publish to nothing")
+			}
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.BatchMovePosts(ctx, in.IDs, in.ToScheduleID)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- list_schedule_posts (undocumented) ---
+
+type listSchedulePostsInput struct {
+	ScheduleID int `json:"schedule_id" jsonschema:"Schedule ID to show the queue for (use list_schedules to find IDs). REQUIRED."`
+}
+
+// registerListSchedulePosts wires the schedule-queue read. It delegates to
+// hooppy.ListSchedulePosts, which issues exactly ONE GET
+// /posts/schedules/{id}/posts and returns the queue depth (total_rows) and
+// the per-day calendar (posts_by_days). The LAST key in posts_by_days is
+// the booked-until date. No paged walk — the endpoint returns the whole
+// calendar in one envelope.
+func registerListSchedulePosts(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name: "hooppy_list_schedule_posts",
+			Description: "Show a schedule's queue — its depth (total_rows) and per-day calendar (posts_by_days, keyed dd.mm.yyyy) — in ONE request. " +
+				"The LAST key in posts_by_days is the booked-until date. Use this before moving posts INTO a schedule to see how far out the queue runs. " +
+				"UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in listSchedulePostsInput) (*mcp.CallToolResult, error) {
+			if in.ScheduleID == 0 {
+				return errResult("schedule_id is required (use list_schedules to find IDs)")
+			}
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.ListSchedulePosts(ctx, in.ScheduleID)
 			if err != nil {
 				return errResult(err.Error())
 			}

@@ -308,6 +308,56 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 		}
 	}
 
+	// The text path keeps the post on its current schedule: scheduleID is
+	// recovered from the edit response unchanged. MovePost passes the
+	// target schedule id instead; both share one payload builder so the
+	// guards (page-target, schedule, null-normalisation, attachment
+	// grouping) apply identically.
+	payload, err := buildPostUpdatePayload(edit, texts, edit.ScheduleID)
+	if err != nil {
+		return nil, err
+	}
+	return c.UpdatePost(ctx, postID, payload)
+}
+
+// postUpdatePayload is the full-state PUT /posts/{id} body shared by
+// UpdatePostText (text-only edit, schedule unchanged) and MovePost (schedule
+// changed, text unchanged). It mirrors the editable state from
+// GET /posts/{id}/edit: schedule_id singular (not schedules_ids plural),
+// attachments grouped as {type:"photos"}, selected_pages_by_source_ids as an
+// object. Both callers send this exact shape so the server does not 500 on a
+// partial payload.
+type postUpdatePayload struct {
+	AsCopy                   int              `json:"as_copy"`
+	PublicationWhenType      int              `json:"publication_when_type"`
+	PublicationHowType       int              `json:"publication_how_type"`
+	PublicationWhereType     int              `json:"publication_where_type"`
+	PublicationDate          *PublicationDate `json:"publication_date,omitempty"`
+	Texts                    []PostText       `json:"texts"`
+	Attachments              []Attachment     `json:"attachments"`
+	SelectedPagesBySourceIDs map[int][]int    `json:"selected_pages_by_source_ids"`
+	ScheduleID               int              `json:"schedule_id"`
+	ProjectID                int              `json:"project_id,omitempty"`
+}
+
+// buildPostUpdatePayload is the shared full-state PUT /posts/{id} body
+// builder extracted from UpdatePostText. It runs the same guards
+// UpdatePostText carried (page-target guard on when_type != 3, non-zero
+// schedule_id guard on when_type == 3, null normalisation to []/{},
+// SearchPostEditAttachments grouping to {type:"photos"}) and returns the
+// payload with scheduleID in the ScheduleID field. UpdatePostText passes
+// edit.ScheduleID (no change); MovePost passes the target schedule id.
+//
+// The extraction is behaviour-identical for the existing text path: the
+// payload struct is the same shape and field set as the inline literal
+// UpdatePostText built before, the guards run on the same edit fields with
+// the same conditions, and the schedule_id is edit.ScheduleID for the text
+// path (unchanged). The only new caller is MovePost, which overrides
+// scheduleID — the guards still run on the edit response (the post's
+// when_type and recovered schedule_id are properties of the post, not the
+// target), so a schedule-driven post with an unrecoverable current schedule
+// is still refused.
+func buildPostUpdatePayload(edit *PostEditResponse, texts []PostText, scheduleID int) (postUpdatePayload, error) {
 	// Recover the page selection the server actually returned. The edit
 	// response uses selected_pages_by_source_ids (an object keyed by source
 	// ID), NOT the flat selected_pages_ids array used by publish-now.
@@ -320,8 +370,8 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 	// where_type — where_type=1 appears on both schedule-driven and
 	// non-schedule-driven posts (measured on a live account).
 	if edit.PublicationWhenType != 3 && len(selection) == 0 {
-		return nil, fmt.Errorf("hooppy: UpdatePostText post %d: publication_when_type=%d is not 3 (by schedule) and no page selection could be recovered from the edit response — refusing to send a request that would clear page targets",
-			postID, edit.PublicationWhenType)
+		return postUpdatePayload{}, fmt.Errorf("hooppy: post %d: publication_when_type=%d is not 3 (by schedule) and no page selection could be recovered from the edit response — refusing to send a request that would clear page targets",
+			edit.ID, edit.PublicationWhenType)
 	}
 
 	// Fail closed: a schedule-driven post (when_type=3, by schedule) with a
@@ -329,10 +379,11 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 	// publish-to-nothing hole the create-path guard prevents. The edit
 	// endpoint returns a single schedule_id (not an array); when it is 0
 	// the association cannot be recovered, so refuse before issuing any
-	// request.
+	// request. This guards the CURRENT schedule (recovered from edit), not
+	// the target — MovePost validates the target separately.
 	if edit.PublicationWhenType == 3 && edit.ScheduleID == 0 {
-		return nil, fmt.Errorf("hooppy: UpdatePostText post %d: publication_when_type=3 (by schedule) but the edit response carried schedule_id=0 — cannot recover the schedule association, refusing to send a request that would target no schedule",
-			postID)
+		return postUpdatePayload{}, fmt.Errorf("hooppy: post %d: publication_when_type=3 (by schedule) but the edit response carried schedule_id=0 — cannot recover the schedule association, refusing to send a request that would target no schedule",
+			edit.ID)
 	}
 
 	// Server expects arrays and objects, not null — matching the three
@@ -347,18 +398,7 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 	if selection == nil {
 		selection = map[int][]int{}
 	}
-	payload := struct {
-		AsCopy                   int              `json:"as_copy"`
-		PublicationWhenType      int              `json:"publication_when_type"`
-		PublicationHowType       int              `json:"publication_how_type"`
-		PublicationWhereType     int              `json:"publication_where_type"`
-		PublicationDate          *PublicationDate `json:"publication_date,omitempty"`
-		Texts                    []PostText       `json:"texts"`
-		Attachments              []Attachment     `json:"attachments"`
-		SelectedPagesBySourceIDs map[int][]int    `json:"selected_pages_by_source_ids"`
-		ScheduleID               int              `json:"schedule_id"`
-		ProjectID                int              `json:"project_id,omitempty"`
-	}{
+	return postUpdatePayload{
 		AsCopy:                   0,
 		PublicationWhenType:      edit.PublicationWhenType,
 		PublicationHowType:       edit.PublicationHowType,
@@ -367,10 +407,131 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 		Texts:                    texts,
 		Attachments:              attachments,
 		SelectedPagesBySourceIDs: selection,
-		ScheduleID:               edit.ScheduleID,
+		ScheduleID:               scheduleID,
 		ProjectID:                edit.ProjectID,
+	}, nil
+}
+
+// MovePost moves a single existing post to another schedule via the
+// full-state PUT /posts/{id} path — the same read-modify-write UpdatePostText
+// uses, with schedule_id overridden to the target and the text left alone.
+// Texts, attachments, page selection and per-source text variants are
+// preserved (the shared buildPostUpdatePayload guards apply unchanged).
+//
+// A move RE-SLOTS the post to the TAIL of the target queue, and the server
+// assigns the new publication_date. The PUT response is just {"success":true},
+// so the new date is recovered from a post-move GET /posts/{id}/edit — moving
+// into a booked schedule is a silent months-long delay otherwise (measured:
+// into schedule 55576 → 15.01.2027; into a stopped schedule → 01.01.1970).
+// A failed date read populates SlotLookupError and leaves PublicationDate nil
+// — the move succeeded (the post exists in the target schedule); the date is
+// reporting.
+//
+// Do NOT add a --date flag: an explicit publication_date on a when_type=3
+// post is rejected by the server, which still answers {"success":true} and
+// keeps its own computed slot (measured: asked 18.03.2030, kept 15.01.2027).
+//
+// UNDOCUMENTED: PUT /posts/{id} and GET /posts/{id}/edit are not in the
+// public OpenAPI spec.
+func (c *Client) MovePost(ctx context.Context, postID, toScheduleID int) (*PostMoveResult, error) {
+	if toScheduleID == 0 {
+		return nil, fmt.Errorf("hooppy: MovePost: toScheduleID is required (got 0) — a move targeted at no schedule would publish to nothing")
 	}
-	return c.UpdatePost(ctx, postID, payload)
+	edit, err := c.GetPostEdit(ctx, postID)
+	if err != nil {
+		return nil, err
+	}
+	// Texts unchanged: pass edit.Texts straight through. buildPostUpdatePayload
+	// does not mutate or replace text — it only guards and normalises.
+	payload, err := buildPostUpdatePayload(edit, edit.Texts, toScheduleID)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.UpdatePost(ctx, postID, payload)
+	if err != nil {
+		return nil, err
+	}
+	result := &PostMoveResult{Success: resp.Success, ScheduleID: toScheduleID}
+	// Recover the new publication_date the server assigned. The move
+	// re-slots to the tail; the pre-move edit date is the OLD slot. A
+	// post-move read failure is NOT fatal — the move succeeded; populate
+	// SlotLookupError and leave PublicationDate nil.
+	after, err := c.GetPostEdit(ctx, postID)
+	if err != nil {
+		result.SlotLookupError = fmt.Sprintf("post-move GetPostEdit(%d): %v — move succeeded, publication_date not recovered", postID, err)
+		return result, nil
+	}
+	result.PublicationDate = after.PublicationDate
+	return result, nil
+}
+
+// MaxBatchMoveIDs is the maximum number of post IDs allowed in a single
+// BatchMovePosts call, mirroring MaxBatchDeleteIDs.
+const MaxBatchMoveIDs = 1000
+
+// BatchMovePosts moves multiple existing posts to another schedule via
+// POST /posts/batch/move. IDs are joined with commas into the posts_ids
+// STRING field — a JSON array makes the server throw ErrorException:
+// explode(...) and return 500 (measured live 2026-07-30, issue #105). Same
+// comma-joined-string convention as BatchDeletePosts.
+//
+// The batch endpoint returns {"success":true} with no per-post dates, so each
+// post's new publication_date is recovered from a post-move GET /posts/{id}/edit
+// (one read per id). A read failure populates that entry's SlotLookupError and
+// leaves its PublicationDate nil — the move succeeded for that post; the date
+// is reporting. A per-post read failure does NOT abort the remaining reads.
+//
+// Retry: POST /posts/batch/move is idempotent (moving to the same schedule
+// twice is the same end state), but doPOST has no retryable parameter and
+// never retries — so the declared policy is retryNever, matching the actual
+// behaviour. If doPOST gained a retryable param, idempotency would make this
+// retryAllowed.
+//
+// UNDOCUMENTED: POST /posts/batch/move is not in the public OpenAPI spec.
+func (c *Client) BatchMovePosts(ctx context.Context, ids []int, toScheduleID int) (*BatchMovePostsResult, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("hooppy: BatchMovePosts requires at least one ID")
+	}
+	if len(ids) > MaxBatchMoveIDs {
+		return nil, fmt.Errorf("hooppy: BatchMovePosts received %d IDs, max is %d — split into multiple calls", len(ids), MaxBatchMoveIDs)
+	}
+	if toScheduleID == 0 {
+		return nil, fmt.Errorf("hooppy: BatchMovePosts: toScheduleID is required (got 0) — a move targeted at no schedule would publish to nothing")
+	}
+	strs := make([]string, len(ids))
+	for i, id := range ids {
+		strs[i] = strconv.Itoa(id)
+	}
+	body := BatchMovePostsRequest{
+		ScheduleID: toScheduleID,
+		PostsIDs:   strings.Join(strs, ","),
+	}
+	var resp DeletePostResponse
+	if err := c.doPOST(ctx, pathPostsBatchMove, body, &resp); err != nil {
+		return nil, err
+	}
+	// Recover each post's new publication_date. The batch endpoint returns
+	// no per-post dates; one GET /posts/{id}/edit per id. A read failure is
+	// NOT fatal — the move succeeded for that post; record SlotLookupError
+	// and continue so a single unreadable post does not hide the rest.
+	moved := make([]MovedPost, 0, len(ids))
+	for _, id := range ids {
+		after, err := c.GetPostEdit(ctx, id)
+		if err != nil {
+			moved = append(moved, MovedPost{
+				ID:              id,
+				ScheduleID:      toScheduleID,
+				SlotLookupError: fmt.Sprintf("post-move GetPostEdit(%d): %v — move succeeded, publication_date not recovered", id, err),
+			})
+			continue
+		}
+		moved = append(moved, MovedPost{
+			ID:              id,
+			ScheduleID:      toScheduleID,
+			PublicationDate: after.PublicationDate,
+		})
+	}
+	return &BatchMovePostsResult{Success: resp.Success, Moved: moved}, nil
 }
 
 // DeletePost removes a single post by ID.
