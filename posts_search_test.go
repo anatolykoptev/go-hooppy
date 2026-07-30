@@ -10,7 +10,9 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestListSearchPosts(t *testing.T) {
@@ -525,6 +527,155 @@ func TestStartParsing(t *testing.T) {
 	}
 	if capturedBody["source_resource_id"].(float64) != 123 {
 		t.Errorf("source_resource_id = %v, want 123", capturedBody["source_resource_id"])
+	}
+}
+
+// TestStartParsing_WireDateFormat asserts that MarshalJSON emits date_from/
+// date_to as dd.mm.yyyy strings ("" = any), NOT the int timestamps the struct
+// fields declare. Decoding the received JSON into map[string]interface{} and
+// comparing the values catches a type change: an int would decode as float64,
+// not string.
+func TestStartParsing_WireDateFormat(t *testing.T) {
+	// Fixed unix timestamp at a known UTC date: 2026-07-21 00:00:00 UTC.
+	fromUnix := time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC).Unix()
+	wantFromUnix := "21.07.2026"
+
+	tests := []struct {
+		name       string
+		payload    ParsingStartPayload
+		wantFrom   string
+		wantTo     string
+		wantFromIs string // "string" or "number" — asserts the JSON type
+		wantToIs   string
+	}{
+		{
+			name: "both Day fields set",
+			payload: ParsingStartPayload{
+				SourceResourceID: 1, DateFromDay: "21.07.2026", DateToDay: "28.07.2026",
+			},
+			wantFrom: "21.07.2026", wantTo: "28.07.2026",
+			wantFromIs: "string", wantToIs: "string",
+		},
+		{
+			name: "one-sided only DateFromDay",
+			payload: ParsingStartPayload{
+				SourceResourceID: 1, DateFromDay: "21.07.2026",
+			},
+			wantFrom: "21.07.2026", wantTo: "",
+			wantFromIs: "string", wantToIs: "string",
+		},
+		{
+			name: "neither set",
+			payload: ParsingStartPayload{
+				SourceResourceID: 1,
+			},
+			wantFrom: "", wantTo: "",
+			wantFromIs: "string", wantToIs: "string",
+		},
+		{
+			name: "int DateFrom set Day empty",
+			payload: ParsingStartPayload{
+				SourceResourceID: 1, DateFrom: int(fromUnix),
+			},
+			wantFrom: wantFromUnix, wantTo: "",
+			wantFromIs: "string", wantToIs: "string",
+		},
+		{
+			name: "Day set AND int set Day wins",
+			payload: ParsingStartPayload{
+				SourceResourceID: 1,
+				DateFromDay:      "21.07.2026", DateFrom: int(fromUnix),
+				DateToDay: "28.07.2026", DateTo: 999999999,
+			},
+			wantFrom: "21.07.2026", wantTo: "28.07.2026",
+			wantFromIs: "string", wantToIs: "string",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedBody map[string]interface{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(body, &capturedBody)
+				w.Write([]byte(`{"success":true}`))
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+
+			resp, err := c.StartParsing(context.Background(), tt.payload)
+			if err != nil {
+				t.Fatalf("StartParsing: %v", err)
+			}
+			if !resp.Success {
+				t.Fatalf("Success = false, want true")
+			}
+			gotFrom, ok := capturedBody["date_from"]
+			if !ok {
+				t.Fatalf("date_from missing from wire body; body=%v", capturedBody)
+			}
+			gotTo, ok := capturedBody["date_to"]
+			if !ok {
+				t.Fatalf("date_to missing from wire body; body=%v", capturedBody)
+			}
+			// Assert the JSON type: string, not float64 (int).
+			if _, isStr := gotFrom.(string); !isStr {
+				t.Errorf("date_from type = %T (%v), want string %q", gotFrom, gotFrom, tt.wantFrom)
+			}
+			if _, isStr := gotTo.(string); !isStr {
+				t.Errorf("date_to type = %T (%v), want string %q", gotTo, gotTo, tt.wantTo)
+			}
+			if gotFrom != tt.wantFrom {
+				t.Errorf("date_from = %v, want %q", gotFrom, tt.wantFrom)
+			}
+			if gotTo != tt.wantTo {
+				t.Errorf("date_to = %v, want %q", gotTo, tt.wantTo)
+			}
+		})
+	}
+}
+
+// TestStartParsing_MalformedDateRejectsBeforeRequest asserts that a malformed
+// DateFromDay/DateToDay is rejected client-side BEFORE any HTTP request is
+// issued. The requirement is "zero requests reach the stub" — not merely
+// that an error is returned.
+func TestStartParsing_MalformedDateRejectsBeforeRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload ParsingStartPayload
+	}{
+		{
+			name: "malformed DateFromDay",
+			payload: ParsingStartPayload{
+				SourceResourceID: 1, DateFromDay: "2026-07-21",
+			},
+		},
+		{
+			name: "malformed DateToDay",
+			payload: ParsingStartPayload{
+				SourceResourceID: 1, DateToDay: "not-a-date",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var reqCount int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				atomic.AddInt32(&reqCount, 1)
+				w.Write([]byte(`{"success":true}`))
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+
+			_, err := c.StartParsing(context.Background(), tt.payload)
+			// Assert ZERO requests first — "fails before the request" is the
+			// actual requirement, not merely that an error came back.
+			if got := atomic.LoadInt32(&reqCount); got != 0 {
+				t.Errorf("request count = %d, want 0 (validation must reject before any HTTP request)", got)
+			}
+			if err == nil {
+				t.Errorf("expected error for malformed date, got nil")
+			}
+		})
 	}
 }
 

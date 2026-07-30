@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/anatolykoptev/go-hooppy"
 	"github.com/anatolykoptev/go-kit/cli"
@@ -68,6 +69,23 @@ func die(err error) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// parseDateFlag accepts either dd.mm.yyyy or a bare unix-seconds integer
+// (converted in UTC by the library's MarshalJSON). Returns the day string
+// and unix int for ParsingStartPayload; empty = any. Anything else is a
+// pre-request error naming both accepted forms (issue #61).
+func parseDateFlag(field, val string) (day string, unix int, err error) {
+	if val == "" {
+		return "", 0, nil
+	}
+	if n, perr := strconv.Atoi(val); perr == nil {
+		return "", n, nil
+	}
+	if _, perr := time.Parse("02.01.2006", val); perr == nil {
+		return val, 0, nil
+	}
+	return "", 0, fmt.Errorf("hooppy: --%s %q is not a valid date: expected dd.mm.yyyy or a unix timestamp (seconds)", field, val)
 }
 
 // groupHelpRun is the RunE for group (parent) commands that have no action of
@@ -926,19 +944,24 @@ func registerSearch(root *cobra.Command) {
 		Short: "Start scraping posts from an external source resource",
 	})
 	parseCmd.Args = cobra.NoArgs
-	var pSourceType, pSearchType, pSourceID, pSourceResourceID, pAccountID, pDateFrom, pDateTo int
+	var pSourceType, pSearchType, pSourceID, pSourceResourceID, pAccountID int
+	var pDateFrom, pDateTo string
 	parseCmd.Flags().IntVar(&pSourceType, "source-type", 1, "source type: 1=social, 2=RSS")
 	parseCmd.Flags().IntVar(&pSearchType, "search-type", 1, "search method: 1=pages, 2=hashtag")
 	parseCmd.Flags().IntVar(&pSourceID, "source-id", 1, "social network ID (1=VK, 7=Instagram, etc.)")
 	parseCmd.Flags().IntVar(&pSourceResourceID, "source-resource-id", 0, "source resource ID (REQUIRED, see 'search sources')")
 	parseCmd.Flags().IntVar(&pAccountID, "account-id", 0, "social account ID to use as parser (see 'search status')")
-	parseCmd.Flags().IntVar(&pDateFrom, "date-from", 0, "unix timestamp, 0=any")
-	parseCmd.Flags().IntVar(&pDateTo, "date-to", 0, "unix timestamp, 0=any")
+	parseCmd.Flags().StringVar(&pDateFrom, "date-from", "", "date dd.mm.yyyy (empty = any); a bare unix-seconds integer is also accepted and converted in UTC")
+	parseCmd.Flags().StringVar(&pDateTo, "date-to", "", "date dd.mm.yyyy (empty = any); a bare unix-seconds integer is also accepted and converted in UTC")
 	parseCmd.Run = func(_ *cobra.Command, _ []string) {
 		if pSourceResourceID == 0 {
 			fmt.Fprintln(os.Stderr, "error: --source-resource-id is required (see 'hooppy search sources')")
 			os.Exit(1)
 		}
+		fromDay, fromUnix, err := parseDateFlag("date-from", pDateFrom)
+		die(err)
+		toDay, toUnix, err := parseDateFlag("date-to", pDateTo)
+		die(err)
 		c := mustClient()
 		resp, err := c.StartParsing(context.Background(), hooppy.ParsingStartPayload{
 			SourceType:                pSourceType,
@@ -946,8 +969,10 @@ func registerSearch(root *cobra.Command) {
 			SourceID:                  pSourceID,
 			SourceResourceID:          pSourceResourceID,
 			SocialAccountForParsingID: pAccountID,
-			DateFrom:                  pDateFrom,
-			DateTo:                    pDateTo,
+			DateFromDay:               fromDay,
+			DateToDay:                 toDay,
+			DateFrom:                  fromUnix,
+			DateTo:                    toUnix,
 		})
 		die(err)
 		printJSON(resp)
