@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // ListSearchPosts returns posts scraped from external social media pages,
@@ -228,31 +227,17 @@ func (c *Client) GetParsingForm(ctx context.Context) (*ParsingFormResponse, erro
 //
 // UNDOCUMENTED: POST /posts-search/parsing/start is not in the public OpenAPI spec.
 func (c *Client) StartParsing(ctx context.Context, payload ParsingStartPayload) (*ParsingStartResponse, error) {
-	if err := validateParsingDate("date_from", payload.DateFromDay); err != nil {
-		return nil, err
+	if err := validateDDMMYYYY("date_from", payload.DateFromDay); err != nil {
+		return nil, fmt.Errorf("hooppy: StartParsing: %w", err)
 	}
-	if err := validateParsingDate("date_to", payload.DateToDay); err != nil {
-		return nil, err
+	if err := validateDDMMYYYY("date_to", payload.DateToDay); err != nil {
+		return nil, fmt.Errorf("hooppy: StartParsing: %w", err)
 	}
 	var resp ParsingStartResponse
 	if err := c.doPOST(ctx, pathPostsSearchParseStart, payload, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
-}
-
-// validateParsingDate rejects a non-empty Day field that is not dd.mm.yyyy
-// before any HTTP request is issued. The server's createDateFromString
-// returns a three-word 500 on a malformed date — the client validates first
-// so the error names the expected format (issue #61).
-func validateParsingDate(field, day string) error {
-	if day == "" {
-		return nil
-	}
-	if _, err := time.Parse(dayDateFormat, day); err != nil {
-		return fmt.Errorf("hooppy: StartParsing: %s %q is not a valid dd.mm.yyyy date", field, day)
-	}
-	return nil
 }
 
 // StopParsing cancels any in-progress scraping job.

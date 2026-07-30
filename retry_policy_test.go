@@ -124,6 +124,23 @@ var retryPolicies = map[string]struct {
 	"UpdatePostText":        {retryComposite, false}, // delegates to GetPostEdit + UpdatePost
 	"DeletePost":            {retryAllowed, false},
 	"BatchDeletePosts":      {retryNever, true}, // POST /posts/batch/delete
+	// MovePost is composite: GetPostEdit (retryAllowed) + UpdatePost
+	// (retryAllowed full-state PUT) + GetPostEdit (date recovery). The move
+	// itself is a full-state PUT to a known id, which converges on re-send;
+	// the date-recovery read is idempotent. No create — the post already
+	// exists, only its schedule_id changes.
+	"MovePost": {retryComposite, false},
+	// BatchMovePosts issues POST /posts/batch/move via doPOST, which has no
+	// retryable param and never retries — so the declared policy is
+	// retryNever matching the actual behaviour. The endpoint IS idempotent
+	// (moving to the same schedule twice is the same end state), but doPOST
+	// cannot express that; if it gained a retryable param, idempotency
+	// would make this retryAllowed. The post-move per-id GetPostEdit reads
+	// are retryAllowed but happen after the POST commits, so they do not
+	// change the create classification (creates=false).
+	"BatchMovePosts": {retryNever, false},
+	// ListSchedulePosts is a GET read — retryAllowed.
+	"ListSchedulePosts": {retryAllowed, false},
 	// --- notifications ---
 	"ListNotifications":                         {retryAllowed, false},
 	"ListAllNotifications":                      {retryComposite, false},

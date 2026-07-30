@@ -258,6 +258,33 @@ func registerPosts(root *cobra.Command) {
 		printJSON(resp)
 	}
 
+	// posts move — move a post (or batch) to another schedule (undocumented).
+	// A move re-slots the post to the TAIL of the target queue; the server
+	// assigns the new publication_date, which is reported per post (moving
+	// into a booked schedule is a silent months-long delay otherwise).
+	moveCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
+		Name:  "move [post-id]",
+		Short: "Move a post (or batch) to another schedule (undocumented)",
+	})
+	moveCmd.Args = cobra.MaximumNArgs(1)
+	var moveIDs string
+	var moveToSchedule int
+	moveCmd.Flags().StringVar(&moveIDs, "ids", "", "comma-separated post IDs (batch move; mutually exclusive with the positional post-id arg)")
+	moveCmd.Flags().IntVar(&moveToSchedule, "to-schedule", 0, "target schedule ID (required)")
+	_ = moveCmd.MarkFlagRequired("to-schedule")
+	moveCmd.Run = func(_ *cobra.Command, args []string) {
+		target, err := resolveMoveTarget(args, moveIDs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		c := mustClient()
+		if target.batch {
+			os.Exit(runBatchMove(context.Background(), c, os.Stdout, os.Stderr, target.ids, moveToSchedule))
+		}
+		os.Exit(runMovePost(context.Background(), c, os.Stdout, os.Stderr, target.singleID, moveToSchedule))
+	}
+
 	// posts edit — view a post's full editable state
 	editPostCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
 		Name:  "edit",
@@ -546,6 +573,45 @@ func registerSchedules(root *cobra.Command) {
 		edit, err := c.GetScheduleEdit(context.Background(), id)
 		die(err)
 		printJSON(buildScheduleTimesOutput(edit))
+	}
+
+	// schedules queue — show a schedule's queue depth and booked-until date
+	// (undocumented). One request; no paged walk. Default output summarizes
+	// depth, first booked day, booked-until, and per-day counts; --json
+	// prints the raw envelope. --from/--to narrow a truncated calendar
+	// (is_has_more=true); --page advances the page (the only lever that
+	// walks a truncation without guessing dates). Exit codes: 0=complete,
+	// 1=error, 2=partial/truncated (is_has_more=true) — booked_until is
+	// omitted and a loud warning emitted when the response is partial.
+	queueCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
+		Name:  "queue <schedule-id>",
+		Short: "Show a schedule's queue depth and booked-until date (undocumented endpoint)",
+		Long: "Show a schedule's queue — its depth (total_rows), first booked day, booked-until date, " +
+			"and per-day counts — in ONE request (no paged walk; issue #106). --json prints the raw " +
+			"envelope. --from/--to narrow the calendar (dd.mm.yyyy); --page advances the page. " +
+			"A narrowed query omits first_booked_day/booked_until (its day keys are the WINDOW's bounds, " +
+			"not the schedule's); day_counts carries the per-day detail.\n\n" +
+			"Exit codes (queue-scoped — distinct from `doctor --exit-code`, which uses 1 for ALL its " +
+			"error signals including walk_incomplete):\n" +
+			"  0 = complete (the whole calendar, or a complete narrowed window)\n" +
+			"  1 = error (bad schedule id, request failure, encode failure)\n" +
+			"  2 = partial/truncated (is_has_more=true) OR a page OVERRUN (page>0 with zero day keys " +
+			"and total_rows>0 — a page past the end; total_rows is the collection total and does not " +
+			"change with paging, so it cannot detect an overrun by comparison)",
+	})
+	queueCmd.Args = cobra.ExactArgs(1)
+	var queueJSON bool
+	var queueFrom, queueTo string
+	var queuePage int
+	queueCmd.Flags().BoolVar(&queueJSON, "json", false, "print the raw response envelope")
+	queueCmd.Flags().StringVar(&queueFrom, "from", "", "narrow the calendar start (dd.mm.yyyy) — recovers a truncated (is_has_more=true) result")
+	queueCmd.Flags().StringVar(&queueTo, "to", "", "narrow the calendar end (dd.mm.yyyy) — recovers a truncated (is_has_more=true) result")
+	queueCmd.Flags().IntVar(&queuePage, "page", 0, "page number, 1-indexed (0 or omit = first page) — advances a truncated (is_has_more=true) result without guessing dates")
+	queueCmd.Run = func(_ *cobra.Command, args []string) {
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		os.Exit(runScheduleQueue(context.Background(), c, os.Stdout, os.Stderr, id, queueFrom, queueTo, queuePage, queueJSON))
 	}
 }
 
@@ -1383,7 +1449,7 @@ func registerDoctor(root *cobra.Command) {
 	var sinceDays int
 	var exitCode bool
 	cmd.Flags().IntVar(&sinceDays, "since", 7, "only report errors whose operation_date falls within the last N days. 0 = no window (all dated rows included); negative values are rejected. Unparseable-date rows are reported REGARDLESS of --since (they cannot be dated, so the window check does not apply). NOTE: the window is computed in the HOST's local timezone (time.Now), but the vendor renders operation_date in the ACCOUNT's timezone (a user setting on hooppy.ru, not exposed by the API). If the two differ, the window boundary can be off by the offset between them — a row the account considers inside the window may be excluded, or vice versa, by up to that offset.")
-	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error signal is present: grouped errors inside the --since window, unparseable-date rows (reported regardless of --since because they cannot be dated), or a truncated walk (walk_incomplete). Exit 0 otherwise (for cron / pre-flight)")
+	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error signal is present: grouped errors inside the --since window, unparseable-date rows (reported regardless of --since because they cannot be dated), or a truncated walk (walk_incomplete). Exit 0 otherwise (for cron / pre-flight). NOTE: doctor uses exit 1 for ALL its error signals (including walk_incomplete); exit 2 is queue-scoped (`schedules queue` — partial/truncated or page overrun), NOT used by doctor.")
 	cmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		os.Exit(runDoctor(context.Background(), c, os.Stdout, os.Stderr, sinceDays, exitCode))

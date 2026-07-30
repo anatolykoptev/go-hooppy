@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/anatolykoptev/go-kit/cli"
@@ -218,5 +219,91 @@ func TestArgs_PositionalRightCountRuns(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Fatalf("expected exactly 1 API call for `pages disconnect 123`, got %d — the body must run when the correct number of positionals is supplied", hits)
+	}
+}
+
+// TestCommandWiring_MoveAndQueueSubcommands is the cobra wiring guard
+// (item O): resolveMoveTarget is well covered but could be correct and
+// unwired. This test builds the root command and asserts the `move` and
+// `queue` subcommands exist, their Use strings name the positionals,
+// --to-schedule is marked required on `move`, --page is wired on `queue`,
+// and the Run closures are non-nil (the actual execution path — Run calls
+// resolveMoveTarget → runMovePost/runBatchMove — is covered by the direct
+// tests of those functions; the move Run calls os.Exit so it cannot be
+// driven via Execute in-process).
+//
+// RED-on-revert: remove the moveCmd registration, drop MarkFlagRequired, or
+// set Run to nil and the corresponding assertion fails.
+func TestCommandWiring_MoveAndQueueSubcommands(t *testing.T) {
+	root := newFullRoot(t)
+
+	// Find the `posts` parent, then `move` under it.
+	var postsCmd, moveCmd, queueCmd *cobra.Command
+	for _, sub := range root.Commands() {
+		if sub.Name() == "posts" {
+			postsCmd = sub
+		}
+		if sub.Name() == "schedules" {
+			for _, ssub := range sub.Commands() {
+				if ssub.Name() == "queue" {
+					queueCmd = ssub
+				}
+			}
+		}
+	}
+	if postsCmd == nil {
+		t.Fatal("posts subcommand not registered under root")
+	}
+	for _, sub := range postsCmd.Commands() {
+		if sub.Name() == "move" {
+			moveCmd = sub
+		}
+	}
+	if moveCmd == nil {
+		t.Fatal("move subcommand not registered under posts")
+	}
+	if queueCmd == nil {
+		t.Fatal("queue subcommand not registered under schedules")
+	}
+
+	// Use strings MUST name the positionals so --help shows what to pass.
+	// move's Use is "move [post-id]" — assert "post-id" (NOT "move", which is
+	// trivially true for Use: "move ..." and cannot detect a revert of the
+	// [post-id] fix that names the positional).
+	if !strings.Contains(moveCmd.Use, "post-id") {
+		t.Errorf("move Use = %q, must contain \"post-id\" — the positional MUST be named so --help shows what to pass (a revert to bare \"move\" drops it)", moveCmd.Use)
+	}
+	if !strings.Contains(queueCmd.Use, "queue") {
+		t.Errorf("queue Use = %q, must contain \"queue\"", queueCmd.Use)
+	}
+	if !strings.Contains(queueCmd.Use, "schedule-id") {
+		t.Errorf("queue Use = %q, must name the <schedule-id> positional", queueCmd.Use)
+	}
+
+	// --to-schedule MUST be marked required on move. cobra stores the
+	// required annotation as BashCompOneRequiredFlag on the flag.
+	toSched := moveCmd.Flags().Lookup("to-schedule")
+	if toSched == nil {
+		t.Fatal("move command has no --to-schedule flag")
+	}
+	if _, ok := toSched.Annotations["cobra_annotation_bash_completion_one_required_flag"]; !ok {
+		t.Error("--to-schedule is NOT marked required on the move command — a move without a target is meaningless")
+	}
+
+	// --page MUST be wired on queue (item B).
+	pageFlag := queueCmd.Flags().Lookup("page")
+	if pageFlag == nil {
+		t.Error("queue command has no --page flag — item B requires --page to be wired")
+	}
+
+	// Run closures MUST be non-nil — a command with a nil Run is a group,
+	// not a leaf, and would silently do nothing when invoked. The move Run
+	// calls resolveMoveTarget → runMovePost/runBatchMove (both directly
+	// tested); the queue Run calls runScheduleQueue (directly tested).
+	if moveCmd.Run == nil {
+		t.Error("move command has a nil Run — it would do nothing when invoked; Run must call resolveMoveTarget and the move path")
+	}
+	if queueCmd.Run == nil {
+		t.Error("queue command has a nil Run — it would do nothing when invoked; Run must call runScheduleQueue")
 	}
 }

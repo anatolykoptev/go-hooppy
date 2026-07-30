@@ -476,3 +476,74 @@ func (c *Client) GetScheduleEdit(ctx context.Context, id int) (*ScheduleEditResp
 	}
 	return &resp, nil
 }
+
+// ListSchedulePostsFilter narrows the GET /posts/schedules/{id}/posts query.
+// Mirrors ListPostsFilter (posts.go) — the repo convention for a multi-param
+// endpoint with optional fields. ScheduleID is required; the rest are
+// optional recovery levers for a truncated (is_has_more=true) result.
+type ListSchedulePostsFilter struct {
+	ScheduleID int    // REQUIRED; 0 errors before any request
+	DateFrom   string // dd.mm.yyyy, "" = unset; narrows the calendar start
+	DateTo     string // dd.mm.yyyy, "" = unset; narrows the calendar end
+	Page       int    // 1-indexed, 0 = unset; the only lever that walks a truncation without guessing dates
+}
+
+// ListSchedulePosts returns a schedule's queue — its depth (TotalRows) and
+// per-day calendar (PostsByDays, keyed dd.mm.yyyy) — in ONE request via
+// GET /posts/schedules/{id}/posts. The LAST key in PostsByDays is the
+// booked-until date. One call returns the whole calendar; this method does
+// NOT page (issue #106 explicitly forbids a paged walk — the endpoint
+// returns the full calendar in one envelope, and paging would issue
+// multiple requests against a one-request contract).
+//
+// dateFrom/dateTo (dd.mm.yyyy, "" = unset) narrow the calendar window the
+// server returns; page (0 = unset, 1-indexed) selects a page. These are the
+// parameters the endpoint accepts to recover a TRUNCATED result: when the
+// queue is deeper than rows_limit the server returns is_has_more=true with
+// only the first page, and the caller MUST narrow with dateFrom/dateTo (or
+// advance page) to see the rest — the one-request contract forbids an
+// automatic paged walk. The CLI surfaces is_has_more as a loud warning and
+// suppresses booked_until when set (see cmd/hooppy runScheduleQueue); total_rows
+// is the real depth regardless of truncation.
+//
+// dateFrom/dateTo are validated client-side as dd.mm.yyyy before any request
+// (issue #116): the server answers HTTP 500 for an ISO date (2026-09-01) or
+// garbage, not a silent ignore — the client validates first so the error
+// names the expected format. Same shape as validateDDMMYYYY on StartParsing
+// (issue #61); the validator is shared, not duplicated.
+//
+// UNDOCUMENTED: GET /posts/schedules/{id}/posts is not in the public OpenAPI
+// spec. Discovered via API probing — may change without notice.
+func (c *Client) ListSchedulePosts(ctx context.Context, f ListSchedulePostsFilter) (*SchedulePostsResponse, error) {
+	if f.ScheduleID == 0 {
+		return nil, fmt.Errorf("hooppy: ListSchedulePosts: scheduleID is required (got 0)")
+	}
+	if err := validateDDMMYYYY("date_from", f.DateFrom); err != nil {
+		return nil, fmt.Errorf("hooppy: ListSchedulePosts: %w", err)
+	}
+	if err := validateDDMMYYYY("date_to", f.DateTo); err != nil {
+		return nil, fmt.Errorf("hooppy: ListSchedulePosts: %w", err)
+	}
+	// Reject negatives before any request (same defect class as the
+	// ListPosts/ListSchedules page guard): a negative page takes neither
+	// branch — no error, no page param, the server returns page 1. Zero
+	// stays the unset sentinel.
+	if f.Page < 0 {
+		return nil, fmt.Errorf("hooppy: ListSchedulePosts: page must be non-negative (got %d); pass 0 to leave unset", f.Page)
+	}
+	params := url.Values{}
+	if f.DateFrom != "" {
+		params.Set("date_from", f.DateFrom)
+	}
+	if f.DateTo != "" {
+		params.Set("date_to", f.DateTo)
+	}
+	if f.Page > 0 {
+		params.Set("page", strconv.Itoa(f.Page))
+	}
+	var resp SchedulePostsResponse
+	if err := c.doGET(ctx, fmt.Sprintf(pathSchedulePosts, f.ScheduleID), params, &resp, true); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}

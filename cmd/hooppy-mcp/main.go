@@ -46,6 +46,7 @@ func registerTools(server *mcp.Server) {
 	registerListProjects(server)
 	registerListSchedules(server)
 	registerGetScheduleEdit(server)
+	registerListSchedulePosts(server)
 	// Undocumented endpoints (not in OpenAPI spec v0.1.0)
 	registerCreateSchedule(server)
 	registerUpdateSchedule(server)
@@ -66,6 +67,8 @@ func registerTools(server *mcp.Server) {
 	registerDisconnectPage(server)
 	registerUpdatePost(server)
 	registerUpdatePostText(server)
+	registerMovePost(server)
+	registerBatchMovePosts(server)
 	// Posts search (scraping external pages) — UNDOCUMENTED
 	registerListSearchPosts(server)
 	registerListSourceResources(server)
@@ -951,6 +954,215 @@ func registerUpdatePostText(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			return jsonResult(resp)
+		},
+	)
+}
+
+// --- move_post (undocumented, schedule-safe) ---
+
+type movePostInput struct {
+	ID           int `json:"id" jsonschema:"Post ID to move."`
+	ToScheduleID int `json:"to_schedule_id" jsonschema:"Target schedule ID to move the post to (REQUIRED). The post is re-slotted to the TAIL of the target queue; the server assigns the new publication_date, which is returned in the result."`
+}
+
+// registerMovePost wires the single-post move path. It delegates to
+// hooppy.MovePost, which guards publication_when_type==3 via a pre-move
+// GET /posts/{id}/edit, then moves via POST /posts/batch/move (the same
+// server-side move the batch path uses, passing the single id) — the server
+// re-slots the post to the tail and preserves texts/attachments/page
+// selection (the body carries only posts_ids + schedule_id). The new
+// publication_date is recovered from a post-move GET /posts/{id}/edit. The
+// date is the load-bearing output: a move re-slots to the tail, and moving
+// into a booked schedule is a silent months-long delay otherwise.
+func registerMovePost(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name: "hooppy_move_post",
+			Description: "Move a single existing post to another schedule, preserving its texts, attachments, page selection and per-source text variants. " +
+				"A move RE-SLOTS the post to the TAIL of the target queue — the server assigns the new publication_date, which is returned in the result. " +
+				"Moving into a booked schedule can delay the post by months; the returned publication_date is how the caller sees that delay. " +
+				"Only a schedule-driven post (publication_when_type=3) can be moved; a non-schedule post is refused. " +
+				"UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in movePostInput) (*mcp.CallToolResult, error) {
+			if in.ID <= 0 {
+				return errResult("id is required (a positive post id) — an impossible id is accepted by the server and fabricates a success entry")
+			}
+			if in.ToScheduleID <= 0 {
+				return errResult("to_schedule_id is required (a positive schedule id) — a move targeted at no schedule (0) or a negative id would publish to nothing; the server accepts a negative and fabricates a success entry")
+			}
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.MovePost(ctx, in.ID, in.ToScheduleID)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- batch_move_posts (undocumented) ---
+
+type batchMovePostsInput struct {
+	IDs          []int `json:"ids" jsonschema:"Post IDs to move (1 to 1000)."`
+	ToScheduleID int   `json:"to_schedule_id" jsonschema:"Target schedule ID to move the posts to (REQUIRED). Each post is re-slotted to the TAIL of the target queue; the server assigns each post's new publication_date, which is returned per post in the result."`
+}
+
+// registerBatchMovePosts wires the batch move path. It delegates to
+// hooppy.BatchMovePosts, which POSTs /posts/batch/move with posts_ids as a
+// comma-joined STRING (NOT a JSON array — a JSON array makes the live
+// server 500) and then recovers each post's new publication_date from a
+// post-move GET /posts/{id}/edit. The per-post dates are the load-bearing
+// output.
+//
+// A single-id batch is routed to MovePost (so the when_type guard fires —
+// item E) and the result is WRAPPED into a BatchMovePostsResult so the
+// output shape is identical for one id and many: a consumer reading
+// .moved[] gets the entry either way. The result is ALWAYS a
+// BatchMovePostsResult {success, moved:[{id, schedule_id, publication_date,
+// …}]}.
+func registerBatchMovePosts(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name: "hooppy_batch_move_posts",
+			Description: "Move multiple existing posts to another schedule in a single request. " +
+				"Each post is RE-SLOTTED to the TAIL of the target queue — the server assigns each post's new publication_date, which is returned per post in the `moved` array of the result (one entry per id, even for a single-id call). " +
+				"Moving into a booked schedule can delay posts by months; the returned per-post publication_date values are how the caller sees that delay. " +
+				"UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in batchMovePostsInput) (*mcp.CallToolResult, error) {
+			if len(in.IDs) == 0 {
+				return errResult("ids is required (at least one post ID)")
+			}
+			for _, id := range in.IDs {
+				if id <= 0 {
+					return errResult(fmt.Sprintf("ids must all be positive post ids (got %d) — an impossible id is accepted by the server and fabricates a success entry", id))
+				}
+			}
+			if in.ToScheduleID <= 0 {
+				return errResult("to_schedule_id is required (a positive schedule id) — a move targeted at no schedule (0) or a negative id would publish to nothing; the server accepts a negative and fabricates a success entry")
+			}
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			// Route a single-id batch to MovePost so the when_type guard
+			// fires (item E): a single-id batch and a single-post move now
+			// behave identically. WRAP the result into a
+			// BatchMovePostsResult so the output shape matches the multi-id
+			// case — a consumer reading .moved[] gets the entry for the
+			// single id. Zero extra requests for N>1.
+			if len(in.IDs) == 1 {
+				resp, err := c.MovePost(ctx, in.IDs[0], in.ToScheduleID)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(&hooppy.BatchMovePostsResult{
+					Success: resp.Success,
+					Moved: []hooppy.MovedPost{{
+						ID:              in.IDs[0],
+						ScheduleID:      resp.ScheduleID,
+						PublicationDate: resp.PublicationDate,
+						SlotLookupError: resp.SlotLookupError,
+						Warning:         resp.Warning,
+					}},
+				})
+			}
+			resp, err := c.BatchMovePosts(ctx, in.IDs, in.ToScheduleID)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- list_schedule_posts (undocumented) ---
+
+type listSchedulePostsInput struct {
+	ScheduleID int    `json:"schedule_id" jsonschema:"Schedule ID to show the queue for (use list_schedules to find IDs). REQUIRED."`
+	DateFrom   string `json:"date_from,omitempty" jsonschema:"Narrow the calendar start (dd.mm.yyyy). Use this to recover a TRUNCATED result (is_has_more=true)."`
+	DateTo     string `json:"date_to,omitempty" jsonschema:"Narrow the calendar end (dd.mm.yyyy). Use this to recover a TRUNCATED result (is_has_more=true)."`
+	Page       int    `json:"page,omitempty" jsonschema:"Page number, 1-indexed (0 or omit = first page). Advance this to recover a TRUNCATED result (is_has_more=true) without guessing dates."`
+}
+
+// schedulePostsResultEnvelope wraps the schedule-queue response with an
+// optional warning field so a truncation (or page-overrun) signal travels
+// as STRUCTURED data — valid JSON in BOTH branches — not as a prose prefix
+// that makes the truncated result unparseable (the prior shape). The
+// warning field is named in the hooppy_list_schedule_posts description; an
+// agent reads it the same way it reads PostMoveResult.Warning /
+// MovedPost.Warning. The embedded *SchedulePostsResponse flattens its
+// fields (posts_by_days, total_rows, rows_limit, is_has_more) alongside
+// warning, so a non-truncated call (warning empty, omitempty) serialises
+// identically to the raw envelope.
+type schedulePostsResultEnvelope struct {
+	Warning string `json:"warning,omitempty"`
+	*hooppy.SchedulePostsResponse
+}
+
+// registerListSchedulePosts wires the schedule-queue read. It delegates to
+// hooppy.ListSchedulePosts, which issues exactly ONE GET
+// /posts/schedules/{id}/posts and returns the queue depth (total_rows) and
+// the per-day calendar (posts_by_days). The LAST key in posts_by_days is
+// the booked-until date — but ONLY when is_has_more is false AND no
+// date_from/date_to/page narrowing was applied; a narrowed query is a
+// subset by construction (its last key is the WINDOW's last day, not the
+// schedule's booked-until), and a truncated response's last day key is the
+// last day of page one. The caller MUST check is_has_more and the warning
+// field, and narrow with date_from/date_to when truncated. No paged walk —
+// the endpoint returns the whole calendar in one envelope (or a truncated
+// first page; narrow to recover the rest).
+func registerListSchedulePosts(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name: "hooppy_list_schedule_posts",
+			Description: "Show a schedule's queue — its depth (total_rows) and per-day calendar (posts_by_days, keyed dd.mm.yyyy) — in ONE request. " +
+				"The LAST key in posts_by_days is the booked-until date ONLY when is_has_more is false AND no date_from/date_to/page narrowing was applied (a narrowed query's last key is the WINDOW's last day, not the schedule's booked-until). " +
+				"When is_has_more is true the result is TRUNCATED to the first page and a `warning` field is set; the caller MUST narrow with date_from/date_to to recover the rest. " +
+				"A `warning` field is ALSO set when page>0 returns zero day keys with total_rows>0 (a page past the end — total_rows is the collection total and does not change with paging). " +
+				"The result is ALWAYS valid JSON: {warning?, posts_by_days, total_rows, rows_limit, is_has_more}. " +
+				"Use this before moving posts INTO a schedule to see how far out the queue runs. " +
+				"UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in listSchedulePostsInput) (*mcp.CallToolResult, error) {
+			if in.ScheduleID == 0 {
+				return errResult("schedule_id is required (use list_schedules to find IDs)")
+			}
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.ListSchedulePosts(ctx, hooppy.ListSchedulePostsFilter{
+				ScheduleID: in.ScheduleID,
+				DateFrom:   in.DateFrom,
+				DateTo:     in.DateTo,
+				Page:       in.Page,
+			})
+			if err != nil {
+				return errResult(err.Error())
+			}
+			// Enforce truncation + page-overrun on BOTH front-ends (issue
+			// #81 class): the CLI exits non-zero; the MCP tool MUST also
+			// signal it. An agent reads MCP, where there is no exit code —
+			// so the signal travels as a STRUCTURED `warning` field on the
+			// JSON envelope (valid JSON in both branches, unlike the prior
+			// prose-prefix shape that made the truncated result unparseable).
+			// The data is still present (total_rows is the real depth); the
+			// warning names the recovery levers (date_from/date_to, page).
+			env := schedulePostsResultEnvelope{SchedulePostsResponse: resp}
+			switch {
+			case in.Page > 0 && len(resp.PostsByDays) == 0 && resp.TotalRows > 0:
+				// Page past the end: total_rows is the collection total
+				// (unchanged by paging), so only this signal detects it.
+				env.Warning = fmt.Sprintf("PARTIAL result — page %d is past the end of the calendar (total_rows=%d, zero day keys returned). total_rows is the collection total and does not change with paging; this page has no data. Use a lower page.", in.Page, resp.TotalRows)
+			case resp.IsHasMore:
+				env.Warning = fmt.Sprintf("PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); the calendar is truncated to the first page. Narrow with date_from/date_to or advance page to recover the rest. One-request contract: no paged walk.", resp.TotalRows, resp.RowsLimit)
+			}
+			return jsonResult(env)
 		},
 	)
 }

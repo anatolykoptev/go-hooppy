@@ -14,6 +14,18 @@ const (
 	pathPosts            = "/posts"
 	pathPostDelete       = "/posts/%d"
 	pathPostsBatchDelete = "/posts/batch/delete"
+	// Undocumented: POST /posts/batch/move moves existing posts to another
+	// schedule. Not in the public OpenAPI spec (v0.1.0). Discovered via API
+	// probing — may change without notice. The posts_ids field is a
+	// comma-joined STRING, not a JSON array (a JSON array makes the server
+	// throw ErrorException: explode(...) and return 500 — measured live
+	// 2026-07-30, issue #105).
+	pathPostsBatchMove = "/posts/batch/move"
+	// Undocumented: GET /posts/schedules/{id}/posts returns a schedule's
+	// queue depth and per-day calendar in one call. Not in the public
+	// OpenAPI spec. Discovered via API probing — may change without notice
+	// (issue #106).
+	pathSchedulePosts = "/posts/schedules/%d/posts"
 	// Undocumented endpoints (not in OpenAPI spec v0.1.0).
 	// Discovered via API probing — may change without notice.
 	pathUser           = "/users/me"

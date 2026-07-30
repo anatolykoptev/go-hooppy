@@ -1304,6 +1304,65 @@ type BatchDeletePostsRequest struct {
 	IDs string `json:"ids"` // comma-separated, no spaces
 }
 
+// BatchMovePostsRequest is the body for POST /posts/batch/move (issue #105).
+// PostsIDs is a comma-joined STRING — a JSON array makes the server throw
+// ErrorException: explode(...) and return 500 (measured live 2026-07-30).
+// Same convention as BatchDeletePostsRequest.IDs.
+type BatchMovePostsRequest struct {
+	ScheduleID int    `json:"schedule_id"`
+	PostsIDs   string `json:"posts_ids"` // comma-separated post IDs, no spaces
+}
+
+// PostMoveResult is the outcome of a single-post MovePost (issue #105). The
+// POST /posts/batch/move response is just {"success":true}; the new
+// publication_date is recovered from a post-move GET /posts/{id}/edit, because
+// a move re-slots the post to the TAIL of the target queue and the server
+// assigns the date — moving into a booked schedule is a silent months-long
+// delay otherwise (measured: into a booked schedule → a date months out; into
+// a stopped schedule → 01.01.1970). ScheduleID is the target schedule the
+// post was moved to. Warning is non-empty when the recovered date is the
+// epoch or any past date — the signature of a move into a stopped schedule.
+type PostMoveResult struct {
+	Success         bool             `json:"success"`
+	ScheduleID      int              `json:"schedule_id"`
+	PublicationDate *PublicationDate `json:"publication_date,omitempty"`
+	SlotLookupError string           `json:"slot_lookup_error,omitempty"`
+	Warning         string           `json:"warning,omitempty"`
+}
+
+// MovedPost is one entry in a BatchMovePosts result. The batch endpoint
+// returns {"success":true} with no per-post dates, so each post's new
+// publication_date is recovered from a post-move GET /posts/{id}/edit (one
+// read per id). A read failure populates SlotLookupError and leaves
+// PublicationDate nil — the move succeeded (the post exists in the target
+// schedule); the date is reporting. Warning is non-empty when the recovered
+// date is the epoch or any past date — the signature of a move into a stopped
+// schedule.
+type MovedPost struct {
+	ID              int              `json:"id"`
+	ScheduleID      int              `json:"schedule_id"`
+	PublicationDate *PublicationDate `json:"publication_date,omitempty"`
+	SlotLookupError string           `json:"slot_lookup_error,omitempty"`
+	Warning         string           `json:"warning,omitempty"`
+}
+
+// BatchMovePostsResult is the outcome of BatchMovePosts (issue #105).
+type BatchMovePostsResult struct {
+	Success bool        `json:"success"`
+	Moved   []MovedPost `json:"moved"`
+}
+
+// SchedulePostsResponse is the envelope for GET /posts/schedules/{id}/posts
+// (issue #106). PostsByDays is keyed dd.mm.yyyy → the posts scheduled for
+// that day. TotalRows is the queue depth; the LAST key in PostsByDays is the
+// booked-until date. One call returns the whole calendar — no paged walk.
+type SchedulePostsResponse struct {
+	PostsByDays map[string][]Post `json:"posts_by_days"`
+	TotalRows   int               `json:"total_rows"`
+	RowsLimit   int               `json:"rows_limit"`
+	IsHasMore   bool              `json:"is_has_more"`
+}
+
 // UploadMediaResponse is returned by POST /files/media/upload.
 type UploadMediaResponse struct {
 	Photo MediaItem `json:"photo"` // photo or video
@@ -1513,6 +1572,24 @@ type ParsingStartPayload struct {
 
 // dayDateFormat is the vendor's date-only wire format for parsing dates.
 const dayDateFormat = "02.01.2006"
+
+// validateDDMMYYYY rejects a non-empty day string that is not dd.mm.yyyy
+// before any HTTP request is issued. The server's createDateFromString
+// returns a three-word 500 on a malformed date — the client validates first
+// so the error names the expected format (issue #61). Shared by StartParsing
+// and ListSchedulePosts; the caller wraps with its op name so a refusal
+// identifies which call rejected (issue #116). Lives beside dayDateFormat
+// (the format it parses) so a reader in projects.go or posts_search.go
+// finds the validator and the format constant in one place.
+func validateDDMMYYYY(field, day string) error {
+	if day == "" {
+		return nil
+	}
+	if _, err := time.Parse(dayDateFormat, day); err != nil {
+		return fmt.Errorf("%s %q is not a valid dd.mm.yyyy date", field, day)
+	}
+	return nil
+}
 
 // MarshalJSON emits date_from/date_to as dd.mm.yyyy strings ("" = any),
 // the wire format POST /posts-search/parsing/start expects (issue #61).
