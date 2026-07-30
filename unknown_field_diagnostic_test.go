@@ -62,14 +62,35 @@
 // what is hidden so the floor is not mistaken for a total; the hidden keys are
 // NOT enumerated into the baselines.
 //
-// There is a second, smaller blind spot: fields typed interface{} are leaves
-// whose contents are never inspected, because anything decodes. The only one
-// in the response types is Attachment.Data (GET /posts/{id}/edit and
-// GET /posts-search/{id}/edit). As of the 2026-07-29 fixtures it hides 7 keys
-// beneath it in post_edit.json (file_path, folder, id, name, text, type,
-// updated_date) and 2 keys beneath it in search_post_edit.json (link, title).
-// A new server field added inside Attachment.Data is invisible to this gate
-// for the same reason as an unmodelled root — the parent is already opaque.
+// There is a second class of blind spot: opaque leaves whose contents are
+// never inspected, so a new server field inside one is invisible to this
+// gate for the same reason as an unmodelled root — the parent is already
+// opaque. Two Go field types produce such leaves in the response types:
+//
+//   - interface{}: anything decodes, so the value is never walked. The only
+//     one in the response types is Attachment.Data (GET /posts/{id}/edit and
+//     GET /posts-search/{id}/edit). As of the 2026-07-29 fixtures it hides 7
+//     keys beneath it in post_edit.json (file_path, folder, id, name, text,
+//     type, updated_date) and 2 keys beneath it in search_post_edit.json
+//     (link, title).
+//
+//   - json.RawMessage: the bytes are retained verbatim and never parsed into
+//     a struct, so the keys inside are not walked either. Three RawMessage
+//     leaves carry non-empty payloads in the 2026-07-29 fixtures, hiding 11
+//     keys in total: posts_search.json filters_plug (array, 4 keys —
+//     SearchPostsResponse.FiltersPlug), schedule_edit.json posts_hashtags
+//     (object, 3 keys — ScheduleEditResponse.PostsHashtags), and
+//     schedule_edit.json posts_links (object, 4 keys —
+//     ScheduleEditResponse.PostsLinks). Three further RawMessage leaves are
+//     empty arrays in these fixtures and hide 0 keys today —
+//     schedule_edit.json social_albums_by_pages (ScheduleEditResponse) and
+//     posts_search.json list[].videos/audios/documents (SearchPost) — but a
+//     server field added inside any of them once populated would be equally
+//     invisible.
+//
+// The three blind-spot classes this gate does not see beneath are therefore:
+// unmodelled subtree roots (above), interface{} leaves, and json.RawMessage
+// leaves.
 //
 // # The gate — declared baseline, not a report
 //
