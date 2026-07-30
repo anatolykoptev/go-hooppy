@@ -44,7 +44,7 @@ func TestListSchedulePosts_IssuesExactlyOneRequest(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	resp, err := c.ListSchedulePosts(context.Background(), 55576, "", "", 0)
+	resp, err := c.ListSchedulePosts(context.Background(), ListSchedulePostsFilter{ScheduleID: 55576})
 	if err != nil {
 		t.Fatalf("ListSchedulePosts: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestListSchedulePosts_ZeroScheduleID_RefusesRequest(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	if _, err := c.ListSchedulePosts(context.Background(), 0, "", "", 0); err == nil {
+	if _, err := c.ListSchedulePosts(context.Background(), ListSchedulePostsFilter{}); err == nil {
 		t.Fatal("ListSchedulePosts with scheduleID=0: expected an error, got nil")
 	}
 	if reached {
@@ -86,7 +86,7 @@ func TestListSchedulePosts_EmptyQueue(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	resp, err := c.ListSchedulePosts(context.Background(), 55576, "", "", 0)
+	resp, err := c.ListSchedulePosts(context.Background(), ListSchedulePostsFilter{ScheduleID: 55576})
 	if err != nil {
 		t.Fatalf("ListSchedulePosts: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestListSchedulePosts_DecodesPostFields(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	resp, err := c.ListSchedulePosts(context.Background(), 55576, "", "", 0)
+	resp, err := c.ListSchedulePosts(context.Background(), ListSchedulePostsFilter{ScheduleID: 55576})
 	if err != nil {
 		t.Fatalf("ListSchedulePosts: %v", err)
 	}
@@ -125,5 +125,83 @@ func TestListSchedulePosts_DecodesPostFields(t *testing.T) {
 	}
 	if posts[0].Text != "a" {
 		t.Errorf("PostsByDays[\"15.01.2027\"][0].Text = %q, want \"a\"", posts[0].Text)
+	}
+}
+
+// TestListSchedulePosts_MalformedDateFrom_RefusesRequest is the client-side
+// date-validation guard (item C): the server answers HTTP 500 for an ISO date
+// (2026-09-01) or garbage, not a silent ignore — the client validates first
+// so the error names the expected format. Same shape as validateDDMMYYYY on
+// StartParsing (issue #61); the validator is shared, not duplicated.
+//
+// RED-on-revert: drop the validateDDMMYYYY call and the malformed date
+// reaches the server (reached=true) — the reached assertion fails.
+func TestListSchedulePosts_MalformedDateFrom_RefusesRequest(t *testing.T) {
+	for _, bad := range []string{"2026-09-01", "not-a-date", "01.09", "32.01.2027"} {
+		reached := false
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reached = true
+			w.Write([]byte(`{}`))
+		}))
+		c := newTestClient(t, srv)
+		_, err := c.ListSchedulePosts(context.Background(), ListSchedulePostsFilter{
+			ScheduleID: 55576,
+			DateFrom:   bad,
+		})
+		if err == nil {
+			t.Errorf("ListSchedulePosts with date_from=%q: expected an error, got nil — the server answers 500 for a malformed date; the client must validate first", bad)
+		}
+		if reached {
+			t.Errorf("ListSchedulePosts with date_from=%q: a request was issued before the guard errored — the refusal MUST happen before any request", bad)
+		}
+		srv.Close()
+	}
+}
+
+// TestListSchedulePosts_MalformedDateTo_RefusesRequest is the date_to side
+// of the client-side date-validation guard (item C).
+func TestListSchedulePosts_MalformedDateTo_RefusesRequest(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	_, err := c.ListSchedulePosts(context.Background(), ListSchedulePostsFilter{
+		ScheduleID: 55576,
+		DateTo:     "2026-09-01",
+	})
+	if err == nil {
+		t.Fatal("ListSchedulePosts with date_to=\"2026-09-01\": expected an error, got nil — the server answers 500 for an ISO date; the client must validate first")
+	}
+	if reached {
+		t.Fatal("ListSchedulePosts with date_to=\"2026-09-01\": a request was issued before the guard errored")
+	}
+}
+
+// TestListSchedulePosts_PagePassedToEndpoint verifies the page field is
+// forwarded as the page query param to the endpoint — the only lever that
+// walks a truncation without guessing dates (item B).
+//
+// RED-on-revert: drop the page param from the filter or the request and
+// gotPage != "2" — the assertion fails.
+func TestListSchedulePosts_PagePassedToEndpoint(t *testing.T) {
+	var gotPage string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPage = r.URL.Query().Get("page")
+		w.Write([]byte(`{"posts_by_days":{},"total_rows":0,"rows_limit":200,"is_has_more":false}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	if _, err := c.ListSchedulePosts(context.Background(), ListSchedulePostsFilter{
+		ScheduleID: 55576,
+		Page:       2,
+	}); err != nil {
+		t.Fatalf("ListSchedulePosts: %v", err)
+	}
+	if gotPage != "2" {
+		t.Errorf("page query param = %q, want \"2\" — the page field must be forwarded to the endpoint", gotPage)
 	}
 }

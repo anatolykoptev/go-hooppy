@@ -241,24 +241,26 @@ func TestRunScheduleQueue_JSONOutput(t *testing.T) {
 
 // TestRunScheduleQueue_IssuesExactlyOneRequest verifies the CLI core
 // issues exactly ONE request (no paged walk) — the issue #106 contract.
-// is_has_more=true returns exit 1 (truncation warning) but still only one
+// is_has_more=true returns exit 2 (truncation warning) but still only one
 // request.
 func TestRunScheduleQueue_IssuesExactlyOneRequest(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		// is_has_more=true would tempt a paged walk; the contract forbids it.
-		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1}]},"total_rows":1,"rows_limit":1000,"is_has_more":true}`))
+		// rows_limit=200 matches the measured live limit (issue #116).
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1}]},"total_rows":1,"rows_limit":200,"is_has_more":true}`))
 	}))
 	defer srv.Close()
 	c := newCLITestClient(t, srv)
 
 	var out, errOut bytes.Buffer
 	code := runScheduleQueue(context.Background(), c, &out, &errOut, 55576, "", "", 0, false)
-	// is_has_more=true → exit 1 (truncation warning), NOT 0 — a partial
-	// answer must not look complete to a script.
-	if code != 1 {
-		t.Fatalf("runScheduleQueue exit = %d, want 1 — is_has_more=true is a PARTIAL result; the exit code must signal incompleteness; stderr: %s", code, errOut.String())
+	// is_has_more=true → exit 2 (partial/truncated), NOT 0 — a partial
+	// answer must not look complete to a script. Exit 2 distinguishes
+	// partial from error (exit 1) so a script can branch (item F).
+	if code != 2 {
+		t.Fatalf("runScheduleQueue exit = %d, want 2 — is_has_more=true is a PARTIAL result; the exit code must signal incompleteness (2=partial, 1=error); stderr: %s", code, errOut.String())
 	}
 	if calls != 1 {
 		t.Errorf("runScheduleQueue issued %d requests, want exactly 1 — issue #106 forbids a paged walk even when is_has_more is true", calls)
@@ -279,15 +281,16 @@ func TestRunScheduleQueue_IssuesExactlyOneRequest(t *testing.T) {
 // silent-truncation defect #106 exists to remove.
 func TestRunScheduleQueue_TruncatedSuppressesBookedUntil(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1}],"31.01.2027":[{"id":2}]},"total_rows":500,"rows_limit":1000,"is_has_more":true}`))
+		// rows_limit=200 matches the measured live limit (issue #116).
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1}],"31.01.2027":[{"id":2}]},"total_rows":500,"rows_limit":200,"is_has_more":true}`))
 	}))
 	defer srv.Close()
 	c := newCLITestClient(t, srv)
 
 	var out, errOut bytes.Buffer
 	code := runScheduleQueue(context.Background(), c, &out, &errOut, 55576, "", "", 0, false)
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1 — a truncated result must not exit 0; stderr: %s", code, errOut.String())
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 — a truncated result must exit 2 (partial), not 0 or 1; stderr: %s", code, errOut.String())
 	}
 	stdout := out.String()
 	// booked_until MUST be omitted (omitempty + IsHasMore guard).
@@ -338,7 +341,7 @@ func TestRunScheduleQueue_DateFromPassedToEndpoint(t *testing.T) {
 	var gotDateFrom string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotDateFrom = r.URL.Query().Get("date_from")
-		w.Write([]byte(`{"posts_by_days":{},"total_rows":0,"rows_limit":1000,"is_has_more":false}`))
+		w.Write([]byte(`{"posts_by_days":{},"total_rows":0,"rows_limit":200,"is_has_more":false}`))
 	}))
 	defer srv.Close()
 	c := newCLITestClient(t, srv)
@@ -347,6 +350,30 @@ func TestRunScheduleQueue_DateFromPassedToEndpoint(t *testing.T) {
 	_ = runScheduleQueue(context.Background(), c, &out, &errOut, 55576, "01.03.2027", "", 0, false)
 	if gotDateFrom != "01.03.2027" {
 		t.Errorf("date_from query param = %q, want \"01.03.2027\" — the --from flag must be forwarded to narrow a truncated calendar", gotDateFrom)
+	}
+}
+
+// TestRunScheduleQueue_PagePassedToEndpoint verifies the page parameter is
+// forwarded to the endpoint — the only lever that walks a truncation without
+// guessing dates (item B). It was previously plumbed through three layers
+// but both production callers passed a literal 0; now the CLI has a --page
+// flag.
+//
+// RED-on-revert: drop the page param from runScheduleQueue's
+// ListSchedulePostsFilter and gotPage != "2" — the assertion fails.
+func TestRunScheduleQueue_PagePassedToEndpoint(t *testing.T) {
+	var gotPage string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPage = r.URL.Query().Get("page")
+		w.Write([]byte(`{"posts_by_days":{},"total_rows":0,"rows_limit":200,"is_has_more":false}`))
+	}))
+	defer srv.Close()
+	c := newCLITestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	_ = runScheduleQueue(context.Background(), c, &out, &errOut, 55576, "", "", 2, false)
+	if gotPage != "2" {
+		t.Errorf("page query param = %q, want \"2\" — the page parameter must be forwarded to the endpoint (item B)", gotPage)
 	}
 }
 
@@ -407,5 +434,52 @@ func TestResolveMoveTarget_NeitherPresent_IsError(t *testing.T) {
 func TestResolveMoveTarget_NonIntegerPositional_IsError(t *testing.T) {
 	if _, err := resolveMoveTarget([]string{"abc"}, ""); err == nil {
 		t.Fatal("resolveMoveTarget with positional \"abc\": expected an error, got nil — the positional must be an integer")
+	}
+}
+
+// TestRunBatchMove_SingleIDBatch_RoutesToMovePost is the single-id routing
+// guard (item E): a single-id batch (`posts move --ids 42`) MUST route to
+// runMovePost (and thus MovePost) so the when_type guard fires — closing the
+// asymmetry where `posts move 42` guards when_type but `posts move --ids 42`
+// did not, for the same post. The signal that routing happened is the
+// when_type guard's GET /posts/{id}/edit: the batch path does NOT issue a
+// pre-move GET, the single-post path does.
+//
+// RED-on-revert: drop the `len(ids) == 1` routing branch in runBatchMove
+// and the batch path runs — no pre-move GET is issued (getCalls != 1) and
+// the POST runs without the when_type guard.
+func TestRunBatchMove_SingleIDBatch_RoutesToMovePost(t *testing.T) {
+	var getCalls int
+	var postCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/posts/42/edit":
+			getCalls++
+			// when_type=2 (fixed date) — the single-post path refuses this
+			// BEFORE the move. The batch path would NOT refuse it.
+			w.Write([]byte(`{"id":42,"publication_when_type":2,"schedule_id":55576}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move":
+			postCalled = true
+			w.Write([]byte(`{"success":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newCLITestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runBatchMove(context.Background(), c, &out, &errOut, []int{42}, 55576)
+	// The when_type guard refuses a non-schedule post → exit 1.
+	if code != 1 {
+		t.Fatalf("runBatchMove single-id exit = %d, want 1 — the when_type guard (when_type=2) must refuse the move; stderr: %s", code, errOut.String())
+	}
+	// The pre-move GET is the signal that routing to MovePost happened.
+	if getCalls != 1 {
+		t.Errorf("pre-move GET /posts/42/edit issued %d times, want 1 — a single-id batch MUST route to MovePost, which issues a pre-move GET for the when_type guard (item E)", getCalls)
+	}
+	// The POST must NOT have been issued — the when_type guard refused first.
+	if postCalled {
+		t.Error("POST /posts/batch/move was issued — the when_type guard must refuse BEFORE the move; a single-id batch routing to MovePost catches this")
 	}
 }

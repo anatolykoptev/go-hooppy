@@ -281,6 +281,31 @@ func TestMovePost_ZeroTargetSchedule_RefusesRequest(t *testing.T) {
 	}
 }
 
+// TestMovePost_NegativeTargetSchedule_RefusesRequest is the negative-target
+// guard (item D): a negative toScheduleID reaches the wire as
+// {"schedule_id":-5,...} and the server fabricates a success entry — the
+// same defect class as the post-id guard. The refusal MUST happen before any
+// request.
+//
+// RED-on-revert: revert the guard from `<= 0` to `== 0` and MovePost(42, -5)
+// issues a GET (reached=true) and returns err=nil — both assertions fail.
+func TestMovePost_NegativeTargetSchedule_RefusesRequest(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	if _, err := c.MovePost(context.Background(), 42, -5); err == nil {
+		t.Fatal("MovePost with toScheduleID=-5: expected an error, got nil — a negative target is accepted by the server and fabricates a success entry")
+	}
+	if reached {
+		t.Fatal("MovePost with toScheduleID=-5: a request was issued before the guard errored — the refusal MUST happen before any request")
+	}
+}
+
 // TestMovePost_NonPositivePostID_RefusesRequest is the impossible-id guard
 // (item D): an id <= 0 is accepted by the server, which fabricates a success
 // entry for it. The refusal MUST happen before any request — no GET, no POST.
@@ -347,6 +372,42 @@ func TestMovePost_NonScheduleWhenType_RefusesBeforeMove(t *testing.T) {
 	// The error MUST name the actual when_type so the caller learns why.
 	if !strings.Contains(err.Error(), "publication_when_type=2") {
 		t.Errorf("error does not name the actual when_type: %q", err.Error())
+	}
+	// The error MUST NOT print when_type twice (item M): whenTypeLabel
+	// returns the bare label ("publish at a fixed date"), not the full
+	// "publication_when_type=2 (...)" — the refusal message already names
+	// the numeric when_type.
+	if strings.Count(err.Error(), "publication_when_type=2") > 1 {
+		t.Errorf("error prints publication_when_type=2 more than once — whenTypeLabel must return the bare label, not repeat the numeric: %q", err.Error())
+	}
+}
+
+// TestMovePost_BatchMovePostsError_WrappedWithMovePostOpAndID is the
+// error-wrapping guard (item H): a BatchMovePosts failure inside MovePost
+// MUST surface as "hooppy: MovePost: post N: ..." — the same shape
+// buildPostUpdatePayload uses one level down. Without the wrap a MovePost
+// guard failure reads "hooppy: BatchMovePosts: ..." while its own guards
+// ten lines up say "hooppy: MovePost: ...".
+//
+// RED-on-revert: drop the fmt.Errorf wrap and the error lacks "MovePost" —
+// the assertion fails.
+func TestMovePost_BatchMovePostsError_WrappedWithMovePostOpAndID(t *testing.T) {
+	// Drive MovePost through the when_type guard (when_type=3 passes), then
+	// make BatchMovePosts fail with {"success":false} — the wrap must carry
+	// "MovePost" and "post 42".
+	srv, _, _, _ := moveTestServer(t, scheduleDrivenEditBody, `{"success":false}`, movedEditBody, false)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.MovePost(context.Background(), 42, 55576)
+	if err == nil {
+		t.Fatal("MovePost: expected an error from BatchMovePosts {\"success\":false}, got nil")
+	}
+	if !strings.Contains(err.Error(), "MovePost") {
+		t.Errorf("error does not name the MovePost op: %q — a BatchMovePosts failure inside MovePost MUST be wrapped with MovePost's op name", err.Error())
+	}
+	if !strings.Contains(err.Error(), "post 42") {
+		t.Errorf("error does not name the post id 42: %q — the wrap MUST carry the caller's postID", err.Error())
 	}
 }
 
@@ -444,17 +505,26 @@ func TestMovePost_PostMoveReadFailure_PopulatesSlotLookupError(t *testing.T) {
 	}
 }
 
-// TestMovePost_PhotosAndVideo_PreservesViaCleanBatchBody is the photos+video
+// TestMovePost_PhotosAndVideo_SendsNoAttachmentBearingBody is the photos+video
 // fixture guard. The former PUT move path grouped photo+video into a single
 // {type:"photos"} attachment via SearchPostEditAttachments, and no move test
 // covered that grouping. The current POST /posts/batch/move path does NOT
 // send attachments (the server preserves them), so this test guards that a
 // photos+video post moves with a clean batch body (no attachments field,
-// no PUT) — the server keeps both attachments unchanged.
+// no PUT).
+//
+// What this test GENUINELY gates: that the client never sends a body capable
+// of overwriting the post's photo+video. It does NOT and CANNOT verify
+// preservation — the photo+video read back come from a fixture the test
+// itself writes, which is the same-guess-as-the-code oracle. Preservation is
+// a server property measured live (POST /posts/batch/move carries only
+// posts_ids + schedule_id; the server keeps the rest); an httptest cannot
+// reproduce it. The value this test adds is the "no attachment-bearing body"
+// assertion, so the name says that.
 //
 // RED-on-revert: reintroduce the full-state PUT and a PUT is issued AND the
 // POST body would carry a grouped attachments field — both assertions fail.
-func TestMovePost_PhotosAndVideo_PreservesViaCleanBatchBody(t *testing.T) {
+func TestMovePost_PhotosAndVideo_SendsNoAttachmentBearingBody(t *testing.T) {
 	var postBody []byte
 	var postCalled, putCalled bool
 	var getCalls int
@@ -705,6 +775,32 @@ func TestBatchMovePosts_ZeroTargetSchedule_RefusesRequest(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("BatchMovePosts with toScheduleID=0: a request was issued before the guard errored")
+	}
+}
+
+// TestBatchMovePosts_NegativeTargetSchedule_RefusesRequest is the
+// negative-target guard (item D): a negative toScheduleID reaches the wire
+// as {"schedule_id":-5,"posts_ids":"42"} and the server fabricates a success
+// entry — measured by the reviewer. The refusal MUST happen before any
+// request.
+//
+// RED-on-revert: revert the guard from `<= 0` to `== 0` and
+// BatchMovePosts([]int{42}, -5) issues a POST (reached=true) and returns
+// err=nil — both assertions fail.
+func TestBatchMovePosts_NegativeTargetSchedule_RefusesRequest(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Write([]byte(`{"success":true}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	if _, err := c.BatchMovePosts(context.Background(), []int{42}, -5); err == nil {
+		t.Fatal("BatchMovePosts with toScheduleID=-5: expected an error, got nil — a negative target is accepted by the server and fabricates a success entry")
+	}
+	if reached {
+		t.Fatal("BatchMovePosts with toScheduleID=-5: a request was issued before the guard errored — the refusal MUST happen before any request")
 	}
 }
 

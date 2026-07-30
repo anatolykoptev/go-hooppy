@@ -175,7 +175,7 @@ func TestListSchedulePostsTool_WireIssuesOneRequest(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1,"text":"a"}]},"total_rows":1,"rows_limit":1000,"is_has_more":true}`))
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1,"text":"a"}]},"total_rows":1,"rows_limit":200,"is_has_more":true}`))
 	}))
 	defer srv.Close()
 	t.Setenv("HOOPPY_TOKEN", "test-token")
@@ -207,5 +207,139 @@ func TestListSchedulePostsTool_WireIssuesOneRequest(t *testing.T) {
 	}
 }
 
+// TestListSchedulePostsTool_TruncationPrependsWarning is the MCP
+// fail-closed-on-truncation guard (item A): the CLI exits non-zero; the MCP
+// tool MUST also signal truncation — an agent reads MCP, where there is no
+// exit code. The tool prepends an unskippable WARNING to the returned text
+// when is_has_more=true. The data is still present (total_rows is the real
+// depth); the warning names the recovery levers (date_from/date_to, page).
+//
+// RED-on-revert: drop the IsHasMore warning branch and the result text
+// lacks "WARNING" and "PARTIAL" — both assertions fail.
+func TestListSchedulePostsTool_TruncationPrependsWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1}]},"total_rows":500,"rows_limit":200,"is_has_more":true}`))
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+	cs := newMCPClientSession(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "hooppy_list_schedule_posts",
+		Arguments: map[string]any{
+			"schedule_id": 55576,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	// The result MUST NOT be an error (the data is still useful) — the
+	// warning is prepended to the text, not returned as IsError.
+	if res.IsError {
+		t.Fatalf("tool returned IsError=true for a truncated result — the data is still useful; the warning should be prepended to the text, not an error: %s", toolResultText(res))
+	}
+	resultText := toolResultText(res)
+	if !strings.Contains(resultText, "WARNING") {
+		t.Errorf("result text missing \"WARNING\" — the MCP tool MUST signal truncation (an agent reads MCP, where there is no exit code): %s", resultText)
+	}
+	if !strings.Contains(resultText, "PARTIAL") {
+		t.Errorf("result text missing \"PARTIAL\" — the warning must name the truncation: %s", resultText)
+	}
+	if !strings.Contains(resultText, "is_has_more") {
+		t.Errorf("result text missing \"is_has_more\" — the warning must name the signal: %s", resultText)
+	}
+	// The data MUST still be present — total_rows is the real depth.
+	if !strings.Contains(resultText, "total_rows") {
+		t.Errorf("result text missing total_rows — the data must still be present alongside the warning: %s", resultText)
+	}
+}
+
+// TestListSchedulePostsTool_PageFieldPassedToEndpoint verifies the page
+// field on the MCP input is forwarded to the endpoint (item B).
+func TestListSchedulePostsTool_PageFieldPassedToEndpoint(t *testing.T) {
+	var gotPage string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPage = r.URL.Query().Get("page")
+		w.Write([]byte(`{"posts_by_days":{},"total_rows":0,"rows_limit":200,"is_has_more":false}`))
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+	cs := newMCPClientSession(t)
+	_, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "hooppy_list_schedule_posts",
+		Arguments: map[string]any{
+			"schedule_id": 55576,
+			"page":        3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if gotPage != "3" {
+		t.Errorf("page query param = %q, want \"3\" — the page field must be forwarded to the endpoint", gotPage)
+	}
+}
+
 // Ensure the mcp import is referenced (used via CallToolParams above).
 var _ = (*mcp.CallToolParams)(nil)
+
+// TestBatchMovePostsTool_SingleIDBatch_RoutesToMovePost is the single-id
+// routing guard for the MCP batch handler (item E): a single-id batch
+// (`hooppy_batch_move_posts` with ids=[42]) MUST route to MovePost so the
+// when_type guard fires — closing the asymmetry where `hooppy_move_post`
+// guards when_type but `hooppy_batch_move_posts` with a single id did not.
+// The signal that routing happened is the when_type guard's GET
+// /posts/{id}/edit: the batch path does NOT issue a pre-move GET, the
+// single-post path does.
+//
+// RED-on-revert: drop the `len(in.IDs) == 1` routing branch in the batch
+// handler and the batch path runs — no pre-move GET is issued and the POST
+// runs without the when_type guard.
+func TestBatchMovePostsTool_SingleIDBatch_RoutesToMovePost(t *testing.T) {
+	var getCalls int
+	var postCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/posts/42/edit":
+			getCalls++
+			// when_type=2 (fixed date) — the single-post path refuses this
+			// BEFORE the move. The batch path would NOT refuse it.
+			w.Write([]byte(`{"id":42,"publication_when_type":2,"schedule_id":55576}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move":
+			postCalled = true
+			w.Write([]byte(`{"success":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+	cs := newMCPClientSession(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "hooppy_batch_move_posts",
+		Arguments: map[string]any{
+			"ids":            []int{42},
+			"to_schedule_id": 55576,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	// The when_type guard refuses a non-schedule post → IsError=true.
+	if !res.IsError {
+		t.Fatalf("expected IsError=true — the when_type guard (when_type=2) must refuse the move; result: %s", toolResultText(res))
+	}
+	// The pre-move GET is the signal that routing to MovePost happened.
+	if getCalls != 1 {
+		t.Errorf("pre-move GET /posts/42/edit issued %d times, want 1 — a single-id batch MUST route to MovePost, which issues a pre-move GET for the when_type guard (item E)", getCalls)
+	}
+	// The POST must NOT have been issued — the when_type guard refused first.
+	if postCalled {
+		t.Error("POST /posts/batch/move was issued — the when_type guard must refuse BEFORE the move; a single-id batch routing to MovePost catches this")
+	}
+}

@@ -428,6 +428,13 @@ func buildPostUpdatePayload(op string, postID int, edit *PostEditResponse, texts
 // server-side move is strictly better: it touches only the schedule
 // association. No PUT is issued from this path.
 //
+// Note on buildPostUpdatePayload's schedule_id guard: that guard (non-zero
+// schedule_id on when_type=3) no longer runs on the move path — it existed
+// to stop a PUT writing schedule_id=0, while the batch move writes the
+// TARGET, so moving a post whose edit returned schedule_id=0 REPAIRS it
+// rather than wiping it. Do NOT re-add the guard here as a regression; the
+// move path is correct without it.
+//
 // when_type guard: only a schedule-driven post (publication_when_type=3) can
 // be moved between schedules. A non-schedule post (when_type 1=publish-now,
 // 2=at-a-fixed-date) is not schedule-bound; "moving" it is not meaningful.
@@ -458,8 +465,8 @@ func (c *Client) MovePost(ctx context.Context, postID, toScheduleID int) (*PostM
 	if postID <= 0 {
 		return nil, fmt.Errorf("hooppy: MovePost: postID must be a positive id (got %d) — an impossible id is accepted by the server and fabricates a success entry; pass a real post id", postID)
 	}
-	if toScheduleID == 0 {
-		return nil, fmt.Errorf("hooppy: MovePost: toScheduleID is required (got 0) — a move targeted at no schedule would publish to nothing")
+	if toScheduleID <= 0 {
+		return nil, fmt.Errorf("hooppy: MovePost: toScheduleID must be a positive id (got %d) — a move targeted at no schedule (0) or a negative id would publish to nothing; the server accepts a negative and fabricates a success entry", toScheduleID)
 	}
 	// when_type guard: refuse a non-schedule-driven post BEFORE the move.
 	// The pre-move GET is the one place when_type is recoverable on the
@@ -479,10 +486,12 @@ func (c *Client) MovePost(ctx context.Context, postID, toScheduleID int) (*PostM
 	// body carries only posts_ids + schedule_id.
 	res, err := c.BatchMovePosts(ctx, []int{postID}, toScheduleID)
 	if err != nil {
-		return nil, err
-	}
-	if len(res.Moved) != 1 {
-		return nil, fmt.Errorf("hooppy: MovePost: post %d: batch move returned %d entries, want 1 — internal inconsistency", postID, len(res.Moved))
+		// Wrap with MovePost's op and id so a BatchMovePosts failure surfaces
+		// as "hooppy: MovePost: post N: ..." — the same shape
+		// buildPostUpdatePayload uses one level down. Without this a MovePost
+		// guard failure reads "hooppy: BatchMovePosts: ..." while its own
+		// guards ten lines up say "hooppy: MovePost: ...".
+		return nil, fmt.Errorf("hooppy: MovePost: post %d: %w", postID, err)
 	}
 	m := res.Moved[0]
 	return &PostMoveResult{
@@ -495,16 +504,19 @@ func (c *Client) MovePost(ctx context.Context, postID, toScheduleID int) (*PostM
 }
 
 // whenTypeLabel names a publication_when_type value for a refusal message.
+// Returns the bare label (e.g. "publish now"), NOT the full
+// "publication_when_type=N (...)" — the refusal message already names the
+// numeric when_type, so returning it here would print it twice.
 func whenTypeLabel(t int) string {
 	switch t {
 	case 1:
-		return "publication_when_type=1 (publish now)"
+		return "publish now"
 	case 2:
-		return "publication_when_type=2 (publish at a fixed date)"
+		return "publish at a fixed date"
 	case 3:
-		return "publication_when_type=3 (by schedule)"
+		return "by schedule"
 	default:
-		return fmt.Sprintf("publication_when_type=%d (unrecognised)", t)
+		return "unrecognised"
 	}
 }
 
@@ -524,7 +536,12 @@ func moveDateWarning(pd *PublicationDate) string {
 	if err != nil {
 		return ""
 	}
-	today := time.Now().Truncate(24 * time.Hour)
+	// Compare against local midnight, not UTC midnight. Truncate(24h) aligns
+	// to the zero time (UTC midnight), which reads as if it computed local
+	// midnight — safe for the current pairing but wrong by up to a day in
+	// other timezones. time.Date with the localizer zeros the clock.
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	if !day.Before(today) {
 		return ""
 	}
@@ -571,7 +588,10 @@ const MaxBatchMoveIDs = 1000
 // afford the one GET (it already needs a pre-move read for the guard and a
 // post-move read for the date); the batch path trades that guard for the
 // one-write contract. A caller moving a mixed batch should filter
-// non-schedule posts client-side first.
+// non-schedule posts client-side first. The CLI and MCP handlers route a
+// single-id batch to MovePost so the when_type guard fires for N==1; for
+// N>1 this path runs and when_type is UNCHECKED — a non-schedule post in a
+// multi-id batch is moved without refusal.
 //
 // Retry: POST /posts/batch/move is idempotent (moving to the same schedule
 // twice is the same end state), but doPOST has no retryable parameter and
@@ -592,8 +612,8 @@ func (c *Client) BatchMovePosts(ctx context.Context, ids []int, toScheduleID int
 			return nil, fmt.Errorf("hooppy: BatchMovePosts: id must be a positive id (got %d) — an impossible id is accepted by the server and fabricates a success entry; pass only real post ids", id)
 		}
 	}
-	if toScheduleID == 0 {
-		return nil, fmt.Errorf("hooppy: BatchMovePosts: toScheduleID is required (got 0) — a move targeted at no schedule would publish to nothing")
+	if toScheduleID <= 0 {
+		return nil, fmt.Errorf("hooppy: BatchMovePosts: toScheduleID must be a positive id (got %d) — a move targeted at no schedule (0) or a negative id would publish to nothing; the server accepts a negative and fabricates a success entry", toScheduleID)
 	}
 	strs := make([]string, len(ids))
 	for i, id := range ids {

@@ -46,8 +46,8 @@ type scheduleDayCount struct {
 // It issues exactly ONE request (ListSchedulePosts — no paged walk) and
 // prints either the raw envelope (--json) or a summary (depth, first booked
 // day, booked-until, per-day counts) to out, diagnostics to errOut. Returns
-// the process exit code (0 on success, 1 on error). Never calls os.Exit
-// itself.
+// the process exit code: 0 on success, 1 on error, 2 on a PARTIAL/truncated
+// result (is_has_more=true). Never calls os.Exit itself.
 //
 // dateFrom/dateTo (dd.mm.yyyy, "" = unset) and page (0 = unset) are passed
 // through to the endpoint to narrow a truncated calendar.
@@ -60,15 +60,21 @@ type scheduleDayCount struct {
 // Truncation: when the server returns is_has_more=true the response is
 // PARTIAL — only the first page of days. The summary then OMITS booked_until
 // (the last day of page one is NOT the real booked-until date) and a loud
-// warning is written to errOut naming --from/--to as the recovery levers.
-// The exit code is 1 so a script cannot mistake a partial answer for
-// complete; total_rows (the real depth) is still emitted.
+// warning is written to errOut naming --from/--to and --page as the recovery
+// levers. The exit code is 2 (partial/truncated) so a script can branch:
+// 0=complete, 1=error, 2=partial. total_rows (the real depth) is still
+// emitted.
 func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, scheduleID int, dateFrom, dateTo string, page int, asJSON bool) int {
 	if scheduleID == 0 {
 		fmt.Fprintln(errOut, "error: schedules queue requires a schedule ID (got 0)")
 		return 1
 	}
-	resp, err := c.ListSchedulePosts(ctx, scheduleID, dateFrom, dateTo, page)
+	resp, err := c.ListSchedulePosts(ctx, hooppy.ListSchedulePostsFilter{
+		ScheduleID: scheduleID,
+		DateFrom:   dateFrom,
+		DateTo:     dateTo,
+		Page:       page,
+	})
 	if err != nil {
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return 1
@@ -81,8 +87,8 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 			return 1
 		}
 		if resp.IsHasMore {
-			fmt.Fprintf(errOut, "warn: PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); the calendar is truncated to the first page. Narrow with --from/--to (date_from/date_to) to recover the rest. One-request contract: no paged walk.\n", resp.TotalRows, resp.RowsLimit)
-			return 1
+			fmt.Fprintf(errOut, "warn: PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); the calendar is truncated to the first page. Narrow with --from/--to (date_from/date_to) or advance --page to recover the rest. One-request contract: no paged walk.\n", resp.TotalRows, resp.RowsLimit)
+			return 2
 		}
 		return 0
 	}
@@ -94,8 +100,8 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 		return 1
 	}
 	if resp.IsHasMore {
-		fmt.Fprintf(errOut, "warn: PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); booked_until is OMITTED because the last day shown is only the last day of page ONE, not the real booked-until date. Narrow with --from/--to (date_from/date_to) to recover the rest. One-request contract: no paged walk.\n", resp.TotalRows, resp.RowsLimit)
-		return 1
+		fmt.Fprintf(errOut, "warn: PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); booked_until is OMITTED because the last day shown is only the last day of page ONE, not the real booked-until date. Narrow with --from/--to (date_from/date_to) or advance --page to recover the rest. One-request contract: no paged walk.\n", resp.TotalRows, resp.RowsLimit)
+		return 2
 	}
 	return 0
 }

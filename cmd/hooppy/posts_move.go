@@ -59,8 +59,8 @@ func resolveMoveTarget(args []string, idsFlag string) (moveTarget, error) {
 // schedule is a silent months-long delay otherwise. The date is the
 // load-bearing output; the caller MUST see it.
 func runMovePost(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, postID, toScheduleID int) int {
-	if toScheduleID == 0 {
-		fmt.Fprintln(errOut, "error: --to-schedule is required (got 0) — a move targeted at no schedule would publish to nothing")
+	if toScheduleID <= 0 {
+		fmt.Fprintln(errOut, "error: --to-schedule is required (a positive schedule id) — a move targeted at no schedule or a negative id would publish to nothing")
 		return 1
 	}
 	res, err := c.MovePost(ctx, postID, toScheduleID)
@@ -95,14 +95,25 @@ func runMovePost(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, p
 // posts_ids as a comma-joined STRING + per-post date recovery) and prints
 // the result as JSON to out, diagnostics to errOut. Returns the process
 // exit code (0 on success, 1 on error). Never calls os.Exit itself.
+//
+// A single-id batch is routed to runMovePost (and thus MovePost) so the
+// when_type guard fires — closing the asymmetry where `posts move 42` guards
+// when_type but `posts move --ids 42` does not, for the same post. For N>1
+// the batch path runs and when_type is unchecked (see BatchMovePosts doc).
 func runBatchMove(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, ids []int, toScheduleID int) int {
 	if len(ids) == 0 {
 		fmt.Fprintln(errOut, "error: --ids requires at least one post ID")
 		return 1
 	}
-	if toScheduleID == 0 {
-		fmt.Fprintln(errOut, "error: --to-schedule is required (got 0) — a move targeted at no schedule would publish to nothing")
+	if toScheduleID <= 0 {
+		fmt.Fprintln(errOut, "error: --to-schedule is required (a positive schedule id) — a move targeted at no schedule or a negative id would publish to nothing")
 		return 1
+	}
+	// Route a single-id batch to the single-post path so the when_type
+	// guard fires (item E): `posts move --ids 42` and `posts move 42` now
+	// behave identically. Zero extra requests for N>1.
+	if len(ids) == 1 {
+		return runMovePost(ctx, c, out, errOut, ids[0], toScheduleID)
 	}
 	res, err := c.BatchMovePosts(ctx, ids, toScheduleID)
 	if err != nil {

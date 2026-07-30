@@ -579,8 +579,10 @@ func registerSchedules(root *cobra.Command) {
 	// (undocumented). One request; no paged walk. Default output summarizes
 	// depth, first booked day, booked-until, and per-day counts; --json
 	// prints the raw envelope. --from/--to narrow a truncated calendar
-	// (is_has_more=true); booked_until is omitted and a loud warning emitted
-	// when the response is partial.
+	// (is_has_more=true); --page advances the page (the only lever that
+	// walks a truncation without guessing dates). Exit codes: 0=complete,
+	// 1=error, 2=partial/truncated (is_has_more=true) — booked_until is
+	// omitted and a loud warning emitted when the response is partial.
 	queueCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
 		Name:  "queue <schedule-id>",
 		Short: "Show a schedule's queue depth and booked-until date (undocumented endpoint)",
@@ -588,14 +590,16 @@ func registerSchedules(root *cobra.Command) {
 	queueCmd.Args = cobra.ExactArgs(1)
 	var queueJSON bool
 	var queueFrom, queueTo string
+	var queuePage int
 	queueCmd.Flags().BoolVar(&queueJSON, "json", false, "print the raw response envelope")
 	queueCmd.Flags().StringVar(&queueFrom, "from", "", "narrow the calendar start (dd.mm.yyyy) — recovers a truncated (is_has_more=true) result")
 	queueCmd.Flags().StringVar(&queueTo, "to", "", "narrow the calendar end (dd.mm.yyyy) — recovers a truncated (is_has_more=true) result")
+	queueCmd.Flags().IntVar(&queuePage, "page", 0, "page number, 1-indexed (0 or omit = first page) — advances a truncated (is_has_more=true) result without guessing dates")
 	queueCmd.Run = func(_ *cobra.Command, args []string) {
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
-		os.Exit(runScheduleQueue(context.Background(), c, os.Stdout, os.Stderr, id, queueFrom, queueTo, 0, queueJSON))
+		os.Exit(runScheduleQueue(context.Background(), c, os.Stdout, os.Stderr, id, queueFrom, queueTo, queuePage, queueJSON))
 	}
 }
 

@@ -988,8 +988,8 @@ func registerMovePost(server *mcp.Server) {
 			if in.ID <= 0 {
 				return errResult("id is required (a positive post id) — an impossible id is accepted by the server and fabricates a success entry")
 			}
-			if in.ToScheduleID == 0 {
-				return errResult("to_schedule_id is required — a move targeted at no schedule would publish to nothing")
+			if in.ToScheduleID <= 0 {
+				return errResult("to_schedule_id is required (a positive schedule id) — a move targeted at no schedule (0) or a negative id would publish to nothing; the server accepts a negative and fabricates a success entry")
 			}
 			c, err := client()
 			if err != nil {
@@ -1035,12 +1035,22 @@ func registerBatchMovePosts(server *mcp.Server) {
 					return errResult(fmt.Sprintf("ids must all be positive post ids (got %d) — an impossible id is accepted by the server and fabricates a success entry", id))
 				}
 			}
-			if in.ToScheduleID == 0 {
-				return errResult("to_schedule_id is required — a move targeted at no schedule would publish to nothing")
+			if in.ToScheduleID <= 0 {
+				return errResult("to_schedule_id is required (a positive schedule id) — a move targeted at no schedule (0) or a negative id would publish to nothing; the server accepts a negative and fabricates a success entry")
 			}
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
+			}
+			// Route a single-id batch to MovePost so the when_type guard
+			// fires (item E): a single-id batch and a single-post move now
+			// behave identically. Zero extra requests for N>1.
+			if len(in.IDs) == 1 {
+				resp, err := c.MovePost(ctx, in.IDs[0], in.ToScheduleID)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(resp)
 			}
 			resp, err := c.BatchMovePosts(ctx, in.IDs, in.ToScheduleID)
 			if err != nil {
@@ -1057,6 +1067,7 @@ type listSchedulePostsInput struct {
 	ScheduleID int    `json:"schedule_id" jsonschema:"Schedule ID to show the queue for (use list_schedules to find IDs). REQUIRED."`
 	DateFrom   string `json:"date_from,omitempty" jsonschema:"Narrow the calendar start (dd.mm.yyyy). Use this to recover a TRUNCATED result (is_has_more=true)."`
 	DateTo     string `json:"date_to,omitempty" jsonschema:"Narrow the calendar end (dd.mm.yyyy). Use this to recover a TRUNCATED result (is_has_more=true)."`
+	Page       int    `json:"page,omitempty" jsonschema:"Page number, 1-indexed (0 or omit = first page). Advance this to recover a TRUNCATED result (is_has_more=true) without guessing dates."`
 }
 
 // registerListSchedulePosts wires the schedule-queue read. It delegates to
@@ -1086,9 +1097,30 @@ func registerListSchedulePosts(server *mcp.Server) {
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListSchedulePosts(ctx, in.ScheduleID, in.DateFrom, in.DateTo, 0)
+			resp, err := c.ListSchedulePosts(ctx, hooppy.ListSchedulePostsFilter{
+				ScheduleID: in.ScheduleID,
+				DateFrom:   in.DateFrom,
+				DateTo:     in.DateTo,
+				Page:       in.Page,
+			})
 			if err != nil {
 				return errResult(err.Error())
+			}
+			// Enforce truncation on BOTH front-ends (issue #81 class): the
+			// CLI exits non-zero; the MCP tool MUST also signal it. An agent
+			// reads MCP, where there is no exit code — so prepend an
+			// unskippable warning to the returned text. The data is still
+			// present (total_rows is the real depth); the warning names the
+			// recovery levers (date_from/date_to, page).
+			if resp.IsHasMore {
+				data, mErr := json.MarshalIndent(resp, "", "  ")
+				if mErr != nil {
+					return nil, fmt.Errorf("marshal result: %w", mErr)
+				}
+				warning := fmt.Sprintf("WARNING: PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); the calendar is truncated to the first page. Narrow with date_from/date_to or advance page to recover the rest. One-request contract: no paged walk.\n\n", resp.TotalRows, resp.RowsLimit)
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: warning + string(data)}},
+				}, nil
 			}
 			return jsonResult(resp)
 		},
