@@ -42,8 +42,8 @@ func TestBuildScheduleQueueSummary_TotalRowsAndBookedUntil(t *testing.T) {
 	if s.BookedUntil != "01.02.2027" {
 		t.Errorf("BookedUntil = %q, want \"01.02.2027\" (the LAST day with posts MUST appear in the summary — this is the booked-until date an operator needs before moving posts in)", s.BookedUntil)
 	}
-	if s.NextSlot != "15.01.2027" {
-		t.Errorf("NextSlot = %q, want \"15.01.2027\" (the FIRST day with posts)", s.NextSlot)
+	if s.FirstBookedDay != "15.01.2027" {
+		t.Errorf("FirstBookedDay = %q, want \"15.01.2027\" (the FIRST day with posts)", s.FirstBookedDay)
 	}
 }
 
@@ -79,8 +79,8 @@ func TestBuildScheduleQueueSummary_ChronologicalDayOrder(t *testing.T) {
 
 // TestBuildScheduleQueueSummary_EmptyQueue verifies an empty schedule
 // produces a summary with TotalRows=0, no DayCounts, and omitted
-// NextSlot/BookedUntil (omitempty — an empty schedule reads as
-// {"total_rows":0,...} not {"next_slot":"","booked_until":""}).
+// FirstBookedDay/BookedUntil (omitempty — an empty schedule reads as
+// {"total_rows":0,...} not {"first_booked_day":"","booked_until":""}).
 func TestBuildScheduleQueueSummary_EmptyQueue(t *testing.T) {
 	resp := &hooppy.SchedulePostsResponse{
 		PostsByDays: map[string][]hooppy.Post{},
@@ -93,8 +93,8 @@ func TestBuildScheduleQueueSummary_EmptyQueue(t *testing.T) {
 	if len(s.DayCounts) != 0 {
 		t.Errorf("len(DayCounts) = %d, want 0", len(s.DayCounts))
 	}
-	if s.NextSlot != "" {
-		t.Errorf("NextSlot = %q, want \"\" (omitempty on empty queue)", s.NextSlot)
+	if s.FirstBookedDay != "" {
+		t.Errorf("FirstBookedDay = %q, want \"\" (omitempty on empty queue)", s.FirstBookedDay)
 	}
 	if s.BookedUntil != "" {
 		t.Errorf("BookedUntil = %q, want \"\" (omitempty on empty queue)", s.BookedUntil)

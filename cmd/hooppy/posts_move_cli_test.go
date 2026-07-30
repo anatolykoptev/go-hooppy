@@ -5,7 +5,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -23,6 +22,15 @@ func newCLITestClient(t *testing.T, srv *httptest.Server) *hooppy.Client {
 	return c
 }
 
+// scheduleDrivenEditBodyCLI is a GET /posts/{id}/edit fixture for a
+// schedule-driven post (when_type=3). The pre-move read recovers when_type
+// for the guard; the post-move read recovers the server-assigned date.
+const scheduleDrivenEditBodyCLI = `{"id":42,"publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":1,"texts":[{"text":"old","source_id":0}],"attachments":[],"selected_pages_by_source_ids":{},"all_pages_ids_by_source_ids":{},"schedule_id":7,"project_id":0}`
+
+// movedEditBodyCLI is the post-move read: schedule swapped to the target,
+// server-assigned publication_date 15.01.2027.
+const movedEditBodyCLI = `{"id":42,"publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":1,"texts":[{"text":"old","source_id":0}],"attachments":[],"selected_pages_by_source_ids":{},"all_pages_ids_by_source_ids":{},"schedule_id":55576,"project_id":0,"publication_date":{"date":"15.01.2027","hours":"12","minutes":"25"}}`
+
 // TestRunMovePost_ReportsPublicationDate verifies the CLI core surfaces
 // the server-assigned publication_date in its JSON output — the
 // load-bearing output of a move (a months-long delay is silent without
@@ -30,17 +38,25 @@ func newCLITestClient(t *testing.T, srv *httptest.Server) *hooppy.Client {
 // 15.01.2027; the CLI must encode that in stdout.
 func TestRunMovePost_ReportsPublicationDate(t *testing.T) {
 	var getCalls int
+	var postCalled, putCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			getCalls++
 			if getCalls == 1 {
-				w.Write([]byte(`{"id":42,"publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":1,"texts":[{"text":"old","source_id":0}],"attachments":[],"selected_pages_by_source_ids":{},"all_pages_ids_by_source_ids":{},"schedule_id":7,"project_id":0}`))
+				w.Write([]byte(scheduleDrivenEditBodyCLI))
 			} else {
-				w.Write([]byte(`{"id":42,"publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":1,"texts":[{"text":"old","source_id":0}],"attachments":[],"selected_pages_by_source_ids":{},"all_pages_ids_by_source_ids":{},"schedule_id":55576,"project_id":0,"publication_date":{"date":"15.01.2027","hours":"12","minutes":"25"}}`))
+				w.Write([]byte(movedEditBodyCLI))
 			}
+		case http.MethodPost:
+			if r.URL.Path == "/posts/batch/move" {
+				postCalled = true
+				w.Write([]byte(`{"success":true}`))
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		case http.MethodPut:
-			w.Write([]byte(`{"success":true}`))
+			putCalled = true
 		}
 	}))
 	defer srv.Close()
@@ -50,6 +66,12 @@ func TestRunMovePost_ReportsPublicationDate(t *testing.T) {
 	code := runMovePost(context.Background(), c, &out, &errOut, 42, 55576)
 	if code != 0 {
 		t.Fatalf("runMovePost exit = %d, want 0; stderr: %s", code, errOut.String())
+	}
+	if !postCalled {
+		t.Fatal("POST /posts/batch/move was never issued — MovePost must move via the batch endpoint")
+	}
+	if putCalled {
+		t.Fatal("PUT /posts/{id} was issued — MovePost must NOT use the full-state PUT")
 	}
 	stdout := out.String()
 	if !strings.Contains(stdout, "\"schedule_id\": 55576") {
@@ -78,6 +100,45 @@ func TestRunMovePost_ZeroTargetSchedule_Refuses(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("runMovePost with toScheduleID=0: a request was issued before the guard errored")
+	}
+}
+
+// TestRunMovePost_EpochDate_WarnsOnStderr verifies the CLI core surfaces
+// the stopped-schedule warning on stderr when the recovered date is
+// 01.01.1970 — the operator must see the stopped-schedule trap.
+func TestRunMovePost_EpochDate_WarnsOnStderr(t *testing.T) {
+	var getCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCalls++
+			if getCalls == 1 {
+				w.Write([]byte(scheduleDrivenEditBodyCLI))
+			} else {
+				w.Write([]byte(`{"id":42,"publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":1,"texts":[{"text":"old","source_id":0}],"attachments":[],"selected_pages_by_source_ids":{},"all_pages_ids_by_source_ids":{},"schedule_id":55576,"project_id":0,"publication_date":{"date":"01.01.1970","hours":"00","minutes":"00"}}`))
+			}
+		case http.MethodPost:
+			if r.URL.Path == "/posts/batch/move" {
+				w.Write([]byte(`{"success":true}`))
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+	c := newCLITestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runMovePost(context.Background(), c, &out, &errOut, 42, 55576)
+	if code != 0 {
+		t.Fatalf("runMovePost exit = %d, want 0 — an epoch date is a successful move into a stopped schedule, not an error; stderr: %s", code, errOut.String())
+	}
+	stderr := errOut.String()
+	if !strings.Contains(stderr, "01.01.1970") {
+		t.Errorf("stderr missing the epoch date in the warning — the operator must see the stopped-schedule trap: %s", stderr)
+	}
+	if !strings.Contains(stderr, "STOPPED") {
+		t.Errorf("stderr missing \"STOPPED\" in the warning: %s", stderr)
 	}
 }
 
@@ -134,7 +195,7 @@ func TestRunScheduleQueue_SummarySurfacesTotalRowsAndBookedUntil(t *testing.T) {
 	c := newCLITestClient(t, srv)
 
 	var out, errOut bytes.Buffer
-	code := runScheduleQueue(context.Background(), c, &out, &errOut, 55576, false)
+	code := runScheduleQueue(context.Background(), c, &out, &errOut, 55576, "", "", 0, false)
 	if code != 0 {
 		t.Fatalf("runScheduleQueue exit = %d, want 0; stderr: %s", code, errOut.String())
 	}
@@ -146,7 +207,7 @@ func TestRunScheduleQueue_SummarySurfacesTotalRowsAndBookedUntil(t *testing.T) {
 		t.Errorf("stdout missing the booked-until date 01.02.2027 — the LAST day with posts MUST appear in the default summary: %s", stdout)
 	}
 	if !strings.Contains(stdout, "15.01.2027") {
-		t.Errorf("stdout missing the next-slot date 15.01.2027: %s", stdout)
+		t.Errorf("stdout missing the first-booked-day 15.01.2027: %s", stdout)
 	}
 }
 
@@ -161,7 +222,7 @@ func TestRunScheduleQueue_JSONOutput(t *testing.T) {
 	c := newCLITestClient(t, srv)
 
 	var out, errOut bytes.Buffer
-	code := runScheduleQueue(context.Background(), c, &out, &errOut, 55576, true)
+	code := runScheduleQueue(context.Background(), c, &out, &errOut, 55576, "", "", 0, true)
 	if code != 0 {
 		t.Fatalf("runScheduleQueue --json exit = %d, want 0; stderr: %s", code, errOut.String())
 	}
@@ -180,6 +241,8 @@ func TestRunScheduleQueue_JSONOutput(t *testing.T) {
 
 // TestRunScheduleQueue_IssuesExactlyOneRequest verifies the CLI core
 // issues exactly ONE request (no paged walk) — the issue #106 contract.
+// is_has_more=true returns exit 1 (truncation warning) but still only one
+// request.
 func TestRunScheduleQueue_IssuesExactlyOneRequest(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -191,12 +254,59 @@ func TestRunScheduleQueue_IssuesExactlyOneRequest(t *testing.T) {
 	c := newCLITestClient(t, srv)
 
 	var out, errOut bytes.Buffer
-	code := runScheduleQueue(context.Background(), c, &out, &errOut, 55576, false)
-	if code != 0 {
-		t.Fatalf("runScheduleQueue exit = %d, want 0; stderr: %s", code, errOut.String())
+	code := runScheduleQueue(context.Background(), c, &out, &errOut, 55576, "", "", 0, false)
+	// is_has_more=true → exit 1 (truncation warning), NOT 0 — a partial
+	// answer must not look complete to a script.
+	if code != 1 {
+		t.Fatalf("runScheduleQueue exit = %d, want 1 — is_has_more=true is a PARTIAL result; the exit code must signal incompleteness; stderr: %s", code, errOut.String())
 	}
 	if calls != 1 {
 		t.Errorf("runScheduleQueue issued %d requests, want exactly 1 — issue #106 forbids a paged walk even when is_has_more is true", calls)
+	}
+	// The truncation warning MUST name --from/--to as the recovery levers.
+	stderr := errOut.String()
+	if !strings.Contains(stderr, "PARTIAL") {
+		t.Errorf("stderr missing \"PARTIAL\" in the truncation warning: %s", stderr)
+	}
+	if !strings.Contains(stderr, "--from/--to") {
+		t.Errorf("stderr missing \"--from/--to\" — the warning must name the recovery levers: %s", stderr)
+	}
+}
+
+// TestRunScheduleQueue_TruncatedSuppressesBookedUntil verifies that when
+// is_has_more=true the summary OMITS booked_until (the last day of page
+// one is NOT the real booked-until date) and warns loudly. This is the
+// silent-truncation defect #106 exists to remove.
+func TestRunScheduleQueue_TruncatedSuppressesBookedUntil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1}],"31.01.2027":[{"id":2}]},"total_rows":500,"rows_limit":1000,"is_has_more":true}`))
+	}))
+	defer srv.Close()
+	c := newCLITestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runScheduleQueue(context.Background(), c, &out, &errOut, 55576, "", "", 0, false)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 — a truncated result must not exit 0; stderr: %s", code, errOut.String())
+	}
+	stdout := out.String()
+	// booked_until MUST be omitted (omitempty + IsHasMore guard).
+	if strings.Contains(stdout, "booked_until") {
+		// Check it's not a non-empty value — the key may appear with an
+		// empty string if omitempty is missing.
+		if strings.Contains(stdout, `"booked_until": "31.01.2027"`) {
+			t.Errorf("stdout carries booked_until 31.01.2027 — a truncated response's last day is the last day of page ONE, not the real booked-until date; it MUST be omitted: %s", stdout)
+		}
+	}
+	// total_rows MUST still appear (it is the real depth regardless of
+	// truncation).
+	if !strings.Contains(stdout, `"total_rows": 500`) {
+		t.Errorf("stdout missing total_rows 500 — the real depth must appear even when truncated: %s", stdout)
+	}
+	// The warning MUST name the truncation and the recovery levers.
+	stderr := errOut.String()
+	if !strings.Contains(stderr, "booked_until") {
+		t.Errorf("stderr warning does not name booked_until: %s", stderr)
 	}
 }
 
@@ -212,7 +322,7 @@ func TestRunScheduleQueue_ZeroScheduleID_Refuses(t *testing.T) {
 	c := newCLITestClient(t, srv)
 
 	var out, errOut bytes.Buffer
-	code := runScheduleQueue(context.Background(), c, &out, &errOut, 0, false)
+	code := runScheduleQueue(context.Background(), c, &out, &errOut, 0, "", "", 0, false)
 	if code == 0 {
 		t.Fatal("runScheduleQueue with scheduleID=0: exit 0, want non-zero")
 	}
@@ -221,21 +331,81 @@ func TestRunScheduleQueue_ZeroScheduleID_Refuses(t *testing.T) {
 	}
 }
 
-// TestPostsMoveCommand_Registered verifies the `posts move` subcommand is
-// wired into the CLI root (a command defined but never registered is the
-// failure class this repo has shipped). It runs the binary's --help to
-// confirm the command appears.
-func TestPostsMoveCommand_Registered(t *testing.T) {
-	// Build and run `hooppy posts --help` to confirm "move" is listed.
-	// This is a smoke test for the registration; the behaviour is covered
-	// by the runMovePost/runBatchMove tests above.
-	if os.Getenv("HOOPPY_CLI_MOVE_REG_TEST") == "1" {
-		// Placeholder for an in-binary test; the registration is exercised
-		// by the cobra root in main_test.go if present.
-		return
+// TestRunScheduleQueue_DateFromPassedToEndpoint verifies the --from flag
+// is forwarded as date_from to the endpoint — the recovery lever for a
+// truncated result.
+func TestRunScheduleQueue_DateFromPassedToEndpoint(t *testing.T) {
+	var gotDateFrom string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotDateFrom = r.URL.Query().Get("date_from")
+		w.Write([]byte(`{"posts_by_days":{},"total_rows":0,"rows_limit":1000,"is_has_more":false}`))
+	}))
+	defer srv.Close()
+	c := newCLITestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	_ = runScheduleQueue(context.Background(), c, &out, &errOut, 55576, "01.03.2027", "", 0, false)
+	if gotDateFrom != "01.03.2027" {
+		t.Errorf("date_from query param = %q, want \"01.03.2027\" — the --from flag must be forwarded to narrow a truncated calendar", gotDateFrom)
 	}
-	// No binary build in unit tests; the registration is verified by the
-	// runMovePost/runBatchMove tests calling the same cores the command
-	// dispatches to. This test is a stub that passes when the build
-	// succeeds (the command registration is in the same package).
+}
+
+// --- resolveMoveTarget tests (item E: replace the stub) ---
+
+// TestResolveMoveTarget_PositionalOnly is the single-post path: a
+// positional arg with no --ids flag produces a non-batch target carrying
+// the parsed id.
+func TestResolveMoveTarget_PositionalOnly(t *testing.T) {
+	target, err := resolveMoveTarget([]string{"42"}, "")
+	if err != nil {
+		t.Fatalf("resolveMoveTarget: %v", err)
+	}
+	if target.batch {
+		t.Error("batch = true, want false — a positional arg is a single-post move")
+	}
+	if target.singleID != 42 {
+		t.Errorf("singleID = %d, want 42", target.singleID)
+	}
+}
+
+// TestResolveMoveTarget_IDsFlagOnly is the batch path: --ids with no
+// positional produces a batch target carrying the parsed ids.
+func TestResolveMoveTarget_IDsFlagOnly(t *testing.T) {
+	target, err := resolveMoveTarget(nil, "1,2,3")
+	if err != nil {
+		t.Fatalf("resolveMoveTarget: %v", err)
+	}
+	if !target.batch {
+		t.Error("batch = false, want true — the --ids flag is a batch move")
+	}
+	if len(target.ids) != 3 {
+		t.Fatalf("len(ids) = %d, want 3", len(target.ids))
+	}
+	if target.ids[0] != 1 || target.ids[2] != 3 {
+		t.Errorf("ids = %v, want [1,2,3]", target.ids)
+	}
+}
+
+// TestResolveMoveTarget_BothPresent_IsError is the mutual-exclusion guard:
+// passing BOTH a positional and --ids is an error.
+func TestResolveMoveTarget_BothPresent_IsError(t *testing.T) {
+	if _, err := resolveMoveTarget([]string{"42"}, "1,2"); err == nil {
+		t.Fatal("resolveMoveTarget with both positional and --ids: expected an error, got nil — they are mutually exclusive")
+	}
+}
+
+// TestResolveMoveTarget_NeitherPresent_IsError is the presence guard:
+// passing NEITHER a positional nor --ids is an error.
+func TestResolveMoveTarget_NeitherPresent_IsError(t *testing.T) {
+	if _, err := resolveMoveTarget(nil, ""); err == nil {
+		t.Fatal("resolveMoveTarget with neither positional nor --ids: expected an error, got nil — one is required")
+	}
+}
+
+// TestResolveMoveTarget_NonIntegerPositional_IsError verifies a
+// non-integer positional is refused with a clear error.
+func TestResolveMoveTarget_NonIntegerPositional_IsError(t *testing.T) {
+	if _, err := resolveMoveTarget([]string{"abc"}, ""); err == nil {
+		t.Fatal("resolveMoveTarget with positional \"abc\": expected an error, got nil — the positional must be an integer")
+	}
 }

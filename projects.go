@@ -485,14 +485,41 @@ func (c *Client) GetScheduleEdit(ctx context.Context, id int) (*ScheduleEditResp
 // returns the full calendar in one envelope, and paging would issue
 // multiple requests against a one-request contract).
 //
+// dateFrom/dateTo (dd.mm.yyyy, "" = unset) narrow the calendar window the
+// server returns; page (0 = unset, 1-indexed) selects a page. These are the
+// parameters the endpoint accepts to recover a TRUNCATED result: when the
+// queue is deeper than rows_limit the server returns is_has_more=true with
+// only the first page, and the caller MUST narrow with dateFrom/dateTo (or
+// advance page) to see the rest — the one-request contract forbids an
+// automatic paged walk. The CLI surfaces is_has_more as a loud warning and
+// suppresses booked_until when set (see cmd/hooppy runScheduleQueue); total_rows
+// is the real depth regardless of truncation.
+//
 // UNDOCUMENTED: GET /posts/schedules/{id}/posts is not in the public OpenAPI
 // spec. Discovered via API probing — may change without notice.
-func (c *Client) ListSchedulePosts(ctx context.Context, scheduleID int) (*SchedulePostsResponse, error) {
+func (c *Client) ListSchedulePosts(ctx context.Context, scheduleID int, dateFrom, dateTo string, page int) (*SchedulePostsResponse, error) {
 	if scheduleID == 0 {
 		return nil, fmt.Errorf("hooppy: ListSchedulePosts: scheduleID is required (got 0)")
 	}
+	// Reject negatives before any request (same defect class as the
+	// ListPosts/ListSchedules page guard): a negative page takes neither
+	// branch — no error, no page param, the server returns page 1. Zero
+	// stays the unset sentinel.
+	if page < 0 {
+		return nil, fmt.Errorf("hooppy: ListSchedulePosts: page must be non-negative (got %d); pass 0 to leave unset", page)
+	}
+	params := url.Values{}
+	if dateFrom != "" {
+		params.Set("date_from", dateFrom)
+	}
+	if dateTo != "" {
+		params.Set("date_to", dateTo)
+	}
+	if page > 0 {
+		params.Set("page", strconv.Itoa(page))
+	}
 	var resp SchedulePostsResponse
-	if err := c.doGET(ctx, fmt.Sprintf(pathSchedulePosts, scheduleID), nil, &resp, true); err != nil {
+	if err := c.doGET(ctx, fmt.Sprintf(pathSchedulePosts, scheduleID), params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil

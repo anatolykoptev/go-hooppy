@@ -44,7 +44,7 @@ func TestListSchedulePosts_IssuesExactlyOneRequest(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	resp, err := c.ListSchedulePosts(context.Background(), 55576)
+	resp, err := c.ListSchedulePosts(context.Background(), 55576, "", "", 0)
 	if err != nil {
 		t.Fatalf("ListSchedulePosts: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestListSchedulePosts_ZeroScheduleID_RefusesRequest(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	if _, err := c.ListSchedulePosts(context.Background(), 0); err == nil {
+	if _, err := c.ListSchedulePosts(context.Background(), 0, "", "", 0); err == nil {
 		t.Fatal("ListSchedulePosts with scheduleID=0: expected an error, got nil")
 	}
 	if reached {
@@ -86,7 +86,7 @@ func TestListSchedulePosts_EmptyQueue(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	resp, err := c.ListSchedulePosts(context.Background(), 55576)
+	resp, err := c.ListSchedulePosts(context.Background(), 55576, "", "", 0)
 	if err != nil {
 		t.Fatalf("ListSchedulePosts: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestListSchedulePosts_DecodesPostFields(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	resp, err := c.ListSchedulePosts(context.Background(), 55576)
+	resp, err := c.ListSchedulePosts(context.Background(), 55576, "", "", 0)
 	if err != nil {
 		t.Fatalf("ListSchedulePosts: %v", err)
 	}

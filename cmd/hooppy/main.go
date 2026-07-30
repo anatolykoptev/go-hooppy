@@ -263,7 +263,7 @@ func registerPosts(root *cobra.Command) {
 	// assigns the new publication_date, which is reported per post (moving
 	// into a booked schedule is a silent months-long delay otherwise).
 	moveCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
-		Name:  "move",
+		Name:  "move [post-id]",
 		Short: "Move a post (or batch) to another schedule (undocumented)",
 	})
 	moveCmd.Args = cobra.MaximumNArgs(1)
@@ -273,22 +273,16 @@ func registerPosts(root *cobra.Command) {
 	moveCmd.Flags().IntVar(&moveToSchedule, "to-schedule", 0, "target schedule ID (required)")
 	_ = moveCmd.MarkFlagRequired("to-schedule")
 	moveCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) > 0 && moveIDs != "" {
-			fmt.Fprintln(os.Stderr, "error: positional post-id and --ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
+		target, err := resolveMoveTarget(args, moveIDs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
 		c := mustClient()
-		if moveIDs != "" {
-			ids := parseIntList(moveIDs)
-			os.Exit(runBatchMove(context.Background(), c, os.Stdout, os.Stderr, ids, moveToSchedule))
+		if target.batch {
+			os.Exit(runBatchMove(context.Background(), c, os.Stdout, os.Stderr, target.ids, moveToSchedule))
 		}
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "error: posts move requires a positional post-id or --ids")
-			os.Exit(1)
-		}
-		id, err := strconv.Atoi(args[0])
-		die(err)
-		os.Exit(runMovePost(context.Background(), c, os.Stdout, os.Stderr, id, moveToSchedule))
+		os.Exit(runMovePost(context.Background(), c, os.Stdout, os.Stderr, target.singleID, moveToSchedule))
 	}
 
 	// posts edit — view a post's full editable state
@@ -583,20 +577,25 @@ func registerSchedules(root *cobra.Command) {
 
 	// schedules queue — show a schedule's queue depth and booked-until date
 	// (undocumented). One request; no paged walk. Default output summarizes
-	// depth, next slot, booked-until, and per-day counts; --json prints the
-	// raw envelope.
+	// depth, first booked day, booked-until, and per-day counts; --json
+	// prints the raw envelope. --from/--to narrow a truncated calendar
+	// (is_has_more=true); booked_until is omitted and a loud warning emitted
+	// when the response is partial.
 	queueCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
-		Name:  "queue",
+		Name:  "queue <schedule-id>",
 		Short: "Show a schedule's queue depth and booked-until date (undocumented endpoint)",
 	})
 	queueCmd.Args = cobra.ExactArgs(1)
 	var queueJSON bool
+	var queueFrom, queueTo string
 	queueCmd.Flags().BoolVar(&queueJSON, "json", false, "print the raw response envelope")
+	queueCmd.Flags().StringVar(&queueFrom, "from", "", "narrow the calendar start (dd.mm.yyyy) — recovers a truncated (is_has_more=true) result")
+	queueCmd.Flags().StringVar(&queueTo, "to", "", "narrow the calendar end (dd.mm.yyyy) — recovers a truncated (is_has_more=true) result")
 	queueCmd.Run = func(_ *cobra.Command, args []string) {
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
-		os.Exit(runScheduleQueue(context.Background(), c, os.Stdout, os.Stderr, id, queueJSON))
+		os.Exit(runScheduleQueue(context.Background(), c, os.Stdout, os.Stderr, id, queueFrom, queueTo, 0, queueJSON))
 	}
 }
 

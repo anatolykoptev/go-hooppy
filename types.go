@@ -1314,17 +1314,20 @@ type BatchMovePostsRequest struct {
 }
 
 // PostMoveResult is the outcome of a single-post MovePost (issue #105). The
-// PUT /posts/{id} response is just {"success":true}; the new publication_date
-// is recovered from a post-move GET /posts/{id}/edit, because a move re-slots
-// the post to the TAIL of the target queue and the server assigns the date —
-// moving into a booked schedule is a silent months-long delay otherwise
-// (measured: into schedule 55576 → 15.01.2027; into a stopped schedule →
-// 01.01.1970). ScheduleID is the target schedule the post was moved to.
+// POST /posts/batch/move response is just {"success":true}; the new
+// publication_date is recovered from a post-move GET /posts/{id}/edit, because
+// a move re-slots the post to the TAIL of the target queue and the server
+// assigns the date — moving into a booked schedule is a silent months-long
+// delay otherwise (measured: into a booked schedule → a date months out; into
+// a stopped schedule → 01.01.1970). ScheduleID is the target schedule the
+// post was moved to. Warning is non-empty when the recovered date is the
+// epoch or any past date — the signature of a move into a stopped schedule.
 type PostMoveResult struct {
 	Success         bool             `json:"success"`
 	ScheduleID      int              `json:"schedule_id"`
 	PublicationDate *PublicationDate `json:"publication_date,omitempty"`
 	SlotLookupError string           `json:"slot_lookup_error,omitempty"`
+	Warning         string           `json:"warning,omitempty"`
 }
 
 // MovedPost is one entry in a BatchMovePosts result. The batch endpoint
@@ -1332,12 +1335,15 @@ type PostMoveResult struct {
 // publication_date is recovered from a post-move GET /posts/{id}/edit (one
 // read per id). A read failure populates SlotLookupError and leaves
 // PublicationDate nil — the move succeeded (the post exists in the target
-// schedule); the date is reporting.
+// schedule); the date is reporting. Warning is non-empty when the recovered
+// date is the epoch or any past date — the signature of a move into a stopped
+// schedule.
 type MovedPost struct {
 	ID              int              `json:"id"`
 	ScheduleID      int              `json:"schedule_id"`
 	PublicationDate *PublicationDate `json:"publication_date,omitempty"`
 	SlotLookupError string           `json:"slot_lookup_error,omitempty"`
+	Warning         string           `json:"warning,omitempty"`
 }
 
 // BatchMovePostsResult is the outcome of BatchMovePosts (issue #105).

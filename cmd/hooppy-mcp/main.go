@@ -966,25 +966,27 @@ type movePostInput struct {
 }
 
 // registerMovePost wires the single-post move path. It delegates to
-// hooppy.MovePost, which fetches the current post via GET /posts/{id}/edit,
-// sends the full state back via PUT /posts/{id} with schedule_id overridden
-// to the target (preserving texts, attachments, page selection, per-source
-// text variants, and project_id), then recovers the new publication_date
-// from a post-move GET /posts/{id}/edit. The date is the load-bearing
-// output: a move re-slots to the tail, and moving into a booked schedule
-// is a silent months-long delay otherwise.
+// hooppy.MovePost, which guards publication_when_type==3 via a pre-move
+// GET /posts/{id}/edit, then moves via POST /posts/batch/move (the same
+// server-side move the batch path uses, passing the single id) — the server
+// re-slots the post to the tail and preserves texts/attachments/page
+// selection (the body carries only posts_ids + schedule_id). The new
+// publication_date is recovered from a post-move GET /posts/{id}/edit. The
+// date is the load-bearing output: a move re-slots to the tail, and moving
+// into a booked schedule is a silent months-long delay otherwise.
 func registerMovePost(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name: "hooppy_move_post",
 			Description: "Move a single existing post to another schedule, preserving its texts, attachments, page selection and per-source text variants. " +
 				"A move RE-SLOTS the post to the TAIL of the target queue — the server assigns the new publication_date, which is returned in the result. " +
-				"Moving into a booked schedule can delay the post by months (measured: into schedule 55576 → 15.01.2027); the returned publication_date is how the caller sees that delay. " +
+				"Moving into a booked schedule can delay the post by months; the returned publication_date is how the caller sees that delay. " +
+				"Only a schedule-driven post (publication_when_type=3) can be moved; a non-schedule post is refused. " +
 				"UNDOCUMENTED endpoint — may change without notice.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in movePostInput) (*mcp.CallToolResult, error) {
-			if in.ID == 0 {
-				return errResult("id is required")
+			if in.ID <= 0 {
+				return errResult("id is required (a positive post id) — an impossible id is accepted by the server and fabricates a success entry")
 			}
 			if in.ToScheduleID == 0 {
 				return errResult("to_schedule_id is required — a move targeted at no schedule would publish to nothing")
@@ -1028,6 +1030,11 @@ func registerBatchMovePosts(server *mcp.Server) {
 			if len(in.IDs) == 0 {
 				return errResult("ids is required (at least one post ID)")
 			}
+			for _, id := range in.IDs {
+				if id <= 0 {
+					return errResult(fmt.Sprintf("ids must all be positive post ids (got %d) — an impossible id is accepted by the server and fabricates a success entry", id))
+				}
+			}
 			if in.ToScheduleID == 0 {
 				return errResult("to_schedule_id is required — a move targeted at no schedule would publish to nothing")
 			}
@@ -1047,21 +1054,28 @@ func registerBatchMovePosts(server *mcp.Server) {
 // --- list_schedule_posts (undocumented) ---
 
 type listSchedulePostsInput struct {
-	ScheduleID int `json:"schedule_id" jsonschema:"Schedule ID to show the queue for (use list_schedules to find IDs). REQUIRED."`
+	ScheduleID int    `json:"schedule_id" jsonschema:"Schedule ID to show the queue for (use list_schedules to find IDs). REQUIRED."`
+	DateFrom   string `json:"date_from,omitempty" jsonschema:"Narrow the calendar start (dd.mm.yyyy). Use this to recover a TRUNCATED result (is_has_more=true)."`
+	DateTo     string `json:"date_to,omitempty" jsonschema:"Narrow the calendar end (dd.mm.yyyy). Use this to recover a TRUNCATED result (is_has_more=true)."`
 }
 
 // registerListSchedulePosts wires the schedule-queue read. It delegates to
 // hooppy.ListSchedulePosts, which issues exactly ONE GET
 // /posts/schedules/{id}/posts and returns the queue depth (total_rows) and
 // the per-day calendar (posts_by_days). The LAST key in posts_by_days is
-// the booked-until date. No paged walk — the endpoint returns the whole
-// calendar in one envelope.
+// the booked-until date — but ONLY when is_has_more is false; a truncated
+// response's last day key is the last day of page one, not the real
+// booked-until date, so the caller MUST check is_has_more and narrow with
+// date_from/date_to when it is true. No paged walk — the endpoint returns
+// the whole calendar in one envelope (or a truncated first page; narrow to
+// recover the rest).
 func registerListSchedulePosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name: "hooppy_list_schedule_posts",
 			Description: "Show a schedule's queue — its depth (total_rows) and per-day calendar (posts_by_days, keyed dd.mm.yyyy) — in ONE request. " +
-				"The LAST key in posts_by_days is the booked-until date. Use this before moving posts INTO a schedule to see how far out the queue runs. " +
+				"The LAST key in posts_by_days is the booked-until date ONLY when is_has_more is false; when is_has_more is true the result is TRUNCATED to the first page and the caller MUST narrow with date_from/date_to to recover the rest. " +
+				"Use this before moving posts INTO a schedule to see how far out the queue runs. " +
 				"UNDOCUMENTED endpoint — may change without notice.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listSchedulePostsInput) (*mcp.CallToolResult, error) {
@@ -1072,7 +1086,7 @@ func registerListSchedulePosts(server *mcp.Server) {
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListSchedulePosts(ctx, in.ScheduleID)
+			resp, err := c.ListSchedulePosts(ctx, in.ScheduleID, in.DateFrom, in.DateTo, 0)
 			if err != nil {
 				return errResult(err.Error())
 			}
