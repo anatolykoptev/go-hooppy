@@ -335,6 +335,70 @@ func TestListSchedulePostsTool_TruncationWarningIsStructuredData(t *testing.T) {
 	}
 }
 
+// TestListSchedulePostsTool_PageOverrunWarningIsStructuredData covers the
+// page-overrun branch on the MCP side. The CLI half has
+// TestRunScheduleQueue_PagePastEnd_WarnsAndExits2; without this test the MCP
+// half was unguarded, and neutralising its `case in.Page > 0 && …` branch left
+// the whole cmd/hooppy-mcp package green — the #81 class (one front-end
+// guarded, the sibling not) landing on the fix for that very class.
+//
+// Measured live 2026-07-30: page=2 and page=99 against a 96-row schedule both
+// answer 200 with total_rows=96 and ZERO day keys. So total_rows is the
+// collection total and does not change with paging — `len(posts_by_days) == 0
+// && total_rows > 0` is the only signal that detects an overrun, which is why
+// a missing guard here reads as a complete empty calendar.
+func TestListSchedulePostsTool_PageOverrunWarningIsStructuredData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The live shape of a page past the end: the collection total is
+		// unchanged, the calendar is empty, and is_has_more is FALSE — so the
+		// truncation branch cannot catch this one.
+		w.Write([]byte(`{"posts_by_days":{},"total_rows":96,"rows_limit":200,"is_has_more":false}`))
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+	cs := newMCPClientSession(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "hooppy_list_schedule_posts",
+		Arguments: map[string]any{
+			"schedule_id": 55576,
+			"page":        2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned IsError=true for a page overrun — total_rows is still the real depth, so the data is useful; the signal belongs in a structured field: %s", toolResultText(res))
+	}
+	resultText := toolResultText(res)
+	var env map[string]any
+	if err := json.Unmarshal([]byte(resultText), &env); err != nil {
+		t.Fatalf("result is not valid JSON — the overrun signal must travel as a structured `warning` field: %v\ntext: %s", err, resultText)
+	}
+	warning, ok := env["warning"].(string)
+	if !ok || warning == "" {
+		t.Fatalf("result JSON has no non-empty `warning` field — a page past the end is NOT a complete result, and an agent walking pages to recover a truncation would read this as done: %s", resultText)
+	}
+	if !strings.Contains(warning, "PARTIAL") {
+		t.Errorf("warning missing \"PARTIAL\": %s", warning)
+	}
+	if !strings.Contains(warning, "past the end") {
+		t.Errorf("warning must say the page is past the end, so the reader knows to lower it: %s", warning)
+	}
+	// The depth must survive: total_rows is the answer the caller still needs.
+	if got, ok := env["total_rows"].(float64); !ok || int(got) != 96 {
+		t.Errorf("total_rows = %v, want 96 — the collection total must still be reported alongside the warning: %s", env["total_rows"], resultText)
+	}
+	// is_has_more is false here, which is exactly why the truncation branch
+	// cannot cover this case. Pin it so a future refactor that folds the two
+	// branches together fails instead of silently losing the overrun signal.
+	if got, ok := env["is_has_more"].(bool); ok && got {
+		t.Errorf("fixture drift: is_has_more must be false for the overrun case, otherwise this test passes via the truncation branch and stops guarding the overrun one")
+	}
+}
+
 // TestListSchedulePostsTool_PageFieldPassedToEndpoint verifies the page
 // field on the MCP input is forwarded to the endpoint (item B).
 func TestListSchedulePostsTool_PageFieldPassedToEndpoint(t *testing.T) {
