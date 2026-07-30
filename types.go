@@ -1,8 +1,10 @@
 package hooppy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -991,6 +993,21 @@ func (f *FlexInt) UnmarshalJSON(b []byte) error {
 	}
 	// Validate: must be a number or a quoted string. Reject objects/arrays
 	// outright so a shape change is loud, not silent.
+	//
+	// A container is reported as a *json.UnmarshalTypeError specifically. The
+	// error TYPE is load-bearing, not decoration: the fixture gate classifies
+	// a decode failure by errors.As, and a fmt.Errorf around a strconv error —
+	// which this returned until 2026-07-30 — reads as a VALUE problem. A shape
+	// regression landing on any FlexInt field was then invisible to both
+	// oracles at once. "Loud" has to mean loud in the channel someone listens
+	// on.
+	if s[0] == '[' || s[0] == '{' {
+		kind := "array"
+		if s[0] == '{' {
+			kind = "object"
+		}
+		return &json.UnmarshalTypeError{Value: kind, Type: reflect.TypeOf(FlexInt{})}
+	}
 	if s[0] == '"' {
 		var str string
 		if err := json.Unmarshal(b, &str); err != nil {
@@ -1352,15 +1369,96 @@ type BatchMovePostsResult struct {
 	Moved   []MovedPost `json:"moved"`
 }
 
+// ScheduleDay is one day's cell in the calendar returned by
+// GET /posts/schedules/{id}/posts. The day's dd.mm.yyyy date is the MAP KEY;
+// DayName and DayDate are the server's DISPLAY strings for that same date,
+// measured live 2026-07-30 as "Пт" and "1 Января" on a ru account.
+//
+// Do not derive them from the key: they are localised by the server, and only
+// the ru rendering has been observed. Read them, do not reconstruct them.
+//
+// Measured live 2026-07-30: the day value is an OBJECT, not a bare post array.
+// It was first declared as []Post, which made every decode of this endpoint
+// fail — see TestLiveFixtureDecodes.
+type ScheduleDay struct {
+	DayName string `json:"day_name"` // short weekday, e.g. "Пт"
+	DayDate string `json:"day_date"` // display date, e.g. "1 Января"
+	Posts   []Post `json:"posts"`
+}
+
+// ScheduleCalendar is the posts_by_days calendar: dd.mm.yyyy → that day's
+// cell. It exists as a named type solely to carry UnmarshalJSON.
+//
+// An EMPTY posts_by_days arrives as a JSON list, `[]`, while a populated one
+// arrives as an object. A plain map[string]ScheduleDay field aborts the ENTIRE
+// decode on the empty case — taking total_rows with it, which is the one
+// number the caller still needs there.
+//
+// Measured live 2026-07-30, three independent ways, always `[]` and never `{}`:
+// a page past the end (total_rows 96), a date window with no days in it
+// (total_rows 0), and a schedule with an empty queue.
+//
+// The cause is PHP's json_encode, which cannot distinguish an empty
+// associative array from an empty list — but do NOT generalise that to the
+// whole API: testdata/live/schedule_edit.json records
+// selected_albums_by_source_ids and selected_pages_by_source_ids as `{}`, two
+// empty PHP associative arrays that arrive as objects. The `[]` form is
+// measured for THIS field; adding UnmarshalJSON to other map fields on the
+// strength of the general claim would be cargo-culting it.
+type ScheduleCalendar map[string]ScheduleDay
+
+// MarshalJSON emits `{}` for a nil calendar rather than `null`. Both
+// front-ends re-emit this envelope verbatim, and the repo's own rule for
+// day_counts is that the output shape must not change between branches.
+func (c ScheduleCalendar) MarshalJSON() ([]byte, error) {
+	if c == nil {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(map[string]ScheduleDay(c))
+}
+
+// UnmarshalJSON accepts the object form and PHP's empty-list form. A NON-empty
+// list is still an error: that would be a real shape change, not this quirk.
+func (c *ScheduleCalendar) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var list []json.RawMessage
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			return err
+		}
+		if len(list) > 0 {
+			return fmt.Errorf("posts_by_days: got a JSON array of %d elements; only the EMPTY array is accepted (PHP's encoding of an empty calendar), a populated calendar must be an object", len(list))
+		}
+		*c = ScheduleCalendar{}
+		return nil
+	}
+	var m map[string]ScheduleDay
+	if err := json.Unmarshal(trimmed, &m); err != nil {
+		return err
+	}
+	if m == nil {
+		// `null`, or the field absent from an object we still decode: make the
+		// non-nil guarantee unconditional rather than true-for-two-encodings.
+		m = map[string]ScheduleDay{}
+	}
+	*c = m
+	return nil
+}
+
 // SchedulePostsResponse is the envelope for GET /posts/schedules/{id}/posts
-// (issue #106). PostsByDays is keyed dd.mm.yyyy → the posts scheduled for
-// that day. TotalRows is the queue depth; the LAST key in PostsByDays is the
-// booked-until date. One call returns the whole calendar — no paged walk.
+// (issue #106). PostsByDays is keyed dd.mm.yyyy → that day's cell. TotalRows is
+// the queue depth. One call returns the whole calendar — no paged walk.
+//
+// The LAST key in PostsByDays is the booked-until date ONLY when IsHasMore is
+// false AND the query was not narrowed by date or page: a narrowed query's last
+// key is the WINDOW's last day. The caveat is on ListSchedulePosts and on both
+// front-ends, and it belongs here too — this is the value a caller actually
+// holds.
 type SchedulePostsResponse struct {
-	PostsByDays map[string][]Post `json:"posts_by_days"`
-	TotalRows   int               `json:"total_rows"`
-	RowsLimit   int               `json:"rows_limit"`
-	IsHasMore   bool              `json:"is_has_more"`
+	PostsByDays ScheduleCalendar `json:"posts_by_days"`
+	TotalRows   int              `json:"total_rows"`
+	RowsLimit   int              `json:"rows_limit"`
+	IsHasMore   bool             `json:"is_has_more"`
 }
 
 // UploadMediaResponse is returned by POST /files/media/upload.

@@ -189,7 +189,7 @@ func TestRunBatchMove_ReportsPerPostDates(t *testing.T) {
 // two values an operator needs before moving posts INTO a schedule.
 func TestRunScheduleQueue_SummarySurfacesTotalRowsAndBookedUntil(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1,"text":"a"}],"01.02.2027":[{"id":2,"text":"b"}]},"total_rows":2,"rows_limit":1000,"is_has_more":false}`))
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":{"day_name":"Пт","day_date":"15 Января","posts":[{"id":1,"text":"a"}]},"01.02.2027":{"day_name":"Пн","day_date":"1 Февраля","posts":[{"id":2,"text":"b"}]}},"total_rows":2,"rows_limit":1000,"is_has_more":false}`))
 	}))
 	defer srv.Close()
 	c := newCLITestClient(t, srv)
@@ -216,7 +216,7 @@ func TestRunScheduleQueue_SummarySurfacesTotalRowsAndBookedUntil(t *testing.T) {
 // transformation.
 func TestRunScheduleQueue_JSONOutput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1,"text":"a"}]},"total_rows":1,"rows_limit":1000,"is_has_more":false}`))
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":{"day_name":"Пт","day_date":"15 Января","posts":[{"id":1,"text":"a"}]}},"total_rows":1,"rows_limit":1000,"is_has_more":false}`))
 	}))
 	defer srv.Close()
 	c := newCLITestClient(t, srv)
@@ -249,7 +249,7 @@ func TestRunScheduleQueue_IssuesExactlyOneRequest(t *testing.T) {
 		calls++
 		// is_has_more=true would tempt a paged walk; the contract forbids it.
 		// rows_limit=200 matches the measured live limit (issue #116).
-		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1}]},"total_rows":1,"rows_limit":200,"is_has_more":true}`))
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":{"day_name":"Пт","day_date":"15 Января","posts":[{"id":1}]}},"total_rows":1,"rows_limit":200,"is_has_more":true}`))
 	}))
 	defer srv.Close()
 	c := newCLITestClient(t, srv)
@@ -282,7 +282,7 @@ func TestRunScheduleQueue_IssuesExactlyOneRequest(t *testing.T) {
 func TestRunScheduleQueue_TruncatedSuppressesBookedUntil(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// rows_limit=200 matches the measured live limit (issue #116).
-		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1}],"31.01.2027":[{"id":2}]},"total_rows":500,"rows_limit":200,"is_has_more":true}`))
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":{"day_name":"Пт","day_date":"15 Января","posts":[{"id":1}]},"31.01.2027":{"day_name":"Вс","day_date":"31 Января","posts":[{"id":2}]}},"total_rows":500,"rows_limit":200,"is_has_more":true}`))
 	}))
 	defer srv.Close()
 	c := newCLITestClient(t, srv)
@@ -341,7 +341,7 @@ func TestRunScheduleQueue_DateFromPassedToEndpoint(t *testing.T) {
 	var gotDateFrom string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotDateFrom = r.URL.Query().Get("date_from")
-		w.Write([]byte(`{"posts_by_days":{},"total_rows":0,"rows_limit":200,"is_has_more":false}`))
+		w.Write([]byte(`{"posts_by_days":[],"total_rows":0,"rows_limit":200,"is_has_more":false}`))
 	}))
 	defer srv.Close()
 	c := newCLITestClient(t, srv)
@@ -365,7 +365,7 @@ func TestRunScheduleQueue_PagePassedToEndpoint(t *testing.T) {
 	var gotPage string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPage = r.URL.Query().Get("page")
-		w.Write([]byte(`{"posts_by_days":{},"total_rows":0,"rows_limit":200,"is_has_more":false}`))
+		w.Write([]byte(`{"posts_by_days":[],"total_rows":0,"rows_limit":200,"is_has_more":false}`))
 	}))
 	defer srv.Close()
 	c := newCLITestClient(t, srv)
@@ -394,7 +394,7 @@ func TestRunScheduleQueue_PagePastEnd_WarnsAndExits2(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// page=99 past the end: 200, total_rows=96 (collection total), zero
 		// day keys, is_has_more:false — the live page=2/page=99 signature.
-		w.Write([]byte(`{"posts_by_days":{},"total_rows":96,"rows_limit":200,"is_has_more":false}`))
+		w.Write([]byte(`{"posts_by_days":[],"total_rows":96,"rows_limit":200,"is_has_more":false}`))
 	}))
 	defer srv.Close()
 	c := newCLITestClient(t, srv)

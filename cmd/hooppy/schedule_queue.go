@@ -111,10 +111,6 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 			return 2
 		}
 		summary := buildScheduleQueueSummary(resp, scheduleID, dateFrom, dateTo, page)
-		// Force day_counts to an empty slice (not nil) so it marshals as []
-		// not null — the output shape must not change between branches.
-		if summary.DayCounts == nil {
-		}
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(summary); err != nil {
@@ -225,7 +221,7 @@ func buildScheduleQueueSummary(resp *hooppy.SchedulePostsResponse, scheduleID in
 	for _, k := range keys {
 		s.DayCounts = append(s.DayCounts, scheduleDayCount{
 			Day:   k.raw,
-			Count: len(resp.PostsByDays[k.raw]),
+			Count: len(resp.PostsByDays[k.raw].Posts),
 		})
 	}
 	// Schedule-wide first_booked_day/booked_until are emitted ONLY for an

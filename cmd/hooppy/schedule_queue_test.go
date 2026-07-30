@@ -13,16 +13,7 @@ import (
 // fixture is deliberately ordered so a raw-string sort would mis-order
 // "01.02.2027" before "31.01.2027" — the chronological-sort guard below
 // catches that bug.
-const schedulePostsBody = `{
-	"posts_by_days": {
-		"15.01.2027": [{"id":101,"text":"a"},{"id":102,"text":"b"}],
-		"31.01.2027": [{"id":103,"text":"c"}],
-		"01.02.2027": [{"id":104,"text":"d"}]
-	},
-	"total_rows": 4,
-	"rows_limit": 1000,
-	"is_has_more": false
-}`
+const schedulePostsBody = `{"posts_by_days":{"15.01.2027":{"day_name":"Пт","day_date":"15 Января","posts":[{"id":101,"text":"a"},{"id":102,"text":"b"}]},"31.01.2027":{"day_name":"Вс","day_date":"31 Января","posts":[{"id":103,"text":"c"}]},"01.02.2027":{"day_name":"Пн","day_date":"1 Февраля","posts":[{"id":104,"text":"d"}]}},"total_rows":4,"rows_limit":1000,"is_has_more":false}`
 
 // TestBuildScheduleQueueSummary_TotalRowsAndBookedUntil is the
 // output-shape guard for issue #106: the default summary MUST surface
@@ -84,7 +75,7 @@ func TestBuildScheduleQueueSummary_ChronologicalDayOrder(t *testing.T) {
 // {"total_rows":0,...} not {"first_booked_day":"","booked_until":""}).
 func TestBuildScheduleQueueSummary_EmptyQueue(t *testing.T) {
 	resp := &hooppy.SchedulePostsResponse{
-		PostsByDays: map[string][]hooppy.Post{},
+		PostsByDays: map[string]hooppy.ScheduleDay{},
 		TotalRows:   0,
 	}
 	s := buildScheduleQueueSummary(resp, 55576, "", "", 0)
@@ -140,9 +131,9 @@ func TestBuildScheduleQueueSummary_NilResponse(t *testing.T) {
 // is_has_more:true hits the separate IsHasMore branch, covered below.
 func TestBuildScheduleQueueSummary_PageOneIsNotNarrowed(t *testing.T) {
 	resp := &hooppy.SchedulePostsResponse{
-		PostsByDays: map[string][]hooppy.Post{
-			"31.07.2026": {{ID: 1}},
-			"12.01.2027": {{ID: 2}},
+		PostsByDays: map[string]hooppy.ScheduleDay{
+			"31.07.2026": {Posts: []hooppy.Post{{ID: 1}}},
+			"12.01.2027": {Posts: []hooppy.Post{{ID: 2}}},
 		},
 		TotalRows: 96,
 		IsHasMore: false,
@@ -166,7 +157,7 @@ func TestBuildScheduleQueueSummary_PageOneIsNotNarrowed(t *testing.T) {
 	// suppressed, first_booked_day kept (page one starts at the calendar's
 	// beginning, so its FIRST key is genuinely the schedule's first booked day).
 	trunc := &hooppy.SchedulePostsResponse{
-		PostsByDays: map[string][]hooppy.Post{"31.07.2026": {{ID: 1}}},
+		PostsByDays: map[string]hooppy.ScheduleDay{"31.07.2026": {Posts: []hooppy.Post{{ID: 1}}}},
 		TotalRows:   500, RowsLimit: 200, IsHasMore: true,
 	}
 	tp := buildScheduleQueueSummary(trunc, 55576, "", "", 1)
@@ -189,8 +180,8 @@ func TestScheduleQueueSummary_DayCountsMarshalsAsEmptyArray(t *testing.T) {
 		resp *hooppy.SchedulePostsResponse
 	}{
 		{"nil response", nil},
-		{"empty calendar", &hooppy.SchedulePostsResponse{PostsByDays: map[string][]hooppy.Post{}, TotalRows: 0}},
-		{"page past the end", &hooppy.SchedulePostsResponse{PostsByDays: map[string][]hooppy.Post{}, TotalRows: 96}},
+		{"empty calendar", &hooppy.SchedulePostsResponse{PostsByDays: map[string]hooppy.ScheduleDay{}, TotalRows: 0}},
+		{"page past the end", &hooppy.SchedulePostsResponse{PostsByDays: map[string]hooppy.ScheduleDay{}, TotalRows: 96}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,10 +206,10 @@ func TestBuildScheduleQueueSummary_NarrowedQueryOmitsScheduleWideFields(t *testi
 	// to 12.01.2027 — but the window's last key is 29.09.2026, which MUST
 	// NOT be emitted as booked_until.
 	resp := &hooppy.SchedulePostsResponse{
-		PostsByDays: map[string][]hooppy.Post{
-			"01.09.2026": {{ID: 1}},
-			"15.09.2026": {{ID: 2}},
-			"29.09.2026": {{ID: 3}},
+		PostsByDays: map[string]hooppy.ScheduleDay{
+			"01.09.2026": {Posts: []hooppy.Post{{ID: 1}}},
+			"15.09.2026": {Posts: []hooppy.Post{{ID: 2}}},
+			"29.09.2026": {Posts: []hooppy.Post{{ID: 3}}},
 		},
 		TotalRows: 96, // the COLLECTION total — unchanged by narrowing
 		IsHasMore: false,
@@ -251,10 +242,10 @@ func TestBuildScheduleQueueSummary_NarrowedQueryOmitsScheduleWideFields(t *testi
 // server never hides the rest of the calendar.
 func TestBuildScheduleQueueSummary_MalformedKeyDoesNotAbort(t *testing.T) {
 	resp := &hooppy.SchedulePostsResponse{
-		PostsByDays: map[string][]hooppy.Post{
-			"15.01.2027": {{ID: 1}},
-			"not-a-date": {{ID: 2}},
-			"31.01.2027": {{ID: 3}},
+		PostsByDays: map[string]hooppy.ScheduleDay{
+			"15.01.2027": {Posts: []hooppy.Post{{ID: 1}}},
+			"not-a-date": {Posts: []hooppy.Post{{ID: 2}}},
+			"31.01.2027": {Posts: []hooppy.Post{{ID: 3}}},
 		},
 		TotalRows: 3,
 	}
