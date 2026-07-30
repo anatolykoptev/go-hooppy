@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Types derived from the Hooppy OpenAPI 3.0 specification (openapi.yaml).
@@ -1480,14 +1481,74 @@ type ParsingFormResponse struct {
 }
 
 // ParsingStartPayload is the request body for POST /posts-search/parsing/start.
+//
+// Wire format for date_from/date_to is dd.mm.yyyy strings ("" = any), NOT
+// unix timestamps — the server's createDateFromString (DatesTrait.php) parses
+// date strings and rejects every non-zero integer (issue #61). MarshalJSON
+// emits the strings; the int fields below are a deprecated convenience that
+// convert to dd.mm.yyyy in UTC.
 type ParsingStartPayload struct {
 	SourceType                int `json:"source_type"`                   // 1=social, 2=RSS
 	SearchType                int `json:"search_type"`                   // 1=pages, 2=hashtag
 	SourceID                  int `json:"source_id"`                     // social network ID
 	SourceResourceID          int `json:"source_resource_id"`            // source resource ID
 	SocialAccountForParsingID int `json:"social_account_for_parsing_id"` // account to parse with
-	DateFrom                  int `json:"date_from"`                     // unix timestamp, 0=any
-	DateTo                    int `json:"date_to"`                       // unix timestamp, 0=any
+	// DateFromDay is the start of the date window as dd.mm.yyyy ("" = any).
+	// Takes precedence over the deprecated DateFrom int when non-empty.
+	DateFromDay string `json:"-"`
+	// DateToDay is the end of the date window as dd.mm.yyyy ("" = any).
+	// Takes precedence over the deprecated DateTo int when non-empty.
+	DateToDay string `json:"-"`
+	// Deprecated: DateFrom is a unix-second timestamp converted to dd.mm.yyyy
+	// in UTC for the wire. A day-granularity wire format cannot faithfully
+	// carry an instant, and the conversion zone is UTC (not the account's
+	// timezone — see issue #62 for the sibling one-day-offset defect). Use
+	// DateFromDay for an exact dd.mm.yyyy value. 0 = any.
+	DateFrom int `json:"date_from"`
+	// Deprecated: DateTo is a unix-second timestamp converted to dd.mm.yyyy
+	// in UTC for the wire. See DateFrom for the zone caveat and issue #62.
+	// Use DateToDay for an exact dd.mm.yyyy value. 0 = any.
+	DateTo int `json:"date_to"`
+}
+
+// dayDateFormat is the vendor's date-only wire format for parsing dates.
+const dayDateFormat = "02.01.2006"
+
+// MarshalJSON emits date_from/date_to as dd.mm.yyyy strings ("" = any),
+// the wire format POST /posts-search/parsing/start expects (issue #61).
+// The Day string fields take precedence over the deprecated int fields.
+func (p ParsingStartPayload) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		SourceType                int    `json:"source_type"`
+		SearchType                int    `json:"search_type"`
+		SourceID                  int    `json:"source_id"`
+		SourceResourceID          int    `json:"source_resource_id"`
+		SocialAccountForParsingID int    `json:"social_account_for_parsing_id"`
+		DateFrom                  string `json:"date_from"`
+		DateTo                    string `json:"date_to"`
+	}
+	return json.Marshal(wire{
+		SourceType:                p.SourceType,
+		SearchType:                p.SearchType,
+		SourceID:                  p.SourceID,
+		SourceResourceID:          p.SourceResourceID,
+		SocialAccountForParsingID: p.SocialAccountForParsingID,
+		DateFrom:                  parsingWireDate(p.DateFromDay, p.DateFrom),
+		DateTo:                    parsingWireDate(p.DateToDay, p.DateTo),
+	})
+}
+
+// parsingWireDate resolves a date field to its dd.mm.yyyy wire string: the
+// Day string wins when non-empty; otherwise a non-zero unix-second int is
+// formatted in UTC; 0/empty yields "" (any).
+func parsingWireDate(day string, unix int) string {
+	if day != "" {
+		return day
+	}
+	if unix == 0 {
+		return ""
+	}
+	return time.Unix(int64(unix), 0).UTC().Format(dayDateFormat)
 }
 
 // ParsingStartResponse wraps POST /posts-search/parsing/start.
