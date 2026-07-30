@@ -34,7 +34,7 @@ const (
 	pathPostsSearchSources    = "/posts-search/source-resources"
 	pathPostsSearchParseForm  = "/posts-search/parsing/form"
 	pathPostsSearchParseStart = "/posts-search/parsing/start"
-	pathPostsSearchParseStop  = "/posts-search/parsing"
+	pathPostsSearchParseStop  = "/posts-search/parsing/stop"
 	pathPostsRewrite          = "/posts/rewrite"
 	pathPostsSearchEdit       = "/posts-search/%d/edit"
 	pathPostEdit              = "/posts/%d/edit"

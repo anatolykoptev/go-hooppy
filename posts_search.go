@@ -257,7 +257,25 @@ func validateParsingDate(field, day string) error {
 
 // StopParsing cancels any in-progress scraping job.
 //
-// UNDOCUMENTED: DELETE /posts-search/parsing is not in the public OpenAPI spec.
+// The path is /posts-search/parsing/stop, not /posts-search/parsing. Both
+// exist and both answer {"success":true}; only the /stop suffix cancels
+// anything. Measured on a live account (issue #94), three arms with the
+// in-progress flag asserted true before each stop:
+//
+//	no stop call, natural duration      idle again at 256.9s
+//	DELETE /posts-search/parsing/stop   idle again at  11.2s (stop sent at 6.2s)
+//	DELETE /posts-search/parsing        still running past 100s
+//
+// So a success response is not evidence here, and the suffix-less path was
+// what produced the earlier "a parse cannot be cancelled" conclusion.
+//
+// Poll the result with GetParsingForm, whose is_parsing_in_progress field is
+// the working oracle. GET /posts-search does NOT carry that key — it decodes
+// as the zero value, which is indistinguishable from "idle" and turns a
+// status check into a false negative.
+//
+// UNDOCUMENTED: DELETE /posts-search/parsing/stop is not in the public
+// OpenAPI spec.
 func (c *Client) StopParsing(ctx context.Context) error {
 	return c.doDELETE(ctx, pathPostsSearchParseStop, nil, true)
 }

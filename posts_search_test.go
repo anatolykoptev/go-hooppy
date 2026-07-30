@@ -679,11 +679,18 @@ func TestStartParsing_MalformedDateRejectsBeforeRequest(t *testing.T) {
 	}
 }
 
+// TestStopParsing pins the exact path, which is the whole behaviour of this
+// call. The server has a suffix-less sibling that accepts the same DELETE and
+// answers {"success":true} without cancelling anything (issue #94), so an
+// assertion on the status code or the response body passes for both the
+// working and the broken path. Only the path distinguishes them.
+//
+// This test previously asserted /posts-search/parsing and was green while the
+// client could not cancel a parse at all.
 func TestStopParsing(t *testing.T) {
+	var gotMethod, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete || r.URL.Path != "/posts-search/parsing" {
-			t.Errorf("DELETE /posts-search/parsing, got %s %s", r.Method, r.URL.Path)
-		}
+		gotMethod, gotPath = r.Method, r.URL.Path
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -691,6 +698,12 @@ func TestStopParsing(t *testing.T) {
 
 	if err := c.StopParsing(context.Background()); err != nil {
 		t.Fatalf("StopParsing: %v", err)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/posts-search/parsing/stop" {
+		t.Errorf("want DELETE /posts-search/parsing/stop, got %s %s", gotMethod, gotPath)
+	}
+	if gotPath == "/posts-search/parsing" {
+		t.Error("hit the suffix-less sibling: it returns success and cancels nothing")
 	}
 }
 
