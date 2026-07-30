@@ -1423,6 +1423,23 @@ func registerDeleteProxy(server *mcp.Server) {
 
 // --- list_search_posts ---
 
+// searchPostsResultEnvelope wraps the --all search-posts response with an
+// optional warning field so a CAPPED walk (the server's Elasticsearch
+// max_result_window refused the next page) travels as STRUCTURED data —
+// valid JSON in BOTH branches — not as a prose prefix that makes the result
+// unparseable. Mirrors schedulePostsResultEnvelope: the embedded
+// hooppy.AllListEnvelope flattens its fields (list, total_rows, is_has_more)
+// alongside warning, so a non-capped call (warning empty, omitempty)
+// serialises identically to the raw envelope. A capped call sets warning
+// AND keeps is_has_more=true (there ARE more rows, unreachable by offset
+// paging) — honestly labelled, never asserting completeness that does not
+// hold. An agent reads warning the same way it reads
+// schedulePostsResultEnvelope.Warning.
+type searchPostsResultEnvelope struct {
+	Warning string `json:"warning,omitempty"`
+	hooppy.AllListEnvelope
+}
+
 type listSearchPostsInput struct {
 	Text                string  `json:"text,omitempty" jsonschema:"Search by text content."`
 	DateFrom            string  `json:"date_from,omitempty" jsonschema:"Filter by date from (dd.mm.yyyy)."`
@@ -1479,15 +1496,31 @@ func registerListSearchPosts(server *mcp.Server) {
 				ContentTypesExclude: in.ContentTypesExclude,
 			}
 			if in.All {
-				all, firstTotal, lastTotal, err := c.ListAllSearchPostsWithFirstAndLastTotal(ctx, f)
+				res, err := c.ListAllSearchPostsWithFirstAndLastTotal(ctx, f)
 				if err != nil {
 					return errResult(err.Error())
 				}
-				env, err := hooppy.NewAllListEnvelopeHighChurn(all, firstTotal, lastTotal, func(p hooppy.SearchPost) int { return p.ID })
+				if res.Capped {
+					// Bounded result: the server refused offset paging past its
+					// reachable window (Elasticsearch max_result_window). Return
+					// the rows collected (NOT discarded), is_has_more=true, and a
+					// structured warning naming the cap + the date-filter remedy.
+					// MCP has no stderr/exit code, so the signal travels as the
+					// `warning` field — the same shape list_schedule_posts uses
+					// for its truncation/overrun signals. NewCappedAllListEnvelope
+					// is used (not NewAllListEnvelopeHighChurn) because a capped
+					// total_rows is a ceiling, not a count.
+					env := searchPostsResultEnvelope{
+						AllListEnvelope: hooppy.NewCappedAllListEnvelope(res.List, res.LastTotalRows),
+					}
+					env.Warning = fmt.Sprintf("CAPPED result — %d search posts returned; the server refuses offset paging past its reachable window (Elasticsearch max_result_window, total_rows=%d) so older rows are unreachable by page number alone. Narrow with date_from/date_to to reach posts beyond the window.", len(res.List), res.LastTotalRows)
+					return jsonResult(env)
+				}
+				env, err := hooppy.NewAllListEnvelopeHighChurn(res.List, res.FirstTotalRows, res.LastTotalRows, func(p hooppy.SearchPost) int { return p.ID })
 				if err != nil {
 					return errResult(err.Error())
 				}
-				return jsonResult(env)
+				return jsonResult(searchPostsResultEnvelope{AllListEnvelope: env})
 			}
 			resp, err := c.ListSearchPosts(ctx, f)
 			if err != nil {

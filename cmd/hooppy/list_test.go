@@ -286,3 +286,113 @@ func TestRunListPages_NoWarningWhenComplete(t *testing.T) {
 		t.Errorf("stderr = %q, want empty — no warning when is_has_more is false (the list is complete)", errOut.String())
 	}
 }
+
+// resultWindowErrorBodyCLI is the Elasticsearch max_result_window rejection
+// (HTTP 500) as the live Hooppy API returns it — the reason nested under an
+// "error" object so newAPIError's string-extraction falls through to the raw
+// body, where "Result window is too large" lives. Duplicated from the
+// library test constant so the CLI package test is self-contained (the
+// constant is unexported in the library package).
+const resultWindowErrorBodyCLI = `{"error":{"type":"illegal_argument_exception","reason":"Result window is too large, from + size must be less than or equal to: [10000] but was [10060]"},"status":500}`
+
+// TestRunListSearchPosts_AllCapped_ReturnsRowsAndExits2 is the CLI guard for
+// the result-window cap. The server serves 3 pages (6 rows) with
+// is_has_more=true and total_rows=10000 (the ES ceiling), then returns the
+// max_result_window 500 on page 4. The command MUST exit 2 (the repo's
+// partial-read convention from runScheduleQueue: 0=complete, 1=error,
+// 2=partial), emit the 6 collected rows to stdout (NOT discard them), mark
+// is_has_more=true (honestly — there ARE more rows, unreachable), and warn
+// on stderr naming the row count, the server wall, and the --date-from/
+// --date-to remedy.
+//
+// RED-on-revert: revert the cap branch in runListSearchPosts (or the walker)
+// and the command exits 1 with empty stdout — the "exit 2" and "6 rows on
+// stdout" assertions fail. A test asserting only "no error" would accept a
+// command that returns nothing.
+func TestRunListSearchPosts_AllCapped_ReturnsRowsAndExits2(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("page") {
+		case "2":
+			w.Write([]byte(postRows(3, 2, 10000, true)))
+		case "3":
+			w.Write([]byte(postRows(5, 2, 10000, true)))
+		case "1", "":
+			w.Write([]byte(postRows(1, 2, 10000, true)))
+		default: // page 4 — the server wall
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(resultWindowErrorBodyCLI))
+		}
+	}))
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListSearchPosts(context.Background(), c, &out, &errOut, hooppy.SearchPostsFilter{}, true)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 — a capped --all walk is a PARTIAL read (repo convention: 0=complete, 1=error, 2=partial, per runScheduleQueue); stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	// stdout must be valid JSON with the collected rows, is_has_more=true
+	// (honestly labelled — there ARE more rows, unreachable by offset paging),
+	// and total_rows=10000 (the ceiling).
+	var env hooppy.AllListEnvelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (stdout=%q) — the capped result must still be emitted to stdout, not discarded", err, out.String())
+	}
+	if !env.IsHasMore {
+		t.Errorf("stdout is_has_more = false, want true — a capped walk MUST NOT assert completeness (NewCappedAllListEnvelope pins it true; reusing NewAllListEnvelope would falsely pin it false)")
+	}
+	if env.TotalRows != 10000 {
+		t.Errorf("stdout total_rows = %d, want 10000 (the server's ceiling)", env.TotalRows)
+	}
+	raw, _ := json.Marshal(env.List)
+	var rows []struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("stdout list did not decode: %v (raw=%s)", err, raw)
+	}
+	if len(rows) != 6 {
+		t.Fatalf("stdout list len = %d, want 6 — the 6 rows collected before the wall MUST be on stdout, not discarded (the live defect lost 10000 rows this way)", len(rows))
+	}
+	// stderr must name the cap, the row count, the server wall, and the
+	// date-filter remedy — a silent short list is the failure mode.
+	stderr := errOut.String()
+	for _, want := range []string{"CAPPED", "6", "date", "10000"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q — the warning must name the cap, the row count, the ceiling, and the --date-from/--date-to remedy", stderr, want)
+		}
+	}
+}
+
+// TestRunListSearchPosts_AllMidWalkGeneric500_Exits1 is the CLI companion:
+// a 500 that is NOT the result-window error MUST exit 1 (error), not 2
+// (partial). The command must not turn every server error into a partial
+// success — that would mask real failures. Page 1 serves 2 rows; page 2
+// returns a generic 500.
+//
+// RED-on-revert: if the cap detection is broadened to treat any 500 as a
+// cap, code == 2 (not 1) and this test fails.
+func TestRunListSearchPosts_AllMidWalkGeneric500_Exits1(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("page") {
+		case "1", "":
+			w.Write([]byte(postRows(1, 2, 10000, true)))
+		default: // page 2 — a GENERIC 500, not the result-window wall
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"internal server error","status":500}`))
+		}
+	}))
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListSearchPosts(context.Background(), c, &out, &errOut, hooppy.SearchPostsFilter{}, true)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 — a generic mid-walk 500 is an ERROR, not a capped partial (stdout=%q stderr=%q)", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "error:") {
+		t.Errorf("stderr = %q, want it to contain \"error:\" — a genuine failure must be reported as an error, not silently swallowed", errOut.String())
+	}
+}

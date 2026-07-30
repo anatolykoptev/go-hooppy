@@ -332,6 +332,32 @@ func NewAllListEnvelopeHighChurn[T any](list []T, firstTotalRows, lastTotalRows 
 	return AllListEnvelope{List: list, TotalRows: lastTotalRows, IsHasMore: false}, nil
 }
 
+// NewCappedAllListEnvelope builds an AllListEnvelope for a walk that stopped
+// at the server's reachable window — the Elasticsearch max_result_window on
+// /posts-search — instead of is_has_more going false. It is the honest shape
+// for a bounded, complete-as-possible result that is NOT a complete list.
+//
+// Unlike NewAllListEnvelope / NewAllListEnvelopeHighChurn it:
+//   - Does NOT run the unique-count validation. A capped total_rows is a
+//     CEILING, not a count (it does not decrease and is_has_more never
+//     clears), so validating unique-count against it would validate against
+//     a constant. The first-total rule (unique < firstTotal) would also
+//     false-alarm: offset-shift duplicates on a high-churn collection can
+//     leave unique < ceiling even though no row was lost, only duplicated.
+//     The cap is the signal, not a count mismatch.
+//   - Pins IsHasMore TRUE. There ARE more rows; they are unreachable by
+//     offset paging alone. NewAllListEnvelope* pin it false to ASSERT
+//     completeness — reusing them here would assert completeness that does
+//     not hold (the defect this constructor exists to prevent).
+//
+// The caller MUST surface the cap to the operator: the CLI writes a stderr
+// warning naming the row count and the date-filter remedy; the MCP tool sets
+// a structured `warning` field (no stderr there). totalRows is the server's
+// last-seen total_rows (the ceiling value).
+func NewCappedAllListEnvelope[T any](list []T, totalRows int) AllListEnvelope {
+	return AllListEnvelope{List: list, TotalRows: totalRows, IsHasMore: true}
+}
+
 // CreateSchedule creates a new publication schedule via POST /posts/schedules.
 // Use NewSchedulePayload(name) to get a payload with sensible defaults,
 // then override fields as needed.

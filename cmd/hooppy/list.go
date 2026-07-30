@@ -183,19 +183,45 @@ func runListPosts(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, 
 }
 
 // runListSearchPosts is the testable core of `hooppy search posts`.
+//
+// Exit codes follow the repo's partial-read convention established by
+// runScheduleQueue: 0 = complete, 1 = error (no usable data), 2 = partial.
+// A CAPPED --all walk (the server's Elasticsearch max_result_window refused
+// the next page) is a PARTIAL read: the operator asked for --all and got
+// every row the server could serve via offset paging — a bounded,
+// complete-as-possible result, not an error and not complete. It exits 2 so a
+// script can branch on "complete vs capped vs error", mirroring
+// runScheduleQueue's is_has_more=true -> exit 2. The rows are emitted to
+// stdout (NOT discarded — discarding 10000 collected rows to an error on the
+// next page was the defect this fixes); a stderr warning names the row count,
+// the server wall, and the --date-from/--date-to remedy. The stdout envelope
+// is built with NewCappedAllListEnvelope (is_has_more=true), NOT
+// NewAllListEnvelopeHighChurn: a capped total_rows is a ceiling, not a count,
+// and the first-total validation would validate against a constant.
 func runListSearchPosts(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, f hooppy.SearchPostsFilter, all bool) int {
 	if all {
-		list, firstTotal, lastTotal, err := c.ListAllSearchPostsWithFirstAndLastTotal(ctx, f)
+		res, err := c.ListAllSearchPostsWithFirstAndLastTotal(ctx, f)
 		if err != nil {
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		env, err := hooppy.NewAllListEnvelopeHighChurn(list, firstTotal, lastTotal, func(p hooppy.SearchPost) int { return p.ID })
+		if res.Capped {
+			env := hooppy.NewCappedAllListEnvelope(res.List, res.LastTotalRows)
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(env); err != nil {
+				fmt.Fprintf(errOut, "error encoding output: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(errOut, "warn: CAPPED result — %d search posts returned; the server refuses offset paging past its reachable window (Elasticsearch max_result_window, total_rows=%d) so older rows are unreachable by page number alone. Narrow with --date-from/--date-to (date_from/date_to) to reach posts beyond the window.\n", len(res.List), res.LastTotalRows)
+			return 2
+		}
+		env, err := hooppy.NewAllListEnvelopeHighChurn(res.List, res.FirstTotalRows, res.LastTotalRows, func(p hooppy.SearchPost) int { return p.ID })
 		if err != nil {
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		return emitList(out, errOut, "search posts", true, len(list), lastTotal, false, env)
+		return emitList(out, errOut, "search posts", true, len(res.List), res.LastTotalRows, false, env)
 	}
 	resp, err := c.ListSearchPosts(ctx, f)
 	if err != nil {
