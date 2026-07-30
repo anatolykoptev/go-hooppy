@@ -153,20 +153,37 @@ func jsonFields(t reflect.Type) map[string]reflect.Type {
 	m := map[string]reflect.Type{}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if f.Anonymous {
-			for k, v := range jsonFields(derefType(f.Type)) {
-				m[k] = v
+		ft := derefType(f.Type)
+		embeddedStruct := f.Anonymous && ft.Kind() == reflect.Struct
+
+		// An anonymous field is PROMOTED only when it is an untagged struct.
+		// Measured 2026-07-30 against encoding/json, all five shapes:
+		//
+		//	untagged embedded struct (exported OR unexported type) -> promoted
+		//	tagged embedded struct   (exported OR unexported type) -> a NAMED
+		//	                                    field under the tag, and filled
+		//	embedded unexported scalar -> ignored entirely
+		//
+		// Recursing into an embedded NON-struct used to panic outright:
+		// "reflect: NumField of non-struct type".
+		if embeddedStruct && f.Tag.Get("json") == "" {
+			for k, v := range jsonFields(ft) {
+				if _, exists := m[k]; !exists {
+					m[k] = v
+				}
 			}
 			continue
 		}
-		// encoding/json never populates an unexported field, so treating one
-		// as modelled makes the walker report a key as covered while the
-		// runtime silently drops it — a false-clean gate, which is the exact
-		// failure this file exists to prevent. Anonymous fields are handled
-		// above: an embedded UNEXPORTED struct type still promotes its
-		// exported fields, so exportedness of the embedding field is not the
-		// question there.
-		if !f.IsExported() {
+
+		// Everything else is a named field. encoding/json never populates an
+		// unexported one, and treating it as modelled makes the walker report
+		// a key as covered while the runtime silently drops it — a false-clean
+		// gate, the exact failure this file exists to prevent.
+		//
+		// The exception is a tagged embedded struct: the EMBEDDING field's
+		// name is its type name and so reads as unexported, but the decoder
+		// still fills it through its exported inner fields.
+		if !f.IsExported() && !embeddedStruct {
 			continue
 		}
 		tag := f.Tag.Get("json")
@@ -1378,15 +1395,11 @@ func TestUnmarshalerContractsAreMeasured(t *testing.T) {
 
 			if c.traverse {
 				// The criterion is what the walker would actually FIND, not
-				// the Kind: FlexInt is a struct too, and declaring traverse on
-				// it passes a Kind check while descending into nothing — its
-				// fields are unexported, so jsonFields is empty.
-				// The criterion is what the walker would actually FIND, not
-				// the Kind: FlexInt is a struct too, and declaring traverse on
-				// it passes a Kind check while descending into nothing.
-				// jsonFields is now exactly the walker's own view — it skips
-				// unexported fields and `json:"-"` — so this asks the question
-				// in the same terms the walker answers it.
+				// the Kind: FlexInt is a struct too, so a Kind check passes it
+				// while there is nothing to descend into. jsonFields is
+				// exactly the walker's own view — it skips unexported fields
+				// and `json:"-"` — so this asks the question in the same terms
+				// the walker answers it.
 				var descendable bool
 				switch typ.Kind() {
 				case reflect.Map, reflect.Slice, reflect.Array:
@@ -1413,6 +1426,28 @@ func TestUnmarshalerContractsAreMeasured(t *testing.T) {
 // measures is how a gate quietly stops gating.
 var exemptFromContracts = map[reflect.Type]string{
 	reflect.TypeOf(json.RawMessage{}): "accepts any JSON value verbatim",
+}
+
+// verifyExemption measures the claim an exemption makes: that the type accepts
+// ANY shape, so the walker leaf-skipping it costs no coverage.
+//
+// The predicate is ANY error, not errors.As(*json.UnmarshalTypeError). A type
+// that rejects a container with a plain errors.New would otherwise be exempted
+// VACUOUSLY — the probe would look for a rejection expressed one particular
+// way and miss every other way of rejecting. The narrow typed predicate is
+// still right for scalarOnly, where the walker genuinely needs the typed error
+// to classify: different claims, different evidence.
+func verifyExemption(t *testing.T, typ reflect.Type, reason string) {
+	t.Helper()
+	if !typ.Implements(jsonUnmarshalerType) && !reflect.PointerTo(typ).Implements(jsonUnmarshalerType) {
+		t.Errorf("exemptFromContracts names %s (%q), which is not a json.Unmarshaler — it was never leaf-skipped, so exempting it says nothing and hides that the entry is meaningless", typ, reason)
+		return
+	}
+	for _, body := range []string{`{"a":1}`, `[1,2]`, `0`} {
+		if err := json.Unmarshal([]byte(body), reflect.New(typ).Interface()); err != nil {
+			t.Errorf("exemptFromContracts claims %s accepts any shape (%q), but %s is rejected: %v — a type that DISCRIMINATES needs a contract, not an exemption", typ, reason, body, err)
+		}
+	}
 }
 
 // TestUnmarshalerContractsAreComplete is the half TestUnmarshalerContractsAreMeasured
@@ -1477,18 +1512,8 @@ func TestUnmarshalerContractsAreComplete(t *testing.T) {
 
 	// An exemption is a claim that the type accepts ANY shape. Measure it.
 	for typ, reason := range exemptFromContracts {
-		if !typ.Implements(jsonUnmarshalerType) && !reflect.PointerTo(typ).Implements(jsonUnmarshalerType) {
-			t.Errorf("exemptFromContracts names %s (%q), which is not a json.Unmarshaler — it was never leaf-skipped, so exempting it says nothing and hides that the entry is meaningless", typ, reason)
-			continue
-		}
-		var typeErr *json.UnmarshalTypeError
-		for _, body := range []string{`{"a":1}`, `[1,2]`, `0`} {
-			if err := json.Unmarshal([]byte(body), reflect.New(typ).Interface()); errors.As(err, &typeErr) {
-				t.Errorf("exemptFromContracts claims %s accepts any shape (%q), but %s is rejected: %v — a type that DISCRIMINATES needs a contract, not an exemption", typ, reason, body, err)
-			}
-		}
+		verifyExemption(t, typ, reason)
 	}
-
 	// Both populations must also expire. An entry for a type nothing reaches
 	// outlives whatever justified it, and nothing would ever say so.
 	for typ := range unmarshalerContracts {
@@ -1683,6 +1708,35 @@ func TestJSONFields_MatchesWhatEncodingJSONPopulates(t *testing.T) {
 		}
 	}
 
+	// An anonymous field is promoted only when it is an UNTAGGED struct.
+	// A tagged one is an ordinary named field to encoding/json, and an
+	// anonymous non-struct has nothing to promote — recursing into it used to
+	// panic with "reflect: NumField of non-struct type".
+	type inner struct {
+		A string `json:"a"`
+	}
+	type namedScalar string
+	type anon struct {
+		inner       `json:"inner"` // TAGGED: a field called "inner", not a promotion
+		namedScalar                // anonymous NON-struct: nothing to promote
+		Kept        string         `json:"kept"`
+	}
+	anonGot := jsonFields(reflect.TypeOf(anon{})) // must not panic
+	if _, ok := anonGot["a"]; ok {
+		t.Errorf("jsonFields promoted %q out of a TAGGED anonymous field (got %v) — encoding/json treats it as a field named \"inner\" instead", "a", keysOf(anonGot))
+	}
+	if _, ok := anonGot["inner"]; !ok {
+		t.Errorf("jsonFields lost the tagged anonymous field \"inner\" (got %v)", keysOf(anonGot))
+	}
+
+	var a anon
+	if err := json.Unmarshal([]byte(`{"inner":{"a":"x"},"kept":"k"}`), &a); err != nil {
+		t.Fatalf("premise: %v", err)
+	}
+	if a.inner.A != "x" {
+		t.Errorf("premise broken: encoding/json did not fill the tagged anonymous field (%+v) — the promotion rule above may no longer hold", a)
+	}
+
 	// The premise, measured rather than assumed.
 	var s subject
 	if err := json.Unmarshal([]byte(`{"kept":"a","promoted":"b","hidden":"c","Excluded":"d"}`), &s); err != nil {
@@ -1703,6 +1757,39 @@ func keysOf(m map[string]reflect.Type) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestVerifyExemption_CatchesAPickyType aims the exemption check at a type
+// that rejects containers with a PLAIN error rather than a
+// *json.UnmarshalTypeError. Nothing in the repo does that today, which is
+// exactly why the check needs a subject of its own: with the narrower
+// errors.As predicate this type sailed through as "accepts any shape" while
+// discriminating on every container it was handed.
+func TestVerifyExemption_CatchesAPickyType(t *testing.T) {
+	sub := &testing.T{}
+	verifyExemption(sub, reflect.TypeOf(pickyLeaf{}), "probe")
+	if !sub.Failed() {
+		t.Error("verifyExemption passed a type that rejects containers — an exemption claims the type accepts ANY shape, and the probe must notice a rejection however it is expressed, not only as *json.UnmarshalTypeError")
+	}
+
+	// And it must not fail a type that genuinely accepts everything, or the
+	// assertion above is universal rather than discriminating.
+	sub2 := &testing.T{}
+	verifyExemption(sub2, reflect.TypeOf(json.RawMessage{}), "accepts any JSON value verbatim")
+	if sub2.Failed() {
+		t.Error("verifyExemption failed json.RawMessage, which does accept any JSON value — the probe is rejecting a legitimate exemption")
+	}
+}
+
+// pickyLeaf rejects containers the way most hand-written unmarshallers do:
+// with an ordinary error, carrying no type information.
+type pickyLeaf struct{}
+
+func (p *pickyLeaf) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && (b[0] == '{' || b[0] == '[') {
+		return errors.New("pickyLeaf: containers not supported")
+	}
+	return nil
 }
 
 // TestUnmarshalerLeafPointerReceiver verifies Fix 1: Metric (and FlexInt,
