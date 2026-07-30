@@ -38,14 +38,44 @@
 // corresponding struct field, with its JSON path (e.g. list[0].publication_date)
 // and JSON type. Types implementing json.Unmarshaler (Metric, FlexInt, PhotoID)
 // are treated as leaves: their custom unmarshaller owns the whole value, so
-// there are no "unmodelled keys" below them. interface{} fields (Attachment.Data)
-// are leaves too — anything is accepted.
+// there are no "unmodelled keys" below them. These three declare UnmarshalJSON
+// on a POINTER receiver while the struct fields hold VALUE types, so the leaf
+// check tests both the type and reflect.PointerTo(type) — a value type does
+// not satisfy an interface a pointer-to-it satisfies. interface{} fields are
+// leaves too — anything is accepted.
+//
+// # What this gate detects — and what it does NOT
+//
+// The gate detects a NEW server field appearing at a MODELLED depth: a key the
+// fixture carries that no struct field models and no baseline entry declares.
+// That is the regression that matters — a field the struct used to capture
+// silently going unmodelled, or a brand-new field nobody classified.
+//
+// The gate does NOT detect a new server field appearing INSIDE an already-
+// unmodelled subtree. When a key is unmodelled, walkJSON records ONE entry for
+// its root and never recurses into it: the whole subtree is dropped at decode
+// anyway (encoding/json discards it), so enumerating its children would only
+// bloat the baseline without changing what the runtime drops. A field added
+// beneath an unmodelled root is therefore invisible to this gate — and that is
+// acceptable, because the parent is already lost wholesale. The count reported
+// per unmodelled root (e.g. "projects[0] (object, 62 keys beneath)") quantifies
+// what is hidden so the floor is not mistaken for a total; the hidden keys are
+// NOT enumerated into the baselines.
+//
+// There is a second, smaller blind spot: fields typed interface{} are leaves
+// whose contents are never inspected, because anything decodes. The only one
+// in the response types is Attachment.Data (GET /posts/{id}/edit and
+// GET /posts-search/{id}/edit). As of the 2026-07-29 fixtures it hides 7 keys
+// beneath it in post_edit.json (file_path, folder, id, name, text, type,
+// updated_date) and 2 keys beneath it in search_post_edit.json (link, title).
+// A new server field added inside Attachment.Data is invisible to this gate
+// for the same reason as an unmodelled root — the parent is already opaque.
 //
 // # The gate — declared baseline, not a report
 //
-// A test that merely prints 429 unmodelled keys fails on day one and gets
+// A test that merely prints the unmodelled keys fails on day one and gets
 // ignored. Following the pattern this repo already has (phantom_filter_test.go,
-// TestRetryPolicySweep), each endpoint DECLARES its currently-unmodelled keys
+// TestRetryPolicySweep), each endpoint DECLARES its directly-unmodelled keys
 // in unmodelledBaselines. The test:
 //
 //   - FAILS when a fixture contains an unmodelled key NOT in the baseline — a
@@ -77,10 +107,15 @@ import (
 )
 
 // unmodelledKey is one JSON key present in a fixture but not modelled by the
-// target Go struct, with its JSON path and JSON type.
+// target Go struct, with its JSON path and JSON type. keysBeneath is the count
+// of JSON keys sitting beneath this key's value when that value is an object or
+// a non-empty array — those keys are hidden (the subtree is dropped wholesale
+// at decode and never enumerated), so the count quantifies the floor rather
+// than enumerating them into the baseline. It is 0 for scalar/empty values.
 type unmodelledKey struct {
-	path     string
-	jsonType string
+	path        string
+	jsonType    string
+	keysBeneath int
 }
 
 // jsonUnmarshalerType is reflect.Type for encoding/json.Unmarshaler, used to
@@ -147,6 +182,30 @@ func jsonTypeName(v interface{}) string {
 	}
 }
 
+// countKeysBeneath returns the total number of JSON keys recursively contained
+// in a generic-decoded value: an object counts its own keys plus the keys of
+// every value; an array counts the keys of every element (array elements have
+// no keys of their own); a scalar counts 0. Used to quantify how many keys are
+// hidden beneath an unmodelled root whose subtree is dropped wholesale.
+func countKeysBeneath(v interface{}) int {
+	switch n := v.(type) {
+	case map[string]interface{}:
+		count := len(n)
+		for _, val := range n {
+			count += countKeysBeneath(val)
+		}
+		return count
+	case []interface{}:
+		count := 0
+		for _, elem := range n {
+			count += countKeysBeneath(elem)
+		}
+		return count
+	default:
+		return 0
+	}
+}
+
 // walkJSON walks a generic-decoded JSON tree against a target Go struct type
 // via reflection, collecting every JSON key that has no corresponding struct
 // field. Honours json tags, embedded structs, map[string]… element types, and
@@ -157,8 +216,11 @@ func jsonTypeName(v interface{}) string {
 func walkJSON(node interface{}, targetType reflect.Type, path string, results *[]unmodelledKey) {
 	targetType = derefType(targetType)
 
-	// A custom UnmarshalJSON owns the entire value — stop.
-	if targetType.Implements(jsonUnmarshalerType) {
+	// A custom UnmarshalJSON owns the entire value — stop. Metric, FlexInt
+	// and PhotoID declare UnmarshalJSON on a POINTER receiver, so a VALUE
+	// field of those types does not satisfy the interface directly; test the
+	// pointer type too so they are still recognised as leaves.
+	if targetType.Implements(jsonUnmarshalerType) || reflect.PointerTo(targetType).Implements(jsonUnmarshalerType) {
 		return
 	}
 
@@ -180,7 +242,11 @@ func walkJSON(node interface{}, targetType reflect.Type, path string, results *[
 				if ft, ok := fieldMap[k]; ok {
 					walkJSON(n[k], ft, childPath, results)
 				} else {
-					*results = append(*results, unmodelledKey{childPath, jsonTypeName(n[k])})
+					*results = append(*results, unmodelledKey{
+						path:        childPath,
+						jsonType:    jsonTypeName(n[k]),
+						keysBeneath: countKeysBeneath(n[k]),
+					})
 				}
 			}
 		case reflect.Map:
@@ -218,7 +284,7 @@ func walkJSON(node interface{}, targetType reflect.Type, path string, results *[
 func unmodelledKeys(data []byte, targetType reflect.Type) []unmodelledKey {
 	var root interface{}
 	if err := json.Unmarshal(data, &root); err != nil {
-		return []unmodelledKey{{"<parse-error>", err.Error()}}
+		return []unmodelledKey{{path: "<parse-error>", jsonType: err.Error()}}
 	}
 	var results []unmodelledKey
 	walkJSON(root, targetType, "", &results)
@@ -259,6 +325,13 @@ func resolvePath(node interface{}, path string) interface{} {
 			}
 			cur = arr[idx]
 			rest = rest[end+1:]
+			// After an array index the remainder begins with '.' (e.g.
+			// "list[0].access_token"); strip it so the object-key segment
+			// below does not see an empty key. A following '[' (nested
+			// arrays) or end-of-path needs no strip.
+			if len(rest) > 0 && rest[0] == '.' {
+				rest = rest[1:]
+			}
 			continue
 		}
 		// Object key segment: key or key.rest
@@ -341,7 +414,11 @@ var liveFixtureSpecs = []fixtureSpec{
 // the list becomes explicit and enforced, not that it becomes empty.
 //
 // Generated by walking each fixture against its response type via reflection
-// (see walkJSON). 429 unmodelled keys across 16 fixtures (2026-07-29).
+// (see walkJSON). This is the DIRECT count — one entry per unmodelled key at
+// the depth the struct models. When an unmodelled key's value is an object or
+// non-empty array, its subtree is NOT enumerated here (it is dropped wholesale
+// at decode); the test logs how many keys are hidden beneath those roots so
+// the direct count is not mistaken for a total. 2026-07-29 fixtures.
 var unmodelledBaselines = map[string]map[string]string{
 	"GET /accounts": {
 		"list[0].access_token":                             "string",
@@ -803,10 +880,50 @@ var unmodelledBaselines = map[string]map[string]string{
 	},
 }
 
+// formatUnmodelledKey renders one unmodelled key for a failure message:
+// "path (type)", or "path (type, N keys beneath)" when the key's value hides a
+// non-empty subtree (object or non-empty array) that is dropped wholesale and
+// never enumerated into the baseline.
+func formatUnmodelledKey(k unmodelledKey) string {
+	if k.keysBeneath > 0 {
+		return fmt.Sprintf("%s (%s, %d keys beneath)", k.path, k.jsonType, k.keysBeneath)
+	}
+	return fmt.Sprintf("%s (%s)", k.path, k.jsonType)
+}
+
+// staleDeclarations returns the stale baseline entries — declared keys that
+// are no longer in the actual unmodelled set — each annotated with its reason:
+// "now modelled by a struct field" when the path still exists in the fixture
+// (the struct grew a field), or "no longer present in fixture" when the path
+// is gone (the fixture changed). Sorted for stable output.
+func staleDeclarations(declared, actualMap map[string]string, root interface{}) []string {
+	var stale []string
+	for path, typ := range declared {
+		if _, ok := actualMap[path]; ok {
+			continue
+		}
+		if pathExistsInFixture(root, path) {
+			stale = append(stale, fmt.Sprintf("%s (%s) — now modelled by a struct field; remove from baseline", path, typ))
+		} else {
+			stale = append(stale, fmt.Sprintf("%s (%s) — no longer present in fixture; remove from baseline", path, typ))
+		}
+	}
+	sort.Strings(stale)
+	return stale
+}
+
 // TestUnknownFieldDiagnostic is the gate: for each fixture, walk the JSON key
 // tree against the response type and compare the unmodelled set against the
 // declared baseline. Fails on any divergence — see unmodelledBaselines.
+//
+// It also logs a per-endpoint and total summary distinguishing DIRECTLY
+// unmodelled keys (one entry per unmodelled key at the depth the struct
+// models — the baseline count) from keys HIDDEN beneath unmodelled roots
+// (the keys inside an unmodelled object/non-empty-array value, which are
+// dropped wholesale and never enumerated). The direct count is a floor, not a
+// total; the hidden count quantifies what is invisible to the gate.
 func TestUnknownFieldDiagnostic(t *testing.T) {
+	var totalDirect, totalHidden int
 	for _, spec := range liveFixtureSpecs {
 		t.Run(spec.endpoint, func(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join("testdata", "live", spec.file))
@@ -815,8 +932,12 @@ func TestUnknownFieldDiagnostic(t *testing.T) {
 			}
 			actual := unmodelledKeys(data, spec.targetTyp)
 			actualMap := make(map[string]string, len(actual))
+			byPath := make(map[string]unmodelledKey, len(actual))
+			var hidden int
 			for _, k := range actual {
 				actualMap[k.path] = k.jsonType
+				byPath[k.path] = k
+				hidden += k.keysBeneath
 			}
 			declared := unmodelledBaselines[spec.endpoint]
 			if declared == nil {
@@ -825,9 +946,9 @@ func TestUnknownFieldDiagnostic(t *testing.T) {
 
 			// Newly-appeared: in fixture but not declared.
 			var newKeys []string
-			for path, typ := range actualMap {
+			for path := range actualMap {
 				if _, ok := declared[path]; !ok {
-					newKeys = append(newKeys, fmt.Sprintf("%s (%s)", path, typ))
+					newKeys = append(newKeys, formatUnmodelledKey(byPath[path]))
 				}
 			}
 			sort.Strings(newKeys)
@@ -838,20 +959,103 @@ func TestUnknownFieldDiagnostic(t *testing.T) {
 			// Stale: declared but not in actual unmodelled set.
 			var root interface{}
 			_ = json.Unmarshal(data, &root)
-			var staleKeys []string
-			for path, typ := range declared {
-				if _, ok := actualMap[path]; !ok {
-					if pathExistsInFixture(root, path) {
-						staleKeys = append(staleKeys, fmt.Sprintf("%s (%s) — now modelled by a struct field; remove from baseline", path, typ))
-					} else {
-						staleKeys = append(staleKeys, fmt.Sprintf("%s (%s) — no longer present in fixture; remove from baseline", path, typ))
-					}
-				}
-			}
-			sort.Strings(staleKeys)
-			for _, k := range staleKeys {
+			for _, k := range staleDeclarations(declared, actualMap, root) {
 				t.Errorf("stale baseline declaration: %s — %s", spec.endpoint, k)
 			}
+
+			t.Logf("summary: %d directly unmodelled, %d hidden beneath unmodelled roots", len(actualMap), hidden)
+			totalDirect += len(actualMap)
+			totalHidden += hidden
 		})
+	}
+	t.Logf("TOTAL: %d directly unmodelled, %d hidden beneath unmodelled roots (direct is a floor, not a total)", totalDirect, totalHidden)
+}
+
+// TestUnmarshalerLeafPointerReceiver verifies Fix 1: Metric (and FlexInt,
+// PhotoID) declare UnmarshalJSON on a POINTER receiver, while struct fields
+// hold VALUE types. A value type does not satisfy an interface that only a
+// pointer-to-it satisfies, so the leaf check must test reflect.PointerTo(t)
+// too. An OBJECT at such a field must produce NO spurious unmodelled keys
+// beneath it — the custom unmarshaller owns the whole value.
+func TestUnmarshalerLeafPointerReceiver(t *testing.T) {
+	type wrapper struct {
+		Views Metric `json:"views"`
+	}
+	data := []byte(`{"views":{"x":1,"y":2,"z":3}}`)
+	got := unmodelledKeys(data, reflect.TypeOf(wrapper{}))
+	if len(got) != 0 {
+		t.Fatalf("expected 0 unmodelled keys (Metric value field is a leaf via pointer receiver), got %d: %+v", len(got), got)
+	}
+
+	// FlexInt and PhotoID exercise the same pointer-receiver path.
+	type flexWrapper struct {
+		Hours FlexInt `json:"hours"`
+	}
+	flexData := []byte(`{"hours":{"a":1,"b":2}}`)
+	if got := unmodelledKeys(flexData, reflect.TypeOf(flexWrapper{})); len(got) != 0 {
+		t.Fatalf("expected 0 unmodelled keys for FlexInt value field, got %d: %+v", len(got), got)
+	}
+	type photoWrapper struct {
+		ID PhotoID `json:"id"`
+	}
+	photoData := []byte(`{"id":{"a":1,"b":2}}`)
+	if got := unmodelledKeys(photoData, reflect.TypeOf(photoWrapper{})); len(got) != 0 {
+		t.Fatalf("expected 0 unmodelled keys for PhotoID value field, got %d: %+v", len(got), got)
+	}
+}
+
+// TestResolvePathArrayIndex verifies Fix 3: after an array-index segment the
+// remainder begins with '.', which the old splitter read as an empty object
+// key and failed the lookup. Array-indexed paths that exist must resolve.
+func TestResolvePathArrayIndex(t *testing.T) {
+	root := map[string]interface{}{
+		"list": []interface{}{
+			map[string]interface{}{
+				"access_token": "str",
+				"nested":       map[string]interface{}{"k": 0.0},
+			},
+		},
+	}
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"list[0].access_token", true},
+		{"list[0].nested.k", true},
+		{"list[0]", true},
+		{"list[0].missing", false},
+		{"list[5].access_token", false},
+		{"absent[0].x", false},
+	}
+	for _, c := range cases {
+		if got := pathExistsInFixture(root, c.path); got != c.want {
+			t.Errorf("pathExistsInFixture(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}
+
+// TestStaleDeclarationArrayIndexReason verifies Fix 3's observable effect: a
+// declared array-indexed path that still EXISTS in the fixture but is now
+// modelled must report "now modelled by a struct field", not "no longer
+// present in fixture". Before the resolvePath fix, pathExistsInFixture
+// returned false for every [i].key path, so the reason was wrong (a message
+// defect — both branches still failed, but with the wrong explanation).
+func TestStaleDeclarationArrayIndexReason(t *testing.T) {
+	root := map[string]interface{}{
+		"list": []interface{}{
+			map[string]interface{}{"access_token": "str"},
+		},
+	}
+	declared := map[string]string{"list[0].access_token": "string"}
+	actualMap := map[string]string{} // access_token now modelled → not unmodelled → stale.
+	stale := staleDeclarations(declared, actualMap, root)
+	if len(stale) != 1 {
+		t.Fatalf("expected 1 stale entry, got %d: %v", len(stale), stale)
+	}
+	if !strings.Contains(stale[0], "now modelled") {
+		t.Errorf("expected 'now modelled' reason for an array-indexed path that exists in the fixture, got: %s", stale[0])
+	}
+	if strings.Contains(stale[0], "no longer present") {
+		t.Errorf("wrong reason 'no longer present' for a path that DOES exist in the fixture: %s", stale[0])
 	}
 }
