@@ -1446,9 +1446,14 @@ func (c *ScheduleCalendar) UnmarshalJSON(data []byte) error {
 }
 
 // SchedulePostsResponse is the envelope for GET /posts/schedules/{id}/posts
-// (issue #106). PostsByDays is keyed dd.mm.yyyy → that day's cell. TotalRows
-// is the queue depth; the LAST key in PostsByDays is the booked-until date.
-// One call returns the whole calendar — no paged walk.
+// (issue #106). PostsByDays is keyed dd.mm.yyyy → that day's cell. TotalRows is
+// the queue depth. One call returns the whole calendar — no paged walk.
+//
+// The LAST key in PostsByDays is the booked-until date ONLY when IsHasMore is
+// false AND the query was not narrowed by date or page: a narrowed query's last
+// key is the WINDOW's last day. The caveat is on ListSchedulePosts and on both
+// front-ends, and it belongs here too — this is the value a caller actually
+// holds.
 type SchedulePostsResponse struct {
 	PostsByDays ScheduleCalendar `json:"posts_by_days"`
 	TotalRows   int              `json:"total_rows"`

@@ -287,6 +287,8 @@ type unmarshalerContract struct {
 var unmarshalerContracts = map[reflect.Type]unmarshalerContract{
 	reflect.TypeOf(ScheduleCalendar{}): {traverse: true, acceptsEmptyArray: true},
 	reflect.TypeOf(FlexInt{}):          {scalarOnly: true},
+	reflect.TypeOf(Metric{}):           {scalarOnly: true},
+	reflect.TypeOf(PhotoID("")):        {scalarOnly: true},
 }
 
 // walkJSON walks a generic-decoded JSON tree against a target Go struct type
@@ -309,11 +311,11 @@ func walkJSON(node interface{}, targetType reflect.Type, path string, out *walkO
 	// PHP's `[]` for an empty map). Treating those as leaves would drop
 	// everything beneath them — all 24 keys of a scheduled Post — out of the
 	// diagnostic's coverage, silently and in the direction that looks clean.
-	contract, hasContract := unmarshalerContracts[targetType]
+	contract := unmarshalerContracts[targetType]
 	if !contract.traverse &&
 		(targetType.Implements(jsonUnmarshalerType) || reflect.PointerTo(targetType).Implements(jsonUnmarshalerType)) {
 		// A leaf — but a leaf with a declared contract can still be judged.
-		if hasContract && contract.scalarOnly {
+		if contract.scalarOnly {
 			switch node.(type) {
 			case map[string]interface{}:
 				out.mismatch(path, "object", targetType)
@@ -546,6 +548,11 @@ var liveFixtureSpecs = []fixtureSpec{
 	{"post_edit.json", "GET /posts/{id}/edit", reflect.TypeOf(PostEditResponse{})},
 	{"search_post_edit.json", "GET /posts-search/{id}/edit", reflect.TypeOf(SearchPostEditResponse{})},
 	{"schedule_posts.json", "GET /posts/schedules/{id}/posts", reflect.TypeOf(SchedulePostsResponse{})},
+	// The empty-calendar capture pins the SHAPE only: the reduction replaces
+	// every scalar with a placeholder, so its total_rows is 0 rather than the 96
+	// the live page-past-the-end returned. It carries the `[]` form through the
+	// whole gate; the total_rows-survives-an-overrun property is asserted
+	// separately, against the raw body.
 	{"schedule_posts_empty.json", "GET /posts/schedules/{id}/posts (empty)", reflect.TypeOf(SchedulePostsResponse{})},
 }
 
@@ -1345,6 +1352,9 @@ func TestUnmarshalerContractsAreMeasured(t *testing.T) {
 			}
 
 			if c.scalarOnly {
+				if c.traverse {
+					t.Error("scalarOnly declared together with traverse — the walker applies scalarOnly only on the leaf path that traverse skips, so half this declaration would be silently ignored while both halves probe green here")
+				}
 				var typeErr *json.UnmarshalTypeError
 				for _, body := range []string{`{"a":1}`, `[1,2]`} {
 					if err := probe(typ, body); !errors.As(err, &typeErr) {
@@ -1355,7 +1365,94 @@ func TestUnmarshalerContractsAreMeasured(t *testing.T) {
 					t.Errorf("declared scalarOnly but a plain number fails: %v", err)
 				}
 			}
+
+			if c.traverse {
+				// The criterion is what the walker would actually FIND, not
+				// the Kind: FlexInt is a struct too, and declaring traverse on
+				// it passes a Kind check while descending into nothing — its
+				// fields are unexported, so jsonFields is empty.
+				var descendable bool
+				switch typ.Kind() {
+				case reflect.Map, reflect.Slice, reflect.Array:
+					descendable = true
+				case reflect.Struct:
+					// Exported fields, not jsonFields: that helper also
+					// returns UNEXPORTED ones, so it reports FlexInt{raw, set}
+					// as having two fields to descend into when it has none
+					// the walker can ever surface.
+					for i := 0; i < typ.NumField(); i++ {
+						if typ.Field(i).IsExported() {
+							descendable = true
+						}
+					}
+				}
+				if !descendable {
+					t.Errorf("declared traverse but there is nothing modelled beneath %s (kind %s) — the declaration only strips the leaf rule, which is the half that can go WRONG, while buying no coverage", typ, typ.Kind())
+				}
+			}
 		})
+	}
+}
+
+// exemptFromContracts names json.Unmarshaler types that legitimately need no
+// contract: they accept ANY shape, so there is nothing for the walker to judge.
+var exemptFromContracts = map[reflect.Type]string{
+	reflect.TypeOf(json.RawMessage{}): "accepts any JSON value verbatim",
+}
+
+// TestUnmarshalerContractsAreComplete is the half TestUnmarshalerContractsAreMeasured
+// structurally cannot be: that test ranges over the TABLE, so a type MISSING
+// from the table is invisible to it — the guard could not fail for the one
+// reason it exists.
+//
+// Measured 2026-07-30: the table declared FlexInt and ScheduleCalendar but not
+// Metric or PhotoID, and both are container-rejecting scalar Unmarshalers. On
+// the three fixtures in fixturesBlindToDecode the decode oracle is masked, so a
+// container landing on list[0].views or list[0].reposts was invisible to BOTH
+// oracles — the precise failure this whole change set exists to remove. Two
+// other Metric fields, likes and comments, were caught only because they sort
+// BEFORE the masking placeholder on the wire. Luck, not a gate.
+//
+// So the population is counted rather than assumed: every type reachable from
+// a registered response type must be declared or explicitly exempt.
+func TestUnmarshalerContractsAreComplete(t *testing.T) {
+	seen := map[reflect.Type]bool{}
+	var visit func(reflect.Type)
+	visit = func(t0 reflect.Type) {
+		t0 = derefType(t0)
+		if seen[t0] {
+			return
+		}
+		seen[t0] = true
+		switch t0.Kind() {
+		case reflect.Struct:
+			for i := 0; i < t0.NumField(); i++ {
+				visit(t0.Field(i).Type)
+			}
+		case reflect.Slice, reflect.Array, reflect.Map:
+			visit(t0.Elem())
+		}
+	}
+	for _, spec := range liveFixtureSpecs {
+		visit(spec.targetTyp)
+	}
+
+	var missing []string
+	for typ := range seen {
+		if !typ.Implements(jsonUnmarshalerType) && !reflect.PointerTo(typ).Implements(jsonUnmarshalerType) {
+			continue
+		}
+		if _, ok := unmarshalerContracts[typ]; ok {
+			continue
+		}
+		if _, ok := exemptFromContracts[typ]; ok {
+			continue
+		}
+		missing = append(missing, typ.String())
+	}
+	sort.Strings(missing)
+	for _, m := range missing {
+		t.Errorf("%s implements json.Unmarshaler but has no unmarshalerContract and no exemption — the walker will leaf-skip it, and on a fixture in fixturesBlindToDecode that leaves NO oracle covering it", m)
 	}
 }
 
