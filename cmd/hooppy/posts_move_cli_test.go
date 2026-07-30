@@ -377,6 +377,115 @@ func TestRunScheduleQueue_PagePassedToEndpoint(t *testing.T) {
 	}
 }
 
+// TestRunScheduleQueue_PagePastEnd_WarnsAndExits2 is the MAJOR-2 guard
+// (review round 4): --page past the end returns 200 with total_rows=96 and
+// ZERO day keys, is_has_more:false — a complete-looking EMPTY calendar at
+// exit 0. An agent walking pages to recover a truncation reads "complete"
+// at every overrun. total_rows is the COLLECTION total (unchanged by
+// paging — page=2 and page=99 both return total_rows=96), so it cannot
+// detect an overrun by comparison; the ONLY signal is len(PostsByDays)==0
+// && TotalRows>0 with Page>0. That MUST warn naming the overrun + total_rows
+// and exit 2 (partial), NOT 0 (complete). day_counts MUST marshal as [] not
+// null so the output shape does not change between branches.
+//
+// RED-on-revert: drop the overrun branch in runScheduleQueue and exit is 0
+// with no warning — both assertions fail.
+func TestRunScheduleQueue_PagePastEnd_WarnsAndExits2(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// page=99 past the end: 200, total_rows=96 (collection total), zero
+		// day keys, is_has_more:false — the live page=2/page=99 signature.
+		w.Write([]byte(`{"posts_by_days":{},"total_rows":96,"rows_limit":200,"is_has_more":false}`))
+	}))
+	defer srv.Close()
+	c := newCLITestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runScheduleQueue(context.Background(), c, &out, &errOut, 55576, "", "", 99, false)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 — a page past the end (zero day keys, total_rows>0) is an OVERRUN, not a complete result; a script must not read it as complete; stderr: %s", code, errOut.String())
+	}
+	stderr := errOut.String()
+	if !strings.Contains(stderr, "past the end") {
+		t.Errorf("stderr missing \"past the end\" — the warning must name the overrun: %s", stderr)
+	}
+	if !strings.Contains(stderr, "96") {
+		t.Errorf("stderr missing total_rows 96 — the warning must name the collection total: %s", stderr)
+	}
+	// day_counts MUST marshal as [] (empty slice), NOT null (nil slice) —
+	// the output shape must not change between the overrun branch and a
+	// normal one. A nil slice with no omitempty marshals as null.
+	stdout := out.String()
+	if strings.Contains(stdout, `"day_counts": null`) {
+		t.Errorf("stdout has day_counts: null — the overrun branch must emit an empty slice [] so the output shape is consistent across branches: %s", stdout)
+	}
+	if !strings.Contains(stdout, `"day_counts": []`) {
+		t.Errorf("stdout missing day_counts: [] — the overrun branch must emit an empty slice, not null: %s", stdout)
+	}
+}
+
+// TestRunBatchMove_SingleIDBatch_ShapeMatchesMultiID is the MAJOR-3 guard
+// (review round 4): --ids 42 prints a PostMoveResult
+// ({success,schedule_id,publication_date}) while --ids 42,43 prints a
+// BatchMovePostsResult ({success,moved:[…]}). A consumer reading .moved[]
+// gets nothing for the single-id case, silently. The single-id routing
+// (which closes the when_type asymmetry) MUST be kept, but the OUTPUT SHAPE
+// normalised: a single-id batch MUST produce a BatchMovePostsResult with a
+// moved array of len 1 — the SAME top-level shape as the multi-id case.
+// The `posts move <id>` single positional path keeps PostMoveResult (correct).
+//
+// RED-on-revert: revert runBatchMove's single-id branch to
+// `return runMovePost(...)` and the single-id stdout has no "moved" key —
+// the assertion fails.
+func TestRunBatchMove_SingleIDBatch_ShapeMatchesMultiID(t *testing.T) {
+	// Stub: pre-move GET (when_type guard, schedule-driven=3), POST move,
+	// post-move GET with publication_date 15.01.2027.
+	var getCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && getCalls == 0:
+			getCalls++
+			w.Write([]byte(`{"id":42,"publication_when_type":3,"schedule_id":55576}`))
+		case r.Method == http.MethodGet:
+			w.Write([]byte(`{"id":42,"publication_when_type":3,"schedule_id":55576,"publication_date":{"date":"15.01.2027","hours":"12","minutes":"25"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move":
+			w.Write([]byte(`{"success":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := newCLITestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runBatchMove(context.Background(), c, &out, &errOut, []int{42}, 55576)
+	if code != 0 {
+		t.Fatalf("runBatchMove single-id exit = %d, want 0; stderr: %s", code, errOut.String())
+	}
+	stdout := out.String()
+	// The top-level shape MUST be BatchMovePostsResult — a "moved" array,
+	// NOT the flat PostMoveResult. A consumer reading .moved[] must get the
+	// entry for the single id.
+	if !strings.Contains(stdout, `"moved"`) {
+		t.Fatalf("single-id batch stdout missing \"moved\" — the shape MUST be BatchMovePostsResult (same as multi-id), not the flat PostMoveResult: %s", stdout)
+	}
+	if !strings.Contains(stdout, `"moved": [`) {
+		t.Errorf("single-id batch stdout missing \"moved\": [ — moved must be an ARRAY, not a scalar: %s", stdout)
+	}
+	// moved MUST have exactly one entry carrying the id + the recovered date.
+	if !strings.Contains(stdout, `"id": 42`) {
+		t.Errorf("single-id batch stdout missing moved[].id 42: %s", stdout)
+	}
+	if !strings.Contains(stdout, "15.01.2027") {
+		t.Errorf("single-id batch stdout missing the recovered publication_date 15.01.2027 in moved[]: %s", stdout)
+	}
+	// The flat PostMoveResult-only keys MUST NOT appear at the top level
+	// (schedule_id at top level is the PostMoveResult shape, not the batch
+	// shape — the batch wraps schedule_id inside moved[]).
+	if strings.Contains(stdout, `"publication_date": {`) && !strings.Contains(stdout, `"moved"`) {
+		t.Errorf("single-id batch has top-level publication_date without moved — wrong shape: %s", stdout)
+	}
+}
+
 // --- resolveMoveTarget tests (item E: replace the stub) ---
 
 // TestResolveMoveTarget_PositionalOnly is the single-post path: a

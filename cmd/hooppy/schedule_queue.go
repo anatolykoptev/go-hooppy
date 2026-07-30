@@ -47,10 +47,16 @@ type scheduleDayCount struct {
 // prints either the raw envelope (--json) or a summary (depth, first booked
 // day, booked-until, per-day counts) to out, diagnostics to errOut. Returns
 // the process exit code: 0 on success, 1 on error, 2 on a PARTIAL/truncated
-// result (is_has_more=true). Never calls os.Exit itself.
+// result (is_has_more=true) OR a page OVERRUN (page>0 with zero day keys
+// and total_rows>0 — a page past the end of the collection). Never calls
+// os.Exit itself.
 //
 // dateFrom/dateTo (dd.mm.yyyy, "" = unset) and page (0 = unset) are passed
-// through to the endpoint to narrow a truncated calendar.
+// through to the endpoint to narrow a truncated calendar. A narrowed query
+// is a subset by construction; the summary then OMITS first_booked_day and
+// booked_until (the window's bounds are NOT the schedule's) and a note is
+// written to errOut so the omission is visible. day_counts (accurate for
+// the window) still carries the per-day detail.
 //
 // The one-request contract is load-bearing: issue #106 explicitly forbids
 // a paged walk. The endpoint returns the whole calendar in one envelope;
@@ -64,6 +70,15 @@ type scheduleDayCount struct {
 // levers. The exit code is 2 (partial/truncated) so a script can branch:
 // 0=complete, 1=error, 2=partial. total_rows (the real depth) is still
 // emitted.
+//
+// Page overrun: total_rows is the COLLECTION total — it does not change with
+// paging (page=2 and page=99 both return total_rows=96 with zero day keys),
+// so it cannot detect an overrun by comparison. The ONLY signal is
+// page>0 && len(PostsByDays)==0 && TotalRows>0: a page past the end. That
+// warns naming the overrun + total_rows, emits day_counts as [] (not null,
+// so the output shape stays consistent across branches), and exits 2 — an
+// agent walking pages to recover a truncation must not read an overrun as
+// "complete" (exit 0).
 func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, scheduleID int, dateFrom, dateTo string, page int, asJSON bool) int {
 	if scheduleID == 0 {
 		fmt.Fprintln(errOut, "error: schedules queue requires a schedule ID (got 0)")
@@ -79,6 +94,36 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return 1
 	}
+	narrowed := dateFrom != "" || dateTo != "" || page != 0
+	// Page overrun: page>0 with zero day keys and total_rows>0 is a page
+	// PAST THE END (total_rows is the collection total, unchanged by paging,
+	// so it cannot detect an overrun by comparison — only this signal can).
+	// Warn + exit 2 so a script does not read an overrun as "complete".
+	if page > 0 && len(resp.PostsByDays) == 0 && resp.TotalRows > 0 {
+		fmt.Fprintf(errOut, "warn: page %d is past the end of the calendar (total_rows=%d, zero day keys returned). total_rows is the collection total and does not change with paging; this page has no data. Use a lower --page.\n", page, resp.TotalRows)
+		if asJSON {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(resp); err != nil {
+				fmt.Fprintf(errOut, "error encoding output: %v\n", err)
+				return 1
+			}
+			return 2
+		}
+		summary := buildScheduleQueueSummary(resp, scheduleID, dateFrom, dateTo, page)
+		// Force day_counts to an empty slice (not nil) so it marshals as []
+		// not null — the output shape must not change between branches.
+		if summary.DayCounts == nil {
+			summary.DayCounts = []scheduleDayCount{}
+		}
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(summary); err != nil {
+			fmt.Fprintf(errOut, "error encoding output: %v\n", err)
+			return 1
+		}
+		return 2
+	}
 	if asJSON {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
@@ -92,7 +137,7 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 		}
 		return 0
 	}
-	summary := buildScheduleQueueSummary(resp, scheduleID)
+	summary := buildScheduleQueueSummary(resp, scheduleID, dateFrom, dateTo, page)
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(summary); err != nil {
@@ -103,6 +148,15 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 		fmt.Fprintf(errOut, "warn: PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); booked_until is OMITTED because the last day shown is only the last day of page ONE, not the real booked-until date. Narrow with --from/--to (date_from/date_to) or advance --page to recover the rest. One-request contract: no paged walk.\n", resp.TotalRows, resp.RowsLimit)
 		return 2
 	}
+	// A narrowed (but complete, non-overrun) query omits first_booked_day
+	// and booked_until because its day keys are the WINDOW's bounds, not the
+	// schedule's. Surface the omission on stderr so it is not silent — the
+	// operator narrowing to recover a truncation is the exact scenario
+	// where a silent wrong answer bit before. Exit 0: the window's answer
+	// is complete for the question asked.
+	if narrowed {
+		fmt.Fprint(errOut, "note: --from/--to/--page set — first_booked_day and booked_until are OMITTED (the day keys are the narrowed window's bounds, not the schedule's); day_counts reflects the window.\n")
+	}
 	return 0
 }
 
@@ -110,13 +164,24 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 // the default summary. Days are sorted chronologically by their dd.mm.yyyy
 // key (parsed as a date, NOT lexicographically — "01.02.2027" must sort
 // after "31.01.2027", and a string sort would put it before).
+//
+// dateFrom/dateTo (dd.mm.yyyy, "" = unset) and page (0 = unset) describe
+// the query that produced resp. A NARROWED query (any of the three set) is
+// a subset BY CONSTRUCTION — its first/last day keys are the window's
+// bounds, NOT the schedule's first_booked_day/booked_until. Emitting them
+// under the schedule-wide field names would repeat the silent-wrong-answer
+// defect #106 exists to remove, reachable with the very --from/--to flags
+// the truncation warning points an operator to. So when narrowed, both
+// schedule-wide fields are OMITTED; day_counts (accurate for the window)
+// carries the per-day detail instead.
+//
 // FirstBookedDay is the first day with posts; BookedUntil is the last.
 // Both are omitted (omitempty) when the queue is empty so an empty schedule
 // reads as {"total_rows":0,...} not {"first_booked_day":"","booked_until":""}.
 // BookedUntil is ALSO omitted when IsHasMore is true — a truncated
 // response's last day key is the last day of page one, not the real
 // booked-until date (the silent-truncation defect #106 exists to remove).
-func buildScheduleQueueSummary(resp *hooppy.SchedulePostsResponse, scheduleID int) scheduleQueueSummary {
+func buildScheduleQueueSummary(resp *hooppy.SchedulePostsResponse, scheduleID int, dateFrom, dateTo string, page int) scheduleQueueSummary {
 	s := scheduleQueueSummary{
 		ScheduleID: scheduleID,
 	}
@@ -160,7 +225,17 @@ func buildScheduleQueueSummary(resp *hooppy.SchedulePostsResponse, scheduleID in
 			Count: len(resp.PostsByDays[k.raw]),
 		})
 	}
-	if len(s.DayCounts) > 0 {
+	// Schedule-wide first_booked_day/booked_until are emitted ONLY for an
+	// UNnarrowed query. A narrowed query (date_from/date_to/page set) is a
+	// subset by construction: its first/last day keys are the WINDOW's
+	// bounds, not the schedule's. is_has_more is false for a complete
+	// window, so the IsHasMore guard alone does not catch this — and the
+	// --from/--to flags are the very levers the truncation warning points
+	// an operator to. Emitting the window's bounds under the schedule-wide
+	// field names would print a schedule-wide fact that is silently wrong.
+	// day_counts (accurate for the window) carries the per-day detail.
+	narrowed := dateFrom != "" || dateTo != "" || page != 0
+	if len(s.DayCounts) > 0 && !narrowed {
 		s.FirstBookedDay = s.DayCounts[0].Day
 		// BookedUntil is the last day with posts — but ONLY when the
 		// response is complete. A truncated (is_has_more=true) response's

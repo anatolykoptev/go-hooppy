@@ -267,8 +267,11 @@ func TestCommandWiring_MoveAndQueueSubcommands(t *testing.T) {
 	}
 
 	// Use strings MUST name the positionals so --help shows what to pass.
-	if !strings.Contains(moveCmd.Use, "move") {
-		t.Errorf("move Use = %q, must contain \"move\"", moveCmd.Use)
+	// move's Use is "move [post-id]" — assert "post-id" (NOT "move", which is
+	// trivially true for Use: "move ..." and cannot detect a revert of the
+	// [post-id] fix that names the positional).
+	if !strings.Contains(moveCmd.Use, "post-id") {
+		t.Errorf("move Use = %q, must contain \"post-id\" — the positional MUST be named so --help shows what to pass (a revert to bare \"move\" drops it)", moveCmd.Use)
 	}
 	if !strings.Contains(queueCmd.Use, "queue") {
 		t.Errorf("queue Use = %q, must contain \"queue\"", queueCmd.Use)

@@ -35,7 +35,7 @@ func TestBuildScheduleQueueSummary_TotalRowsAndBookedUntil(t *testing.T) {
 	if err := json.Unmarshal([]byte(schedulePostsBody), resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	s := buildScheduleQueueSummary(resp, 55576)
+	s := buildScheduleQueueSummary(resp, 55576, "", "", 0)
 	if s.TotalRows != 4 {
 		t.Errorf("TotalRows = %d, want 4 (queue depth MUST appear in the summary)", s.TotalRows)
 	}
@@ -56,7 +56,7 @@ func TestBuildScheduleQueueSummary_ChronologicalDayOrder(t *testing.T) {
 	if err := json.Unmarshal([]byte(schedulePostsBody), resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	s := buildScheduleQueueSummary(resp, 55576)
+	s := buildScheduleQueueSummary(resp, 55576, "", "", 0)
 	if len(s.DayCounts) != 3 {
 		t.Fatalf("len(DayCounts) = %d, want 3", len(s.DayCounts))
 	}
@@ -86,7 +86,7 @@ func TestBuildScheduleQueueSummary_EmptyQueue(t *testing.T) {
 		PostsByDays: map[string][]hooppy.Post{},
 		TotalRows:   0,
 	}
-	s := buildScheduleQueueSummary(resp, 55576)
+	s := buildScheduleQueueSummary(resp, 55576, "", "", 0)
 	if s.TotalRows != 0 {
 		t.Errorf("TotalRows = %d, want 0", s.TotalRows)
 	}
@@ -104,12 +104,62 @@ func TestBuildScheduleQueueSummary_EmptyQueue(t *testing.T) {
 // TestBuildScheduleQueueSummary_NilResponse verifies a nil response does
 // not panic — the summary reads as an empty queue.
 func TestBuildScheduleQueueSummary_NilResponse(t *testing.T) {
-	s := buildScheduleQueueSummary(nil, 55576)
+	s := buildScheduleQueueSummary(nil, 55576, "", "", 0)
 	if s.TotalRows != 0 {
 		t.Errorf("TotalRows = %d, want 0 (nil response)", s.TotalRows)
 	}
 	if s.ScheduleID != 55576 {
 		t.Errorf("ScheduleID = %d, want 55576 (carried even on nil response)", s.ScheduleID)
+	}
+}
+
+// TestBuildScheduleQueueSummary_NarrowedQueryOmitsScheduleWideFields is the
+// MAJOR-1 guard (review round 4): a --from/--to (or --page) query is a
+// SUBSET by construction, so the server correctly answers is_has_more:false
+// and the truncation guard (keyed on IsHasMore alone) never fires. The
+// window's first/last day keys are the WINDOW's bounds, NOT the schedule's
+// first_booked_day/booked_until. Emitting them under the schedule-wide
+// field names prints a schedule-wide fact that is silently wrong —
+// reachable with the very --from/--to flags the truncation warning points
+// an operator to. A narrowed query MUST NOT emit first_booked_day or
+// booked_until; day_counts (accurate for the window) carries the detail.
+//
+// RED-on-revert: drop the narrowed guard in buildScheduleQueueSummary and
+// BookedUntil/FirstBookedDay are populated from the window's day keys —
+// the assertions fail.
+func TestBuildScheduleQueueSummary_NarrowedQueryOmitsScheduleWideFields(t *testing.T) {
+	// A windowed response: only September shown, is_has_more:false (the
+	// server answers complete for the window). The real schedule is booked
+	// to 12.01.2027 — but the window's last key is 29.09.2026, which MUST
+	// NOT be emitted as booked_until.
+	resp := &hooppy.SchedulePostsResponse{
+		PostsByDays: map[string][]hooppy.Post{
+			"01.09.2026": {{ID: 1}},
+			"15.09.2026": {{ID: 2}},
+			"29.09.2026": {{ID: 3}},
+		},
+		TotalRows: 96, // the COLLECTION total — unchanged by narrowing
+		IsHasMore: false,
+	}
+	// Narrowed by date_from/date_to.
+	s := buildScheduleQueueSummary(resp, 55576, "01.09.2026", "30.09.2026", 0)
+	if s.BookedUntil != "" {
+		t.Errorf("BookedUntil = %q, want \"\" — a narrowed query's last day key (29.09.2026) is the WINDOW's last day, not the schedule's booked-until (12.01.2027); emitting it as booked_until is the silent-wrong-answer defect", s.BookedUntil)
+	}
+	if s.FirstBookedDay != "" {
+		t.Errorf("FirstBookedDay = %q, want \"\" — a narrowed query's first day key is the WINDOW's start, not the schedule's first booked day", s.FirstBookedDay)
+	}
+	// day_counts MUST still carry the window's days (the accurate detail).
+	if len(s.DayCounts) != 3 {
+		t.Errorf("len(DayCounts) = %d, want 3 — the window's per-day counts must still appear", len(s.DayCounts))
+	}
+	// Narrowed by page alone (page=2 past page one) — same invariant.
+	s2 := buildScheduleQueueSummary(resp, 55576, "", "", 2)
+	if s2.BookedUntil != "" {
+		t.Errorf("page-narrowed BookedUntil = %q, want \"\" — a --page query is also a subset; its last day key is not the schedule's booked-until", s2.BookedUntil)
+	}
+	if s2.FirstBookedDay != "" {
+		t.Errorf("page-narrowed FirstBookedDay = %q, want \"\" — a --page query's first day key is not the schedule's first booked day", s2.FirstBookedDay)
 	}
 }
 
@@ -126,7 +176,7 @@ func TestBuildScheduleQueueSummary_MalformedKeyDoesNotAbort(t *testing.T) {
 		},
 		TotalRows: 3,
 	}
-	s := buildScheduleQueueSummary(resp, 55576)
+	s := buildScheduleQueueSummary(resp, 55576, "", "", 0)
 	if len(s.DayCounts) != 3 {
 		t.Fatalf("len(DayCounts) = %d, want 3 (a malformed key must not drop entries)", len(s.DayCounts))
 	}

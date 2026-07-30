@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -168,6 +169,71 @@ func TestBatchMovePostsTool_WireBodyPostsIDsIsString(t *testing.T) {
 	}
 }
 
+// TestBatchMovePostsTool_SingleIDBatch_ShapeIsMovedArray is the MAJOR-3
+// MCP-side guard (review round 4): a single-id batch (`ids=[42]`) MUST
+// return a BatchMovePostsResult with a `moved` array of len 1 — the SAME
+// top-level shape as the multi-id case. The prior shape returned a flat
+// PostMoveResult, so a consumer reading .moved[] got nothing for one id.
+// The single-id routing (for the when_type guard) is kept; only the OUTPUT
+// SHAPE is normalised.
+//
+// RED-on-revert: revert the single-id branch to `return jsonResult(resp)`
+// (flat PostMoveResult) and the result JSON has no "moved" key — the
+// assertion fails.
+func TestBatchMovePostsTool_SingleIDBatch_ShapeIsMovedArray(t *testing.T) {
+	var getCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && getCalls == 0:
+			getCalls++
+			w.Write([]byte(`{"id":42,"publication_when_type":3,"schedule_id":55576}`))
+		case r.Method == http.MethodGet:
+			w.Write([]byte(`{"id":42,"publication_when_type":3,"schedule_id":55576,"publication_date":{"date":"15.01.2027","hours":"12","minutes":"25"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move":
+			w.Write([]byte(`{"success":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+	cs := newMCPClientSession(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "hooppy_batch_move_posts",
+		Arguments: map[string]any{
+			"ids":            []int{42},
+			"to_schedule_id": 55576,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %s", toolResultText(res))
+	}
+	resultText := toolResultText(res)
+	var env map[string]any
+	if err := json.Unmarshal([]byte(resultText), &env); err != nil {
+		t.Fatalf("result is not valid JSON: %v\ntext: %s", err, resultText)
+	}
+	moved, ok := env["moved"].([]any)
+	if !ok {
+		t.Fatalf("single-id batch result has no \"moved\" array — the shape MUST be BatchMovePostsResult (same as multi-id), not the flat PostMoveResult: %s", resultText)
+	}
+	if len(moved) != 1 {
+		t.Fatalf("moved array len = %d, want 1 — a single-id batch wraps the one entry into moved[]: %s", len(moved), resultText)
+	}
+	entry, _ := moved[0].(map[string]any)
+	if entry == nil || entry["id"] != float64(42) {
+		t.Errorf("moved[0].id = %v, want 42: %s", entry["id"], resultText)
+	}
+	if !strings.Contains(resultText, "15.01.2027") {
+		t.Errorf("result missing the recovered publication_date 15.01.2027 in moved[]: %s", resultText)
+	}
+}
+
 // TestListSchedulePostsTool_WireIssuesOneRequest drives the real
 // hooppy_list_schedule_posts handler end to end and asserts exactly ONE
 // request is issued (no paged walk) — the issue #106 contract.
@@ -207,16 +273,19 @@ func TestListSchedulePostsTool_WireIssuesOneRequest(t *testing.T) {
 	}
 }
 
-// TestListSchedulePostsTool_TruncationPrependsWarning is the MCP
-// fail-closed-on-truncation guard (item A): the CLI exits non-zero; the MCP
-// tool MUST also signal truncation — an agent reads MCP, where there is no
-// exit code. The tool prepends an unskippable WARNING to the returned text
-// when is_has_more=true. The data is still present (total_rows is the real
-// depth); the warning names the recovery levers (date_from/date_to, page).
+// TestListSchedulePostsTool_TruncationWarningIsStructuredData is the MCP
+// fail-closed-on-truncation guard (item A, review round 4 MINOR-4): the CLI
+// exits non-zero; the MCP tool MUST also signal truncation — an agent reads
+// MCP, where there is no exit code. The signal travels as a STRUCTURED
+// `warning` field on a VALID-JSON envelope (not a prose prefix that made
+// the truncated result unparseable). The data is still present (total_rows
+// is the real depth); the warning names the recovery levers
+// (date_from/date_to, page).
 //
-// RED-on-revert: drop the IsHasMore warning branch and the result text
-// lacks "WARNING" and "PARTIAL" — both assertions fail.
-func TestListSchedulePostsTool_TruncationPrependsWarning(t *testing.T) {
+// RED-on-revert: drop the IsHasMore warning branch and the envelope has no
+// `warning` field — the assertions fail. Revert to the prose-prefix shape
+// and the result is not valid JSON — the json.Unmarshal assertion fails.
+func TestListSchedulePostsTool_TruncationWarningIsStructuredData(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1}]},"total_rows":500,"rows_limit":200,"is_has_more":true}`))
 	}))
@@ -235,23 +304,34 @@ func TestListSchedulePostsTool_TruncationPrependsWarning(t *testing.T) {
 		t.Fatalf("CallTool: %v", err)
 	}
 	// The result MUST NOT be an error (the data is still useful) — the
-	// warning is prepended to the text, not returned as IsError.
+	// warning is a structured field, not IsError.
 	if res.IsError {
-		t.Fatalf("tool returned IsError=true for a truncated result — the data is still useful; the warning should be prepended to the text, not an error: %s", toolResultText(res))
+		t.Fatalf("tool returned IsError=true for a truncated result — the data is still useful; the warning should be a structured field, not an error: %s", toolResultText(res))
 	}
 	resultText := toolResultText(res)
-	if !strings.Contains(resultText, "WARNING") {
-		t.Errorf("result text missing \"WARNING\" — the MCP tool MUST signal truncation (an agent reads MCP, where there is no exit code): %s", resultText)
+	// The result MUST be valid JSON (the prior prose-prefix shape was NOT —
+	// a parsing agent could not read it). Unmarshal into a map so the
+	// envelope shape is asserted without depending on field order.
+	var env map[string]any
+	if err := json.Unmarshal([]byte(resultText), &env); err != nil {
+		t.Fatalf("result is not valid JSON — the truncation signal must travel as a structured `warning` field on a JSON envelope, not a prose prefix: %v\ntext: %s", err, resultText)
 	}
-	if !strings.Contains(resultText, "PARTIAL") {
-		t.Errorf("result text missing \"PARTIAL\" — the warning must name the truncation: %s", resultText)
+	warning, ok := env["warning"].(string)
+	if !ok || warning == "" {
+		t.Fatalf("result JSON has no non-empty `warning` field — the MCP tool MUST signal truncation as structured data: %s", resultText)
 	}
-	if !strings.Contains(resultText, "is_has_more") {
-		t.Errorf("result text missing \"is_has_more\" — the warning must name the signal: %s", resultText)
+	if !strings.Contains(warning, "PARTIAL") {
+		t.Errorf("warning field missing \"PARTIAL\" — the warning must name the truncation: %s", warning)
+	}
+	if !strings.Contains(warning, "is_has_more") {
+		t.Errorf("warning field missing \"is_has_more\" — the warning must name the signal: %s", warning)
 	}
 	// The data MUST still be present — total_rows is the real depth.
-	if !strings.Contains(resultText, "total_rows") {
-		t.Errorf("result text missing total_rows — the data must still be present alongside the warning: %s", resultText)
+	if _, ok := env["total_rows"]; !ok {
+		t.Errorf("result JSON missing total_rows — the data must still be present alongside the warning: %s", resultText)
+	}
+	if _, ok := env["posts_by_days"]; !ok {
+		t.Errorf("result JSON missing posts_by_days — the data must still be present alongside the warning: %s", resultText)
 	}
 }
 

@@ -586,6 +586,18 @@ func registerSchedules(root *cobra.Command) {
 	queueCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
 		Name:  "queue <schedule-id>",
 		Short: "Show a schedule's queue depth and booked-until date (undocumented endpoint)",
+		Long: "Show a schedule's queue — its depth (total_rows), first booked day, booked-until date, " +
+			"and per-day counts — in ONE request (no paged walk; issue #106). --json prints the raw " +
+			"envelope. --from/--to narrow the calendar (dd.mm.yyyy); --page advances the page. " +
+			"A narrowed query omits first_booked_day/booked_until (its day keys are the WINDOW's bounds, " +
+			"not the schedule's); day_counts carries the per-day detail.\n\n" +
+			"Exit codes (queue-scoped — distinct from `doctor --exit-code`, which uses 1 for ALL its " +
+			"error signals including walk_incomplete):\n" +
+			"  0 = complete (the whole calendar, or a complete narrowed window)\n" +
+			"  1 = error (bad schedule id, request failure, encode failure)\n" +
+			"  2 = partial/truncated (is_has_more=true) OR a page OVERRUN (page>0 with zero day keys " +
+			"and total_rows>0 — a page past the end; total_rows is the collection total and does not " +
+			"change with paging, so it cannot detect an overrun by comparison)",
 	})
 	queueCmd.Args = cobra.ExactArgs(1)
 	var queueJSON bool
@@ -1437,7 +1449,7 @@ func registerDoctor(root *cobra.Command) {
 	var sinceDays int
 	var exitCode bool
 	cmd.Flags().IntVar(&sinceDays, "since", 7, "only report errors whose operation_date falls within the last N days. 0 = no window (all dated rows included); negative values are rejected. Unparseable-date rows are reported REGARDLESS of --since (they cannot be dated, so the window check does not apply). NOTE: the window is computed in the HOST's local timezone (time.Now), but the vendor renders operation_date in the ACCOUNT's timezone (a user setting on hooppy.ru, not exposed by the API). If the two differ, the window boundary can be off by the offset between them — a row the account considers inside the window may be excluded, or vice versa, by up to that offset.")
-	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error signal is present: grouped errors inside the --since window, unparseable-date rows (reported regardless of --since because they cannot be dated), or a truncated walk (walk_incomplete). Exit 0 otherwise (for cron / pre-flight)")
+	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error signal is present: grouped errors inside the --since window, unparseable-date rows (reported regardless of --since because they cannot be dated), or a truncated walk (walk_incomplete). Exit 0 otherwise (for cron / pre-flight). NOTE: doctor uses exit 1 for ALL its error signals (including walk_incomplete); exit 2 is queue-scoped (`schedules queue` — partial/truncated or page overrun), NOT used by doctor.")
 	cmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		os.Exit(runDoctor(context.Background(), c, os.Stdout, os.Stderr, sinceDays, exitCode))

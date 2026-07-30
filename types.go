@@ -1573,6 +1573,24 @@ type ParsingStartPayload struct {
 // dayDateFormat is the vendor's date-only wire format for parsing dates.
 const dayDateFormat = "02.01.2006"
 
+// validateDDMMYYYY rejects a non-empty day string that is not dd.mm.yyyy
+// before any HTTP request is issued. The server's createDateFromString
+// returns a three-word 500 on a malformed date — the client validates first
+// so the error names the expected format (issue #61). Shared by StartParsing
+// and ListSchedulePosts; the caller wraps with its op name so a refusal
+// identifies which call rejected (issue #116). Lives beside dayDateFormat
+// (the format it parses) so a reader in projects.go or posts_search.go
+// finds the validator and the format constant in one place.
+func validateDDMMYYYY(field, day string) error {
+	if day == "" {
+		return nil
+	}
+	if _, err := time.Parse(dayDateFormat, day); err != nil {
+		return fmt.Errorf("%s %q is not a valid dd.mm.yyyy date", field, day)
+	}
+	return nil
+}
+
 // MarshalJSON emits date_from/date_to as dd.mm.yyyy strings ("" = any),
 // the wire format POST /posts-search/parsing/start expects (issue #61).
 // The Day string fields take precedence over the deprecated int fields.

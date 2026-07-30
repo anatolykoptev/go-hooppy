@@ -1017,12 +1017,19 @@ type batchMovePostsInput struct {
 // server 500) and then recovers each post's new publication_date from a
 // post-move GET /posts/{id}/edit. The per-post dates are the load-bearing
 // output.
+//
+// A single-id batch is routed to MovePost (so the when_type guard fires —
+// item E) and the result is WRAPPED into a BatchMovePostsResult so the
+// output shape is identical for one id and many: a consumer reading
+// .moved[] gets the entry either way. The result is ALWAYS a
+// BatchMovePostsResult {success, moved:[{id, schedule_id, publication_date,
+// …}]}.
 func registerBatchMovePosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name: "hooppy_batch_move_posts",
 			Description: "Move multiple existing posts to another schedule in a single request. " +
-				"Each post is RE-SLOTTED to the TAIL of the target queue — the server assigns each post's new publication_date, which is returned per post in the result. " +
+				"Each post is RE-SLOTTED to the TAIL of the target queue — the server assigns each post's new publication_date, which is returned per post in the `moved` array of the result (one entry per id, even for a single-id call). " +
 				"Moving into a booked schedule can delay posts by months; the returned per-post publication_date values are how the caller sees that delay. " +
 				"UNDOCUMENTED endpoint — may change without notice.",
 		},
@@ -1044,13 +1051,25 @@ func registerBatchMovePosts(server *mcp.Server) {
 			}
 			// Route a single-id batch to MovePost so the when_type guard
 			// fires (item E): a single-id batch and a single-post move now
-			// behave identically. Zero extra requests for N>1.
+			// behave identically. WRAP the result into a
+			// BatchMovePostsResult so the output shape matches the multi-id
+			// case — a consumer reading .moved[] gets the entry for the
+			// single id. Zero extra requests for N>1.
 			if len(in.IDs) == 1 {
 				resp, err := c.MovePost(ctx, in.IDs[0], in.ToScheduleID)
 				if err != nil {
 					return errResult(err.Error())
 				}
-				return jsonResult(resp)
+				return jsonResult(&hooppy.BatchMovePostsResult{
+					Success: resp.Success,
+					Moved: []hooppy.MovedPost{{
+						ID:              in.IDs[0],
+						ScheduleID:      resp.ScheduleID,
+						PublicationDate: resp.PublicationDate,
+						SlotLookupError: resp.SlotLookupError,
+						Warning:         resp.Warning,
+					}},
+				})
 			}
 			resp, err := c.BatchMovePosts(ctx, in.IDs, in.ToScheduleID)
 			if err != nil {
@@ -1070,22 +1089,42 @@ type listSchedulePostsInput struct {
 	Page       int    `json:"page,omitempty" jsonschema:"Page number, 1-indexed (0 or omit = first page). Advance this to recover a TRUNCATED result (is_has_more=true) without guessing dates."`
 }
 
+// schedulePostsResultEnvelope wraps the schedule-queue response with an
+// optional warning field so a truncation (or page-overrun) signal travels
+// as STRUCTURED data — valid JSON in BOTH branches — not as a prose prefix
+// that makes the truncated result unparseable (the prior shape). The
+// warning field is named in the hooppy_list_schedule_posts description; an
+// agent reads it the same way it reads PostMoveResult.Warning /
+// MovedPost.Warning. The embedded *SchedulePostsResponse flattens its
+// fields (posts_by_days, total_rows, rows_limit, is_has_more) alongside
+// warning, so a non-truncated call (warning empty, omitempty) serialises
+// identically to the raw envelope.
+type schedulePostsResultEnvelope struct {
+	Warning string `json:"warning,omitempty"`
+	*hooppy.SchedulePostsResponse
+}
+
 // registerListSchedulePosts wires the schedule-queue read. It delegates to
 // hooppy.ListSchedulePosts, which issues exactly ONE GET
 // /posts/schedules/{id}/posts and returns the queue depth (total_rows) and
 // the per-day calendar (posts_by_days). The LAST key in posts_by_days is
-// the booked-until date — but ONLY when is_has_more is false; a truncated
-// response's last day key is the last day of page one, not the real
-// booked-until date, so the caller MUST check is_has_more and narrow with
-// date_from/date_to when it is true. No paged walk — the endpoint returns
-// the whole calendar in one envelope (or a truncated first page; narrow to
-// recover the rest).
+// the booked-until date — but ONLY when is_has_more is false AND no
+// date_from/date_to/page narrowing was applied; a narrowed query is a
+// subset by construction (its last key is the WINDOW's last day, not the
+// schedule's booked-until), and a truncated response's last day key is the
+// last day of page one. The caller MUST check is_has_more and the warning
+// field, and narrow with date_from/date_to when truncated. No paged walk —
+// the endpoint returns the whole calendar in one envelope (or a truncated
+// first page; narrow to recover the rest).
 func registerListSchedulePosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name: "hooppy_list_schedule_posts",
 			Description: "Show a schedule's queue — its depth (total_rows) and per-day calendar (posts_by_days, keyed dd.mm.yyyy) — in ONE request. " +
-				"The LAST key in posts_by_days is the booked-until date ONLY when is_has_more is false; when is_has_more is true the result is TRUNCATED to the first page and the caller MUST narrow with date_from/date_to to recover the rest. " +
+				"The LAST key in posts_by_days is the booked-until date ONLY when is_has_more is false AND no date_from/date_to/page narrowing was applied (a narrowed query's last key is the WINDOW's last day, not the schedule's booked-until). " +
+				"When is_has_more is true the result is TRUNCATED to the first page and a `warning` field is set; the caller MUST narrow with date_from/date_to to recover the rest. " +
+				"A `warning` field is ALSO set when page>0 returns zero day keys with total_rows>0 (a page past the end — total_rows is the collection total and does not change with paging). " +
+				"The result is ALWAYS valid JSON: {warning?, posts_by_days, total_rows, rows_limit, is_has_more}. " +
 				"Use this before moving posts INTO a schedule to see how far out the queue runs. " +
 				"UNDOCUMENTED endpoint — may change without notice.",
 		},
@@ -1106,23 +1145,24 @@ func registerListSchedulePosts(server *mcp.Server) {
 			if err != nil {
 				return errResult(err.Error())
 			}
-			// Enforce truncation on BOTH front-ends (issue #81 class): the
-			// CLI exits non-zero; the MCP tool MUST also signal it. An agent
-			// reads MCP, where there is no exit code — so prepend an
-			// unskippable warning to the returned text. The data is still
-			// present (total_rows is the real depth); the warning names the
-			// recovery levers (date_from/date_to, page).
-			if resp.IsHasMore {
-				data, mErr := json.MarshalIndent(resp, "", "  ")
-				if mErr != nil {
-					return nil, fmt.Errorf("marshal result: %w", mErr)
-				}
-				warning := fmt.Sprintf("WARNING: PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); the calendar is truncated to the first page. Narrow with date_from/date_to or advance page to recover the rest. One-request contract: no paged walk.\n\n", resp.TotalRows, resp.RowsLimit)
-				return &mcp.CallToolResult{
-					Content: []mcp.Content{&mcp.TextContent{Text: warning + string(data)}},
-				}, nil
+			// Enforce truncation + page-overrun on BOTH front-ends (issue
+			// #81 class): the CLI exits non-zero; the MCP tool MUST also
+			// signal it. An agent reads MCP, where there is no exit code —
+			// so the signal travels as a STRUCTURED `warning` field on the
+			// JSON envelope (valid JSON in both branches, unlike the prior
+			// prose-prefix shape that made the truncated result unparseable).
+			// The data is still present (total_rows is the real depth); the
+			// warning names the recovery levers (date_from/date_to, page).
+			env := schedulePostsResultEnvelope{SchedulePostsResponse: resp}
+			switch {
+			case in.Page > 0 && len(resp.PostsByDays) == 0 && resp.TotalRows > 0:
+				// Page past the end: total_rows is the collection total
+				// (unchanged by paging), so only this signal detects it.
+				env.Warning = fmt.Sprintf("PARTIAL result — page %d is past the end of the calendar (total_rows=%d, zero day keys returned). total_rows is the collection total and does not change with paging; this page has no data. Use a lower page.", in.Page, resp.TotalRows)
+			case resp.IsHasMore:
+				env.Warning = fmt.Sprintf("PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); the calendar is truncated to the first page. Narrow with date_from/date_to or advance page to recover the rest. One-request contract: no paged walk.", resp.TotalRows, resp.RowsLimit)
 			}
-			return jsonResult(resp)
+			return jsonResult(env)
 		},
 	)
 }

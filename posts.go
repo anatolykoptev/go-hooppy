@@ -532,7 +532,7 @@ func moveDateWarning(pd *PublicationDate) string {
 	if pd == nil || pd.Date == "" {
 		return ""
 	}
-	day, err := time.Parse("02.01.2006", pd.Date)
+	day, err := time.Parse(dayDateFormat, pd.Date)
 	if err != nil {
 		return ""
 	}
