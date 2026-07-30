@@ -150,58 +150,102 @@ var jsonUnmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
 // honouring `json` tags and promoting embedded (anonymous) struct fields.
 // A `json:"-"` field is excluded. A field with no tag uses its Go name.
 func jsonFields(t reflect.Type) map[string]reflect.Type {
-	m := map[string]reflect.Type{}
+	candidates := map[string][]fieldCandidate{}
+	collectJSONFields(t, 0, candidates)
+	out := make(map[string]reflect.Type, len(candidates))
+	for name, cs := range candidates {
+		if winner, ok := dominantField(cs); ok {
+			out[name] = winner.typ
+		}
+	}
+	return out
+}
+
+// fieldCandidate is one struct field competing for a JSON name. Depth 0 is the
+// outer struct; each untagged embedded struct adds one.
+type fieldCandidate struct {
+	typ    reflect.Type
+	depth  int
+	tagged bool
+}
+
+// collectJSONFields gathers every candidate for every name, without resolving
+// conflicts — resolution needs to see the whole set.
+//
+// The anonymous-field rules are measured against encoding/json, not assumed:
+//
+//	untagged embedded struct, exported OR unexported type -> promoted
+//	tagged embedded struct,   exported OR unexported type -> a NAMED field
+//	                                     under the tag, and still populated
+//	embedded unexported scalar                            -> ignored
+//
+// An embedded NON-struct must not be recursed into at all: that panics with
+// "reflect: NumField of non-struct type".
+func collectJSONFields(t reflect.Type, depth int, out map[string][]fieldCandidate) {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		ft := derefType(f.Type)
-		embeddedStruct := f.Anonymous && ft.Kind() == reflect.Struct
-
-		// An anonymous field is PROMOTED only when it is an untagged struct.
-		// Measured 2026-07-30 against encoding/json, all five shapes:
-		//
-		//	untagged embedded struct (exported OR unexported type) -> promoted
-		//	tagged embedded struct   (exported OR unexported type) -> a NAMED
-		//	                                    field under the tag, and filled
-		//	embedded unexported scalar -> ignored entirely
-		//
-		// Recursing into an embedded NON-struct used to panic outright:
-		// "reflect: NumField of non-struct type".
-		if embeddedStruct && f.Tag.Get("json") == "" {
-			for k, v := range jsonFields(ft) {
-				if _, exists := m[k]; !exists {
-					m[k] = v
-				}
-			}
-			continue
-		}
-
-		// Everything else is a named field. encoding/json never populates an
-		// unexported one, and treating it as modelled makes the walker report
-		// a key as covered while the runtime silently drops it — a false-clean
-		// gate, the exact failure this file exists to prevent.
-		//
-		// The exception is a tagged embedded struct: the EMBEDDING field's
-		// name is its type name and so reads as unexported, but the decoder
-		// still fills it through its exported inner fields.
-		if !f.IsExported() && !embeddedStruct {
-			continue
-		}
 		tag := f.Tag.Get("json")
 		if tag == "-" {
 			continue
 		}
-		name := f.Name
+		embeddedStruct := f.Anonymous && ft.Kind() == reflect.Struct
+		if embeddedStruct && tag == "" {
+			collectJSONFields(ft, depth+1, out)
+			continue
+		}
+		// Everything else is a named field. encoding/json never populates an
+		// unexported one, and calling it modelled makes the walker report a
+		// key as covered while the runtime drops it — a false-clean gate, the
+		// exact failure this file exists to prevent. The exception is a tagged
+		// embedded struct: its field name is its type name and so reads as
+		// unexported, while the decoder still fills it.
+		if !f.IsExported() && !embeddedStruct {
+			continue
+		}
+		name, tagged := f.Name, false
 		if tag != "" {
-			parts := strings.SplitN(tag, ",", 2)
-			if parts[0] != "" {
-				name = parts[0]
+			if parts := strings.SplitN(tag, ",", 2); parts[0] != "" {
+				name, tagged = parts[0], true
 			}
 		}
-		if _, exists := m[name]; !exists {
-			m[name] = f.Type
+		out[name] = append(out[name], fieldCandidate{typ: f.Type, depth: depth, tagged: tagged})
+	}
+}
+
+// dominantField applies encoding/json's rule for a contested name: the
+// SHALLOWEST depth wins, a tagged field beats untagged ones at that depth, and
+// a remaining tie means the key is DROPPED — encoding/json ignores it entirely
+// rather than picking one.
+//
+// The last clause is the one that matters here. First-wins or last-wins both
+// report a key as modelled that the decoder silently discards, which is a
+// false-clean gate pointing the wrong way. Measured: struct{C1; C2} where both
+// carry json:"x" decodes {"x":…} into NEITHER field, with no error.
+func dominantField(cs []fieldCandidate) (fieldCandidate, bool) {
+	shallowest := cs[0].depth
+	for _, c := range cs[1:] {
+		if c.depth < shallowest {
+			shallowest = c.depth
 		}
 	}
-	return m
+	var atDepth, tagged []fieldCandidate
+	for _, c := range cs {
+		if c.depth != shallowest {
+			continue
+		}
+		atDepth = append(atDepth, c)
+		if c.tagged {
+			tagged = append(tagged, c)
+		}
+	}
+	if len(atDepth) == 1 {
+		return atDepth[0], true
+	}
+	if len(tagged) == 1 {
+		return tagged[0], true
+	}
+	return fieldCandidate{}, false
 }
 
 func derefType(t reflect.Type) reflect.Type {
@@ -1437,15 +1481,21 @@ var exemptFromContracts = map[reflect.Type]string{
 // way and miss every other way of rejecting. The narrow typed predicate is
 // still right for scalarOnly, where the walker genuinely needs the typed error
 // to classify: different claims, different evidence.
-func verifyExemption(t *testing.T, typ reflect.Type, reason string) {
-	t.Helper()
+// It reports through a callback rather than a *testing.T so it can be aimed at
+// a synthetic subject without constructing a bare &testing.T{} — that relies on
+// testing internals, and a Fatalf on a parentless T calls runtime.Goexit and
+// kills the CALLER's goroutine, silently skipping whatever came after.
+func verifyExemption(typ reflect.Type, reason string, report func(format string, args ...any)) {
 	if !typ.Implements(jsonUnmarshalerType) && !reflect.PointerTo(typ).Implements(jsonUnmarshalerType) {
-		t.Errorf("exemptFromContracts names %s (%q), which is not a json.Unmarshaler — it was never leaf-skipped, so exempting it says nothing and hides that the entry is meaningless", typ, reason)
+		report("exemptFromContracts names %s (%q), which is not a json.Unmarshaler — it was never leaf-skipped, so exempting it says nothing and hides that the entry is meaningless", typ, reason)
 		return
 	}
-	for _, body := range []string{`{"a":1}`, `[1,2]`, `0`} {
+	// Every JSON shape, not just containers. Widening the error-KIND axis
+	// without the SHAPE axis would still exempt a type that accepts objects,
+	// arrays and numbers while rejecting strings.
+	for _, body := range []string{`{"a":1}`, `[1,2]`, `0`, `"str"`, `true`, `null`} {
 		if err := json.Unmarshal([]byte(body), reflect.New(typ).Interface()); err != nil {
-			t.Errorf("exemptFromContracts claims %s accepts any shape (%q), but %s is rejected: %v — a type that DISCRIMINATES needs a contract, not an exemption", typ, reason, body, err)
+			report("exemptFromContracts claims %s accepts any shape (%q), but %s is rejected: %v — a type that DISCRIMINATES needs a contract, not an exemption", typ, reason, body, err)
 		}
 	}
 }
@@ -1512,7 +1562,7 @@ func TestUnmarshalerContractsAreComplete(t *testing.T) {
 
 	// An exemption is a claim that the type accepts ANY shape. Measure it.
 	for typ, reason := range exemptFromContracts {
-		verifyExemption(t, typ, reason)
+		verifyExemption(typ, reason, t.Errorf)
 	}
 	// Both populations must also expire. An entry for a type nothing reaches
 	// outlives whatever justified it, and nothing would ever say so.
@@ -1766,18 +1816,28 @@ func keysOf(m map[string]reflect.Type) []string {
 // errors.As predicate this type sailed through as "accepts any shape" while
 // discriminating on every container it was handed.
 func TestVerifyExemption_CatchesAPickyType(t *testing.T) {
-	sub := &testing.T{}
-	verifyExemption(sub, reflect.TypeOf(pickyLeaf{}), "probe")
-	if !sub.Failed() {
+	var got []string
+	collect := func(format string, args ...any) { got = append(got, fmt.Sprintf(format, args...)) }
+
+	verifyExemption(reflect.TypeOf(pickyLeaf{}), "probe", collect)
+	if len(got) == 0 {
 		t.Error("verifyExemption passed a type that rejects containers — an exemption claims the type accepts ANY shape, and the probe must notice a rejection however it is expressed, not only as *json.UnmarshalTypeError")
 	}
 
+	// A type that rejects only STRINGS must be caught too: widening the
+	// error-kind axis without the shape axis leaves this one exempt.
+	got = nil
+	verifyExemption(reflect.TypeOf(stringHatingLeaf{}), "probe", collect)
+	if len(got) == 0 {
+		t.Error("verifyExemption passed a type that rejects strings — the probe must cover every JSON shape, not only containers")
+	}
+
 	// And it must not fail a type that genuinely accepts everything, or the
-	// assertion above is universal rather than discriminating.
-	sub2 := &testing.T{}
-	verifyExemption(sub2, reflect.TypeOf(json.RawMessage{}), "accepts any JSON value verbatim")
-	if sub2.Failed() {
-		t.Error("verifyExemption failed json.RawMessage, which does accept any JSON value — the probe is rejecting a legitimate exemption")
+	// assertions above are universal rather than discriminating.
+	got = nil
+	verifyExemption(reflect.TypeOf(json.RawMessage{}), "accepts any JSON value verbatim", collect)
+	if len(got) != 0 {
+		t.Errorf("verifyExemption failed json.RawMessage, which does accept any JSON value: %v", got)
 	}
 }
 
@@ -1790,6 +1850,124 @@ func (p *pickyLeaf) UnmarshalJSON(b []byte) error {
 		return errors.New("pickyLeaf: containers not supported")
 	}
 	return nil
+}
+
+// stringHatingLeaf discriminates on a shape the container probes never reach.
+type stringHatingLeaf struct{}
+
+func (s *stringHatingLeaf) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		return errors.New("stringHatingLeaf: strings not supported")
+	}
+	return nil
+}
+
+// TestJSONFields_FieldDominance pins the three outcomes of a contested JSON
+// name. Each case carries its own decode as the premise, so this asserts what
+// encoding/json DOES rather than what the helper was written to believe.
+//
+// The tie case is the one that matters. A first-wins or last-wins rule — the
+// helper has had both — reports a key as MODELLED that the decoder silently
+// discards, which is a false-clean gate pointing the wrong way: precisely the
+// failure this file exists to catch.
+func TestJSONFields_FieldDominance(t *testing.T) {
+	type c1 struct {
+		X string `json:"x"`
+	}
+	type c2 struct {
+		X string `json:"x"`
+	}
+	type deep struct {
+		A string `json:"a"`
+	}
+
+	t.Run("same-depth tie is dropped", func(t *testing.T) {
+		// Built with reflect.StructOf rather than declared: `go vet`'s
+		// structtag check rejects a repeated json tag in source, and this
+		// repo runs vet in its gate. That is a useful guard, not a reason to
+		// skip the case — vet covers types declared HERE, and jsonFields is a
+		// model of encoding/json, which must be right regardless of where a
+		// type comes from.
+		tie := reflect.StructOf([]reflect.StructField{
+			{Name: "C1", Type: reflect.TypeOf(c1{}), Anonymous: true},
+			{Name: "C2", Type: reflect.TypeOf(c2{}), Anonymous: true},
+		})
+		v := reflect.New(tie)
+		if err := json.Unmarshal([]byte(`{"x":"set"}`), v.Interface()); err != nil {
+			t.Fatalf("premise: %v", err)
+		}
+		got1 := v.Elem().Field(0).Field(0).String()
+		got2 := v.Elem().Field(1).Field(0).String()
+		if got1 != "" || got2 != "" {
+			t.Fatalf("premise broken: encoding/json now RESOLVES a same-depth tie (%q/%q) — the drop rule below is no longer right", got1, got2)
+		}
+		if _, ok := jsonFields(tie)["x"]; ok {
+			t.Error(`jsonFields reports "x" as modelled, but encoding/json fills NEITHER field and reports no error — the walker would call a silently discarded key covered`)
+		}
+	})
+
+	t.Run("shallower depth wins, with its own type", func(t *testing.T) {
+		type shadow struct {
+			deep
+			A int `json:"a"` // depth 0 beats the promoted depth-1 string
+		}
+		var v shadow
+		if err := json.Unmarshal([]byte(`{"a":7}`), &v); err != nil {
+			t.Fatalf("premise: %v", err)
+		}
+		if v.A != 7 || v.deep.A != "" {
+			t.Fatalf("premise broken: encoding/json did not bind the OUTER field (%+v)", v)
+		}
+		got, ok := jsonFields(reflect.TypeOf(shadow{}))["a"]
+		if !ok {
+			t.Fatal(`jsonFields lost "a"`)
+		}
+		if got.Kind() != reflect.Int {
+			t.Errorf(`jsonFields reports "a" as %s, want int — presence is not enough, the TYPE is what drives the walker's recursion, and the inner string would send it down the wrong branch`, got)
+		}
+	})
+
+	t.Run("a tagged field beats an untagged one at the same depth", func(t *testing.T) {
+		type both struct {
+			X string // no tag: name "X"
+			Y string `json:"X"`
+		}
+		var v both
+		if err := json.Unmarshal([]byte(`{"X":"set"}`), &v); err != nil {
+			t.Fatalf("premise: %v", err)
+		}
+		if v.Y != "set" || v.X != "" {
+			t.Fatalf("premise broken: the TAGGED field no longer wins (%+v)", v)
+		}
+		if _, ok := jsonFields(reflect.TypeOf(both{}))["X"]; !ok {
+			t.Error(`jsonFields dropped "X" — a tagged/untagged clash is resolved by encoding/json, not dropped`)
+		}
+	})
+}
+
+// TestJSONFields_EmbeddedUnexportedScalarIsIgnored pins the third shape the
+// anonymous-field comment claims and nothing asserted. encoding/json cannot set
+// it, so reporting it as modelled is a false-clean gate.
+func TestJSONFields_EmbeddedUnexportedScalarIsIgnored(t *testing.T) {
+	type namedScalar string
+	type host struct {
+		namedScalar
+		Kept string `json:"kept"`
+	}
+	var v host
+	if err := json.Unmarshal([]byte(`{"namedScalar":"q","kept":"k"}`), &v); err != nil {
+		t.Fatalf("premise: %v", err)
+	}
+	if v.namedScalar != "" {
+		t.Fatalf("premise broken: encoding/json now fills an embedded unexported scalar (%+v)", v)
+	}
+	if v.Kept != "k" {
+		t.Fatalf("premise broken: the sibling field was not filled (%+v)", v)
+	}
+	got := jsonFields(reflect.TypeOf(host{}))
+	if _, ok := got["namedScalar"]; ok {
+		t.Errorf("jsonFields reports %q as modelled (got %v) — the decoder ignores it entirely, so the walker would call a dropped key covered", "namedScalar", keysOf(got))
+	}
 }
 
 // TestUnmarshalerLeafPointerReceiver verifies Fix 1: Metric (and FlexInt,
