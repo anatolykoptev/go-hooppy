@@ -40,6 +40,14 @@
 * **`parseMetricFloat`/`parseMetricInt` silent 1000×-wrong value on a decimal comma** (#65): the accessors stripped commas before `ParseFloat`/`Atoi`, so a decimal-comma string from the vendor's Russian locale (`"0,520"` = the ratio 0.520) silently became `520.0` with `err==nil`, and `"1,2,3"` became `123` on the int path — the exact silent-wrongness class these accessors exist to prevent. The shape is now validated BEFORE stripping: only a plain decimal or a comma-thousands-grouped number is accepted; a leading-zero head followed by a comma (`"0,520"`), non-thousands-grouped commas (`"1,2,3"`, `"3,14"`), and other-locale separators (`"1 234"`, `"1.234,56"`) return an error.
 * **Negative metric thresholds fell through the refusal guard** (#65): the guard used `> 0`, so a caller passing `-1` (directly, or from a computed threshold like `avg-stddev` going negative) took neither branch — no error, no parameter, an unfiltered result while the help stated the flag errors. The guard now fires on `!= 0` for the four ints and the float.
 * **BEHAVIOUR CHANGE — negative page/ID filters now error across all list endpoints** (#65): every list endpoint that took a page or ID filter gated on `> 0` had the same silent-negative hole — a negative took neither branch (no error, no parameter), so the server returned an unfiltered or first-page result that looked filtered. `ListAccounts`, `ListPages`, `ListPosts`, `ListSearchPosts`, `ListProjects`, `ListSchedules`, `ListWatermarks`, and `ListNotifications` now reject negative page/ID values with an error before any request is issued; zero stays the unset sentinel. This is BEHAVIOUR-CHANGING for consumers that previously passed a negative (e.g. `--page -1` via the CLI's signed `IntVar`, or a computed `page-1` that underflowed): they got a result set and now get an error. Under `release-please` this ships as a `fix:` patch bump; callers must pass 0 (or omit) to leave a filter unset.
+## [1.1.2](https://github.com/anatolykoptev/go-hooppy/compare/v1.1.1...v1.1.2) (2026-07-30)
+
+
+### Fixed
+
+* emit dd.mm.yyyy strings for parsing date_from/date_to on the wire ([#99](https://github.com/anatolykoptev/go-hooppy/issues/99)) ([e980ec1](https://github.com/anatolykoptev/go-hooppy/commit/e980ec16e4edc867523c3b824521f28e482072cb))
+* give every cobra command an explicit arity so junk positionals error ([#95](https://github.com/anatolykoptev/go-hooppy/issues/95)) ([07db1e5](https://github.com/anatolykoptev/go-hooppy/commit/07db1e5311b95d5159f46c3aac8636d171076cf8)), closes [#77](https://github.com/anatolykoptev/go-hooppy/issues/77)
+
 ## [1.1.1](https://github.com/anatolykoptev/go-hooppy/compare/v1.1.0...v1.1.1) (2026-07-29)
 
 
