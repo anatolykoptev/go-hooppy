@@ -270,9 +270,13 @@ func validateParsingDate(field, day string) error {
 // what produced the earlier "a parse cannot be cancelled" conclusion.
 //
 // Poll the result with GetParsingForm, whose is_parsing_in_progress field is
-// the working oracle. GET /posts-search does NOT carry that key — it decodes
-// as the zero value, which is indistinguishable from "idle" and turns a
-// status check into a false negative.
+// the working oracle (ParsingFormResponse models it; SearchPostsResponse does
+// not). GET /posts-search does NOT carry that key at all, so do not add it to
+// SearchPostsResponse expecting the server to fill it — it would decode as
+// false on every call and read exactly like "idle".
+//
+// Retrying this call is safe: three consecutive DELETEs against an idle live
+// account each answered {"success":true} and left the flag false.
 //
 // UNDOCUMENTED: DELETE /posts-search/parsing/stop is not in the public
 // OpenAPI spec.
