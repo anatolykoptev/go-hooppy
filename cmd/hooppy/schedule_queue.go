@@ -94,7 +94,7 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return 1
 	}
-	narrowed := dateFrom != "" || dateTo != "" || page != 0
+	narrowed := dateFrom != "" || dateTo != "" || page > 1
 	// Page overrun: page>0 with zero day keys and total_rows>0 is a page
 	// PAST THE END (total_rows is the collection total, unchanged by paging,
 	// so it cannot detect an overrun by comparison — only this signal can).
@@ -114,7 +114,6 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 		// Force day_counts to an empty slice (not nil) so it marshals as []
 		// not null — the output shape must not change between branches.
 		if summary.DayCounts == nil {
-			summary.DayCounts = []scheduleDayCount{}
 		}
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
@@ -145,7 +144,7 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 		return 1
 	}
 	if resp.IsHasMore {
-		fmt.Fprintf(errOut, "warn: PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); booked_until is OMITTED because the last day shown is only the last day of page ONE, not the real booked-until date. Narrow with --from/--to (date_from/date_to) or advance --page to recover the rest. One-request contract: no paged walk.\n", resp.TotalRows, resp.RowsLimit)
+		fmt.Fprintf(errOut, "warn: PARTIAL result — is_has_more=true (total_rows=%d, rows_limit=%d); booked_until is OMITTED because the last day shown is only the last day of page ONE, not the real booked-until date (and also omitted if --from/--to/--page narrowed the query). Narrow with --from/--to (date_from/date_to) or advance --page to recover the rest. One-request contract: no paged walk.\n", resp.TotalRows, resp.RowsLimit)
 		return 2
 	}
 	// A narrowed (but complete, non-overrun) query omits first_booked_day
@@ -184,6 +183,10 @@ func runScheduleQueue(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 func buildScheduleQueueSummary(resp *hooppy.SchedulePostsResponse, scheduleID int, dateFrom, dateTo string, page int) scheduleQueueSummary {
 	s := scheduleQueueSummary{
 		ScheduleID: scheduleID,
+		// Always a slice, never nil: a nil DayCounts marshals as `null`,
+		// which changes the output shape between the empty and non-empty
+		// branches. Set here so every early return below is already stable.
+		DayCounts: []scheduleDayCount{},
 	}
 	if resp == nil {
 		return s
@@ -234,7 +237,7 @@ func buildScheduleQueueSummary(resp *hooppy.SchedulePostsResponse, scheduleID in
 	// an operator to. Emitting the window's bounds under the schedule-wide
 	// field names would print a schedule-wide fact that is silently wrong.
 	// day_counts (accurate for the window) carries the per-day detail.
-	narrowed := dateFrom != "" || dateTo != "" || page != 0
+	narrowed := dateFrom != "" || dateTo != "" || page > 1
 	if len(s.DayCounts) > 0 && !narrowed {
 		s.FirstBookedDay = s.DayCounts[0].Day
 		// BookedUntil is the last day with posts — but ONLY when the

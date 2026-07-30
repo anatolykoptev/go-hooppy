@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/anatolykoptev/go-hooppy"
@@ -127,6 +128,87 @@ func TestBuildScheduleQueueSummary_NilResponse(t *testing.T) {
 // RED-on-revert: drop the narrowed guard in buildScheduleQueueSummary and
 // BookedUntil/FirstBookedDay are populated from the window's day keys —
 // the assertions fail.
+// TestBuildScheduleQueueSummary_PageOneIsNotNarrowed pins the fix for a guard
+// keyed on "was a flag set" instead of "is the response a subset". `--page 1` is
+// byte-identical to no page at all — the server's default IS page one — so the
+// response is the same complete calendar and the schedule-wide fields are
+// legitimate. Suppressing them for `page=1` starved the natural loop bound: a
+// script walking pages from 1 would never see first_booked_day/booked_until even
+// on the complete first page.
+//
+// `page > 1` is the correct condition. Truncation is still handled: page=1 with
+// is_has_more:true hits the separate IsHasMore branch, covered below.
+func TestBuildScheduleQueueSummary_PageOneIsNotNarrowed(t *testing.T) {
+	resp := &hooppy.SchedulePostsResponse{
+		PostsByDays: map[string][]hooppy.Post{
+			"31.07.2026": {{ID: 1}},
+			"12.01.2027": {{ID: 2}},
+		},
+		TotalRows: 96,
+		IsHasMore: false,
+	}
+	noPage := buildScheduleQueueSummary(resp, 55576, "", "", 0)
+	pageOne := buildScheduleQueueSummary(resp, 55576, "", "", 1)
+
+	if pageOne.FirstBookedDay != noPage.FirstBookedDay || pageOne.BookedUntil != noPage.BookedUntil {
+		t.Errorf("page=1 summary (%q…%q) differs from no-page (%q…%q) — page 1 IS the server default, so the response is the same complete calendar and both fields are legitimate",
+			pageOne.FirstBookedDay, pageOne.BookedUntil, noPage.FirstBookedDay, noPage.BookedUntil)
+	}
+	if pageOne.BookedUntil != "12.01.2027" {
+		t.Errorf("page=1 BookedUntil = %q, want \"12.01.2027\" — suppressing it treats a complete first page as a subset", pageOne.BookedUntil)
+	}
+	// page=2 remains a subset and must still suppress.
+	pageTwo := buildScheduleQueueSummary(resp, 55576, "", "", 2)
+	if pageTwo.BookedUntil != "" {
+		t.Errorf("page=2 BookedUntil = %q, want \"\" — page 2 IS a subset; relaxing the guard to page>1 must not relax it past 1", pageTwo.BookedUntil)
+	}
+	// A truncated page one still exits through the IsHasMore path: booked_until
+	// suppressed, first_booked_day kept (page one starts at the calendar's
+	// beginning, so its FIRST key is genuinely the schedule's first booked day).
+	trunc := &hooppy.SchedulePostsResponse{
+		PostsByDays: map[string][]hooppy.Post{"31.07.2026": {{ID: 1}}},
+		TotalRows:   500, RowsLimit: 200, IsHasMore: true,
+	}
+	tp := buildScheduleQueueSummary(trunc, 55576, "", "", 1)
+	if tp.BookedUntil != "" {
+		t.Errorf("truncated page=1 BookedUntil = %q, want \"\" — the last key of a truncated read is the last day of page one, not the schedule's end", tp.BookedUntil)
+	}
+	if tp.FirstBookedDay != "31.07.2026" {
+		t.Errorf("truncated page=1 FirstBookedDay = %q, want \"31.07.2026\" — page one begins at the calendar's start, so its first key IS the schedule's first booked day; suppressing it loses a correct answer", tp.FirstBookedDay)
+	}
+}
+
+// TestScheduleQueueSummary_DayCountsMarshalsAsEmptyArray asserts on the
+// MARSHALLED BYTES, not the struct. A nil DayCounts serialises as `null` while a
+// populated one serialises as `[]…`, so the output shape changed between the
+// empty and non-empty branches — and a struct-level assertion cannot see that,
+// which is why the inconsistency survived a round that set out to fix it.
+func TestScheduleQueueSummary_DayCountsMarshalsAsEmptyArray(t *testing.T) {
+	cases := []struct {
+		name string
+		resp *hooppy.SchedulePostsResponse
+	}{
+		{"nil response", nil},
+		{"empty calendar", &hooppy.SchedulePostsResponse{PostsByDays: map[string][]hooppy.Post{}, TotalRows: 0}},
+		{"page past the end", &hooppy.SchedulePostsResponse{PostsByDays: map[string][]hooppy.Post{}, TotalRows: 96}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(buildScheduleQueueSummary(tc.resp, 55576, "", "", 0))
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			got := string(b)
+			if !strings.Contains(got, `"day_counts":[]`) {
+				t.Errorf("marshalled summary lacks `\"day_counts\":[]` — a nil slice ships as `null` and the output shape then differs between the empty and non-empty branches: %s", got)
+			}
+			if strings.Contains(got, `"day_counts":null`) {
+				t.Errorf("marshalled summary carries `\"day_counts\":null`: %s", got)
+			}
+		})
+	}
+}
+
 func TestBuildScheduleQueueSummary_NarrowedQueryOmitsScheduleWideFields(t *testing.T) {
 	// A windowed response: only September shown, is_has_more:false (the
 	// server answers complete for the window). The real schedule is booked

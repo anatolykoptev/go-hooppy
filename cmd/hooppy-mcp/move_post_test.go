@@ -391,11 +391,16 @@ func TestListSchedulePostsTool_PageOverrunWarningIsStructuredData(t *testing.T) 
 	if got, ok := env["total_rows"].(float64); !ok || int(got) != 96 {
 		t.Errorf("total_rows = %v, want 96 — the collection total must still be reported alongside the warning: %s", env["total_rows"], resultText)
 	}
-	// is_has_more is false here, which is exactly why the truncation branch
-	// cannot cover this case. Pin it so a future refactor that folds the two
-	// branches together fails instead of silently losing the overrun signal.
-	if got, ok := env["is_has_more"].(bool); ok && got {
-		t.Errorf("fixture drift: is_has_more must be false for the overrun case, otherwise this test passes via the truncation branch and stops guarding the overrun one")
+	// is_has_more must be present AND false. This guards FIXTURE DRIFT: if the
+	// stub were edited to true, this test would pass through the truncation
+	// branch and quietly stop guarding the overrun one. (It does NOT guard
+	// against folding the two branches into one condition — that fold would
+	// leave the fixture false and the warning non-empty, so this test would
+	// still pass. The branch discriminator is the "past the end" assertion
+	// above.) `ok && got` would pass if the key vanished from the envelope,
+	// so assert presence too.
+	if got, ok := env["is_has_more"].(bool); !ok || got {
+		t.Errorf("fixture drift: is_has_more must be present and false for the overrun case (got %v, present=%v); otherwise this test passes via the truncation branch", env["is_has_more"], ok)
 	}
 }
 
