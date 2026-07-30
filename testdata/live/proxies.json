@@ -1,0 +1,16 @@
+{
+  "is_has_more": true,
+  "list": [
+    {
+      "id": 0,
+      "ip": "str",
+      "login": "str",
+      "name": "str",
+      "password": "str",
+      "port": "str",
+      "user_id": 0
+    }
+  ],
+  "rows_limit": 0,
+  "total_rows": 0
+}

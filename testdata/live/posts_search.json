@@ -1,0 +1,54 @@
+{
+  "filters_plug": [
+    {
+      "name": "str",
+      "selected_value": "str",
+      "slug": "str",
+      "type": "str"
+    }
+  ],
+  "is_has_more": true,
+  "list": [
+    {
+      "audios": [],
+      "comments": "str",
+      "comments_source": 0,
+      "documents": [],
+      "id": 0,
+      "involvement": "str",
+      "is_attachments_in_process": 0,
+      "is_used": 0,
+      "likes": "str",
+      "likes_source": 0,
+      "link": "str",
+      "owner": {
+        "alias": "str",
+        "id": "str",
+        "link": "str",
+        "name": "str",
+        "photo": "str",
+        "type": "str"
+      },
+      "photos": [
+        {
+          "id": 0,
+          "info": "str",
+          "owner_id": 0,
+          "url": "str"
+        }
+      ],
+      "publication_date": "str",
+      "reposts": "str",
+      "reposts_source": 0,
+      "source_id": 0,
+      "text": "str",
+      "video_duration": 0,
+      "videos": [],
+      "views": "str",
+      "views_source": 0
+    }
+  ],
+  "rows_limit": 0,
+  "selected_filters_placeholders": [],
+  "total_rows": 0
+}
