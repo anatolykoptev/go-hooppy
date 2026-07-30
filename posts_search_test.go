@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -679,11 +680,20 @@ func TestStartParsing_MalformedDateRejectsBeforeRequest(t *testing.T) {
 	}
 }
 
+// TestStopParsing pins the exact path, which is the whole behaviour of this
+// call. The server has a suffix-less sibling that accepts the same DELETE and
+// answers {"success":true} without cancelling anything (issue #94), so an
+// assertion on the status code or the response body passes for both the
+// working and the broken path. Only the path distinguishes them.
+//
+// This test previously asserted /posts-search/parsing and was green while the
+// client could not cancel a parse at all.
 func TestStopParsing(t *testing.T) {
+	var reqCount atomic.Int64
+	var gotMethod, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete || r.URL.Path != "/posts-search/parsing" {
-			t.Errorf("DELETE /posts-search/parsing, got %s %s", r.Method, r.URL.Path)
-		}
+		reqCount.Add(1)
+		gotMethod, gotPath = r.Method, r.URL.Path
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -691,6 +701,65 @@ func TestStopParsing(t *testing.T) {
 
 	if err := c.StopParsing(context.Background()); err != nil {
 		t.Fatalf("StopParsing: %v", err)
+	}
+	if got := reqCount.Load(); got != 1 {
+		t.Fatalf("StopParsing issued %d requests, want 1 — an early return before the request would leave the path assertion below comparing empty strings", got)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/posts-search/parsing/stop" {
+		t.Errorf("want DELETE /posts-search/parsing/stop, got %s %s — /posts-search/parsing is the suffix-less sibling that answers success and cancels nothing", gotMethod, gotPath)
+	}
+}
+
+// TestStopParsing_RetriedToTheSamePath pins the retryAllowed declaration at the
+// call site, which TestRetryPolicySweep cannot do (it checks a declaration
+// exists, not that it matches the literal passed to doDELETE — issue #93). It
+// is also the only DELETE retry pin in the suite; the behavioural
+// _Retried/_NotRetried pairs in retry_policy_test.go cover PUT only.
+//
+// Two things must hold. A transient 500 has to be retried, because a cancel
+// that silently gives up leaves a scraping job running for its full duration
+// (measured at 256.9s). And every attempt has to land on the SAME path — a
+// retry that fell through to the suffix-less sibling would answer success
+// while cancelling nothing, which is the exact regression this file's sibling
+// test exists to prevent.
+//
+// Retrying a cancel is safe: three consecutive DELETEs against an idle live
+// account each answered {"success":true} and left is_parsing_in_progress
+// false (measured 2026-07-30). The residual case the endpoint cannot protect
+// against is a retry landing after a NEW job was started inside the backoff
+// window; that is a caller-level race, not a property of this call.
+func TestStopParsing_RetriedToTheSamePath(t *testing.T) {
+	var calls atomic.Int64
+	var paths []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		if calls.Add(1) < 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := c.StopParsing(context.Background()); err != nil {
+		t.Fatalf("StopParsing: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("StopParsing issued %d requests, want 2 — a transient 500 on a cancel MUST be retried (setting doDELETE retryable=false drops this to 1)", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, p := range paths {
+		if p != "DELETE /posts-search/parsing/stop" {
+			t.Errorf("attempt %d went to %q, want %q — a retry must not fall through to the sibling that answers success without cancelling", i+1, p, "DELETE /posts-search/parsing/stop")
+		}
 	}
 }
 

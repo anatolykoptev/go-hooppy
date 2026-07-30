@@ -257,7 +257,35 @@ func validateParsingDate(field, day string) error {
 
 // StopParsing cancels any in-progress scraping job.
 //
-// UNDOCUMENTED: DELETE /posts-search/parsing is not in the public OpenAPI spec.
+// The path is /posts-search/parsing/stop, not /posts-search/parsing. Both
+// exist and both answer {"success":true}; only the /stop suffix cancels
+// anything. Measured on a live account (issue #94), three arms with the
+// in-progress flag asserted true before each stop:
+//
+//	no stop call, natural duration      idle again at 256.9s
+//	DELETE /posts-search/parsing/stop   idle again at  11.2s (stop sent at 6.2s)
+//	DELETE /posts-search/parsing        still running past 100s
+//
+// So a success response is not evidence here, and the suffix-less path was
+// what produced the earlier "a parse cannot be cancelled" conclusion.
+//
+// Poll the result with GetParsingForm, whose is_parsing_in_progress field is
+// the working oracle (ParsingFormResponse models it; SearchPostsResponse does
+// not). GET /posts-search does NOT carry that key at all, so do not add it to
+// SearchPostsResponse expecting the server to fill it — it would decode as
+// false on every call and read exactly like "idle".
+//
+// Retrying this call is safe against a REPEAT cancel: three consecutive
+// DELETEs against an idle live account each answered {"success":true} and left
+// the flag false. It is not safe against a job started between the first
+// attempt and the retry — that attempt will cancel the new job. The window is
+// not necessarily short: on a 429 the client honours the server's Retry-After,
+// so it is server-controlled and can be seconds rather than the millisecond
+// backoff the local options suggest. Whoever starts a parse concurrently with
+// a cancel owns that race; the library cannot see it.
+//
+// UNDOCUMENTED: DELETE /posts-search/parsing/stop is not in the public
+// OpenAPI spec.
 func (c *Client) StopParsing(ctx context.Context) error {
 	return c.doDELETE(ctx, pathPostsSearchParseStop, nil, true)
 }
