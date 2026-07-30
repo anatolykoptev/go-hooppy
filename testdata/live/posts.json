@@ -1,0 +1,73 @@
+{
+  "all_script_time": 0,
+  "filters_plug": [
+    {
+      "name": "str",
+      "selected_value": 0,
+      "slug": "str",
+      "type": "str",
+      "values": [
+        {
+          "id": 0,
+          "value": "str"
+        }
+      ]
+    }
+  ],
+  "is_has_more": true,
+  "list": [
+    {
+      "comments": null,
+      "created_by": 0,
+      "errors_for_source_ids": [],
+      "id": 0,
+      "is_ad": 0,
+      "is_attachments_in_process": 0,
+      "is_planned_by_networks": 0,
+      "is_planning_by_networks_needed": 0,
+      "is_published": 0,
+      "is_repeated": 0,
+      "likes": null,
+      "link": "str",
+      "pages": [
+        {
+          "page_id": 0,
+          "source_id": 0
+        }
+      ],
+      "photo": {
+        "file_path": "str",
+        "folder": "str",
+        "id": "str",
+        "name": "str",
+        "text": "str",
+        "type": "str",
+        "updated_date": "str"
+      },
+      "photos_amount": 0,
+      "post_projects": [],
+      "post_schedules": [
+        {
+          "id": 0,
+          "name": "str"
+        }
+      ],
+      "publication_date": {
+        "date": "str",
+        "source_timestamp": 0,
+        "time": "str",
+        "timestamp": 0
+      },
+      "repost_link": "str",
+      "repost_title": "str",
+      "reposts": null,
+      "source_link": "str",
+      "text": "str",
+      "views": null
+    }
+  ],
+  "posts_time": 0,
+  "rows_limit": 0,
+  "selected_filters_placeholders": [],
+  "total_rows": 0
+}

@@ -1,0 +1,55 @@
+{
+  "filters_plug": [
+    {
+      "name": "str",
+      "placeholder": "str",
+      "selected_value": "str",
+      "slug": "str",
+      "type": "str",
+      "values": []
+    }
+  ],
+  "is_has_more": true,
+  "list": [
+    {
+      "data": "str",
+      "id": 0,
+      "is_error": 0,
+      "is_viewed": 0,
+      "object_id": 0,
+      "object_type": 0,
+      "operation_date": "str",
+      "page": {
+        "access_token": "str",
+        "access_token_secret": "str",
+        "account_id": 0,
+        "additional_clips_caption": null,
+        "channel_url": null,
+        "clips_flood_date_from": 0,
+        "combine_big_text_with_photo": 0,
+        "custom_account_id": 0,
+        "id": 0,
+        "is_admin": 0,
+        "photos_crop_type": 0,
+        "social_account_id": "str",
+        "social_page_alias": "str",
+        "social_page_id": "str",
+        "social_page_link": "str",
+        "social_page_name": "str",
+        "social_page_photo": "str",
+        "social_page_type": "str",
+        "source_id": 0,
+        "user_id": 0,
+        "utm_tags": "str",
+        "watermark_id": 0
+      },
+      "page_id": 0,
+      "source_id": 0,
+      "time_in_work": "str",
+      "user_id": 0
+    }
+  ],
+  "rows_limit": 0,
+  "selected_filters_placeholders": [],
+  "total_rows": 0
+}

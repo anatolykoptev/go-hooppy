@@ -1,0 +1,22 @@
+{
+  "is_has_more": true,
+  "list": [
+    {
+      "data": "str",
+      "hashtag": "str",
+      "id": 0,
+      "link": "str",
+      "name": "str",
+      "posts_filter": null,
+      "posts_text": null,
+      "posts_text_modification": null,
+      "posts_upgrade": null,
+      "search_type": 0,
+      "source_id": 0,
+      "source_type": 0,
+      "user_id": 0
+    }
+  ],
+  "rows_limit": 0,
+  "total_rows": 0
+}
