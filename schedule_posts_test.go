@@ -86,7 +86,7 @@ func TestListSchedulePosts_EmptyQueue(t *testing.T) {
 		t.Errorf("TotalRows = %d, want 0", resp.TotalRows)
 	}
 	if resp.PostsByDays == nil {
-		t.Fatal("PostsByDays = nil, want non-nil empty map (the server returned {})")
+		t.Fatal("PostsByDays = nil, want non-nil empty map (the server returned [], its encoding of an empty calendar)")
 	}
 	if len(resp.PostsByDays) != 0 {
 		t.Errorf("len(PostsByDays) = %d, want 0", len(resp.PostsByDays))
@@ -95,7 +95,7 @@ func TestListSchedulePosts_EmptyQueue(t *testing.T) {
 
 // TestListSchedulePosts_DecodesPostFields verifies the Post entries inside
 // posts_by_days decode their fields (id, text) — the map value type is
-// []Post, and a regression that changed it to []json.RawMessage or
+// ScheduleDay, and a regression that changed it to []json.RawMessage or
 // map[string]interface{} would lose typed access.
 func TestListSchedulePosts_DecodesPostFields(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

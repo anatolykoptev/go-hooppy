@@ -228,13 +228,37 @@ func countKeysBeneath(v interface{}) int {
 	}
 }
 
-// walkJSON walks a generic-decoded JSON tree against a target Go struct type
-// via reflection, collecting every JSON key that has no corresponding struct
-// field. Honours json tags, embedded structs, map[string]… element types, and
-// slices. Types implementing json.Unmarshaler (Metric, FlexInt, PhotoID) are
-// treated as leaves — their custom unmarshaller owns the whole value, so
-// there are no "unmodelled keys" below them. interface{} fields are leaves
-// too (anything is accepted).
+// shapeMismatch is a JSON container landing on a Go type that cannot receive
+// it — an object on a slice, an array on a struct. encoding/json aborts the
+// WHOLE decode on one of these, so unlike an unmodelled key it does not lose
+// one field, it loses the response.
+//
+// This class is collected by the walker rather than by decoding because a
+// decode reports only its FIRST error, and a custom UnmarshalJSON error is
+// returned immediately — discarding the *json.UnmarshalTypeError that
+// encoding/json had already saved. Measured on schedule_posts.json: drift in
+// total_rows or is_has_more is invisible to a decode because a FlexInt
+// placeholder error fires first. The walker never reaches those leaves, so it
+// sees the mismatch regardless.
+type shapeMismatch struct {
+	path     string
+	jsonKind string
+	goType   string
+}
+
+// walkOut collects both classes the walker finds.
+type walkOut struct {
+	unmodelled []unmodelledKey
+	mismatches []shapeMismatch
+}
+
+func (o *walkOut) mismatch(path, jsonKind string, t reflect.Type) {
+	if path == "" {
+		path = "<root>"
+	}
+	o.mismatches = append(o.mismatches, shapeMismatch{path: path, jsonKind: jsonKind, goType: t.String()})
+}
+
 // traversableUnmarshalers lists types that implement json.Unmarshaler purely
 // to accept an alternate ENCODING, and whose contents remain fully modelled.
 // walkJSON must descend into these instead of stopping at them.
@@ -242,7 +266,14 @@ var traversableUnmarshalers = map[reflect.Type]bool{
 	reflect.TypeOf(ScheduleCalendar{}): true,
 }
 
-func walkJSON(node interface{}, targetType reflect.Type, path string, results *[]unmodelledKey) {
+// walkJSON walks a generic-decoded JSON tree against a target Go struct type
+// via reflection, collecting every JSON key that has no corresponding struct
+// field. Honours json tags, embedded structs, map[string]… element types, and
+// slices. Types implementing json.Unmarshaler (Metric, FlexInt, PhotoID) are
+// treated as leaves — their custom unmarshaller owns the whole value, so
+// there are no "unmodelled keys" below them. interface{} fields are leaves
+// too (anything is accepted).
+func walkJSON(node interface{}, targetType reflect.Type, path string, out *walkOut) {
 	targetType = derefType(targetType)
 
 	// A custom UnmarshalJSON owns the entire value — stop. Metric, FlexInt
@@ -276,9 +307,9 @@ func walkJSON(node interface{}, targetType reflect.Type, path string, results *[
 					childPath = path + "." + k
 				}
 				if ft, ok := fieldMap[k]; ok {
-					walkJSON(n[k], ft, childPath, results)
+					walkJSON(n[k], ft, childPath, out)
 				} else {
-					*results = append(*results, unmodelledKey{
+					out.unmodelled = append(out.unmodelled, unmodelledKey{
 						path:        childPath,
 						jsonType:    jsonTypeName(n[k]),
 						keysBeneath: countKeysBeneath(n[k]),
@@ -298,20 +329,45 @@ func walkJSON(node interface{}, targetType reflect.Type, path string, results *[
 				if path != "" {
 					childPath = path + "." + k
 				}
-				walkJSON(n[k], elemType, childPath, results)
+				walkJSON(n[k], elemType, childPath, out)
 			}
+		case reflect.Interface:
+			// interface{} accepts anything — modelled, stop.
+		default:
+			// A JSON object cannot go into a slice, a string, an int.
+			out.mismatch(path, "object", targetType)
 		}
-		// interface{} or other — modelled, stop.
 	case []interface{}:
-		if targetType.Kind() == reflect.Slice {
+		switch targetType.Kind() {
+		case reflect.Slice, reflect.Array:
 			elemType := derefType(targetType.Elem())
 			for i, elem := range n {
-				walkJSON(elem, elemType, fmt.Sprintf("%s[%d]", path, i), results)
+				walkJSON(elem, elemType, fmt.Sprintf("%s[%d]", path, i), out)
+			}
+		case reflect.Interface:
+			// interface{} accepts anything — modelled, stop.
+		default:
+			// A JSON array cannot go into a struct, a map, a scalar.
+			// json.RawMessage never reaches here: it implements Unmarshaler
+			// and is stopped by the leaf rule above.
+			out.mismatch(path, "array", targetType)
+		}
+	case nil:
+		// JSON null goes into anything — stop.
+	default:
+		// A JSON scalar cannot go into a struct, a map or a slice. The
+		// converse — a scalar on the WRONG scalar kind, a string on an int —
+		// is deliberately not reported: FlexInt-style tolerance makes that
+		// legitimate here, and this walker only claims the unambiguous class.
+		switch targetType.Kind() {
+		case reflect.Struct, reflect.Map, reflect.Array:
+			out.mismatch(path, jsonTypeName(node), targetType)
+		case reflect.Slice:
+			// []byte is exempt: encoding/json decodes a base64 STRING into it.
+			if targetType.Elem().Kind() != reflect.Uint8 {
+				out.mismatch(path, jsonTypeName(node), targetType)
 			}
 		}
-		// non-slice target (interface{}, RawMessage) — modelled, stop.
-	default:
-		// leaf scalar — stop.
 	}
 }
 
@@ -322,9 +378,22 @@ func unmodelledKeys(data []byte, targetType reflect.Type) []unmodelledKey {
 	if err := json.Unmarshal(data, &root); err != nil {
 		return []unmodelledKey{{path: "<parse-error>", jsonType: err.Error()}}
 	}
-	var results []unmodelledKey
-	walkJSON(root, targetType, "", &results)
-	return results
+	var out walkOut
+	walkJSON(root, targetType, "", &out)
+	return out.unmodelled
+}
+
+// shapeMismatches parses a fixture and returns every container whose JSON kind
+// the target type cannot hold. See shapeMismatch for why this is not done by
+// decoding.
+func shapeMismatches(data []byte, targetType reflect.Type) []shapeMismatch {
+	var root interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil
+	}
+	var out walkOut
+	walkJSON(root, targetType, "", &out)
+	return out.mismatches
 }
 
 // pathExistsInFixture checks whether a dotted JSON path (with [i] array
@@ -1028,6 +1097,27 @@ func TestUnknownFieldDiagnostic(t *testing.T) {
 // The oracle is deliberately not a hand-written table of which reflect.Kinds
 // are compatible; that table would encode the same guess the struct already
 // encodes. It is encoding/json itself, the decoder the client actually runs.
+// fixturesBlindToDecode names the fixtures whose decode aborts on a custom
+// UnmarshalJSON rejecting a type PLACEHOLDER rather than on a shape problem —
+// FlexInt reading "str". encoding/json returns that error immediately and
+// discards the *json.UnmarshalTypeError it had already saved, so for these
+// fixtures the decode oracle reports nothing about shape at all.
+//
+// Measured 2026-07-30 — 3 of 17. The list is checked in BOTH directions: an
+// undeclared fixture that goes blind fails, and a declared one that starts
+// decoding cleanly fails as stale. A suppression list that cannot expire
+// outlives the reason it was written.
+//
+// Their remaining cover is shapeMismatches, which the walker computes without
+// decoding and is therefore immune to this masking. To shrink this list, make
+// the fixture reducer emit a type-valid placeholder (0) for FlexInt- and
+// PhotoID-typed leaves.
+var fixturesBlindToDecode = map[string]bool{
+	"posts.json":          true,
+	"schedule_edit.json":  true,
+	"schedule_posts.json": true,
+}
+
 func TestLiveFixtureDecodes(t *testing.T) {
 	for _, spec := range liveFixtureSpecs {
 		t.Run(spec.endpoint, func(t *testing.T) {
@@ -1053,20 +1143,36 @@ func TestLiveFixtureDecodes(t *testing.T) {
 			case errors.As(err, &syntaxErr):
 				t.Errorf("testdata/live/%s is not valid JSON: %v", spec.file, err)
 			case err != nil:
-				t.Logf("non-structural decode error, not a shape failure (a custom UnmarshalJSON rejected a placeholder value): %v", err)
+				if !fixturesBlindToDecode[spec.file] {
+					t.Errorf("%s aborts its decode on a non-structural error and is NOT declared in fixturesBlindToDecode: %v\n\nThat error is returned before encoding/json can report a shape mismatch anywhere in this fixture, so the decode oracle is now inert for it. Add it to the list (with the shape walker as its remaining cover) or fix the placeholder.", spec.file, err)
+				}
+				t.Logf("decode oracle INERT for this fixture (a custom UnmarshalJSON rejected a placeholder value): %v", err)
+			}
+			if err == nil && fixturesBlindToDecode[spec.file] {
+				t.Errorf("%s now decodes cleanly but is still declared in fixturesBlindToDecode — remove the entry, or the decode oracle stays voluntarily switched off for a fixture that no longer needs it", spec.file)
+			}
+
+			// The walker sees what the decode cannot, on every fixture.
+			for _, m := range shapeMismatches(data, spec.targetTyp) {
+				t.Errorf("shape mismatch in %s at %s: the server sends a JSON %s, the struct declares %s — encoding/json aborts the WHOLE decode on this, losing every other field. Fix the STRUCT; never edit the fixture to agree with it.",
+					spec.file, m.path, m.jsonKind, m.goType)
 			}
 		})
 	}
 }
 
-// TestLiveFixtureDecodes_DetectsAWrongShape is the gate on the gate above.
+// TestLiveFixtureDecodes_DetectsAWrongShape pins ONE mutation: the exact
+// declaration that shipped in 96f872a and broke every `hooppy schedules queue`
+// invocation. It is not evidence that the decode oracle covers this fixture
+// generally, and the first version of this comment wrongly said it was.
 //
-// TestLiveFixtureDecodes deliberately ignores non-structural decode errors,
-// and schedule_posts.json produces one: a FlexInt field reads the "str"
-// placeholder and its custom UnmarshalJSON rejects the value. If that error
-// were returned BEFORE the structural one, the shape check would be silently
-// blind on the very fixture it was written for — and blind in the direction
-// that looks green.
+// Measured 2026-07-30: schedule_posts.json also produces a FlexInt placeholder
+// error, and encoding/json returns that immediately, discarding the saved
+// *json.UnmarshalTypeError. Drift in total_rows or is_has_more on this fixture
+// is therefore INVISIBLE to a decode. This mutation is caught only because the
+// mismatch makes the decoder skip the subtree the FlexInt lives in, so the
+// FlexInt never runs. General cover for this fixture comes from
+// shapeMismatches, not from here — see fixturesBlindToDecode.
 //
 // The obvious way to test this is to revert SchedulePostsResponse to the wrong
 // declaration and watch the suite go red, but that mutation does not COMPILE
@@ -1094,11 +1200,87 @@ func TestLiveFixtureDecodes_DetectsAWrongShape(t *testing.T) {
 		t.Errorf("UnmarshalTypeError.Field = %q, want \"posts_by_days\" — the error must point at the field whose shape is wrong", typeErr.Field)
 	}
 
+	// The walker must report the same mismatch independently. This is the
+	// object-on-slice arm of shapeMismatches, and it is the exact class that
+	// shipped broken in 96f872a.
+	var walkerSaw bool
+	for _, m := range shapeMismatches(data, reflect.TypeOf(wrongSchedulePostsResponse{})) {
+		// The walker reports it one level deeper than the decoder does —
+		// posts_by_days.<day> — because the wrong type is a MAP whose VALUE is
+		// the slice, so the mismatch is on the day cell. That is the more
+		// precise location, not a different finding.
+		if strings.HasPrefix(m.path, "posts_by_days") && m.jsonKind == "object" {
+			walkerSaw = true
+		}
+	}
+	if !walkerSaw {
+		t.Errorf("shapeMismatches did not report posts_by_days as a JSON object on a Go slice (got %+v) — the walker is the cover that survives error masking", shapeMismatches(data, reflect.TypeOf(wrongSchedulePostsResponse{})))
+	}
+
 	// And the correct declaration decodes the same bytes without a structural
 	// error, so the assertion above is discriminating rather than universal.
 	err = json.Unmarshal(data, &SchedulePostsResponse{})
 	if errors.As(err, &typeErr) {
 		t.Errorf("the CORRECT shape still reports a structural error: %v", err)
+	}
+}
+
+// TestShapeMismatches_SeesWhatTheDecodeCannot is the reason shapeMismatches
+// exists at all. On the three fixtures in fixturesBlindToDecode, encoding/json
+// returns a custom unmarshaller's placeholder error immediately and discards
+// the *json.UnmarshalTypeError it had already saved, so the decode oracle
+// reports nothing about shape.
+//
+// The walker never reaches those leaves — it stops at every json.Unmarshaler —
+// so it is immune to that masking. This test pins both halves: the decode IS
+// blind here, and the walker is NOT.
+func TestShapeMismatches_SeesWhatTheDecodeCannot(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "live", "schedule_posts.json"))
+	if err != nil {
+		t.Fatalf("read testdata/live/schedule_posts.json: %v", err)
+	}
+	// Both scalar-on-container arms: total_rows and rows_limit are NUMBERS on
+	// the wire, declared here as a slice and as a struct. One field would
+	// leave the other arm unguarded, and a mutant that happens to hit only the
+	// unguarded one passes — which manufactures a false "this is covered".
+	type drifted struct {
+		PostsByDays ScheduleCalendar `json:"posts_by_days"`
+		TotalRows   []int            `json:"total_rows"`
+		RowsLimit   ScheduleDay      `json:"rows_limit"`
+	}
+	typ := reflect.TypeOf(drifted{})
+
+	// Half one: the decode really is blind to this. If this ever starts
+	// catching it, the masking is gone and fixturesBlindToDecode should shrink.
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(json.Unmarshal(data, &drifted{}), &typeErr) {
+		t.Errorf("premise no longer holds: the DECODE now reports this drift, so schedule_posts.json may no longer need to be in fixturesBlindToDecode — re-measure and shrink the list")
+	}
+
+	// Half two: the walker sees it.
+	seen := map[string]bool{}
+	for _, m := range shapeMismatches(data, typ) {
+		seen[m.path] = true
+	}
+	for _, want := range []string{"total_rows", "rows_limit"} {
+		if !seen[want] {
+			t.Errorf("shapeMismatches did not report %s (got %+v) — the walker is the ONLY cover these three fixtures have, and it just lost an arm of the scalar-on-container class", want, shapeMismatches(data, typ))
+		}
+	}
+}
+
+// TestShapeMismatches_CleanOnTheRealTypes is the discriminating half: the
+// assertion above must not be universal. Every recorded fixture, against the
+// type it really decodes into, must report ZERO mismatches.
+func TestShapeMismatches_CleanOnTheRealTypes(t *testing.T) {
+	for _, spec := range liveFixtureSpecs {
+		data, err := os.ReadFile(filepath.Join("testdata", "live", spec.file))
+		if err != nil {
+			t.Fatalf("read testdata/live/%s: %v", spec.file, err)
+		}
+		for _, m := range shapeMismatches(data, spec.targetTyp) {
+			t.Errorf("%s: %s is a JSON %s, declared %s", spec.file, m.path, m.jsonKind, m.goType)
+		}
 	}
 }
 

@@ -1367,24 +1367,36 @@ type ScheduleDay struct {
 	Posts   []Post `json:"posts"`
 }
 
-// SchedulePostsResponse is the envelope for GET /posts/schedules/{id}/posts
-// (issue #106). PostsByDays is keyed dd.mm.yyyy → that day's cell. TotalRows
-// is the queue depth; the LAST key in PostsByDays is the booked-until date.
-// One call returns the whole calendar — no paged walk.
 // ScheduleCalendar is the posts_by_days calendar: dd.mm.yyyy → that day's
 // cell. It exists as a named type solely to carry UnmarshalJSON.
 //
-// The server is PHP, and PHP cannot distinguish an empty associative array
-// from an empty list: json_encode emits `[]` for both. So an EMPTY calendar
-// arrives as a JSON list while a populated one arrives as an object, and a
-// plain map[string]ScheduleDay field aborts the ENTIRE decode on the empty
-// case — taking total_rows with it, which is the one number the caller still
-// needs there.
+// An EMPTY posts_by_days arrives as a JSON list, `[]`, while a populated one
+// arrives as an object. A plain map[string]ScheduleDay field aborts the ENTIRE
+// decode on the empty case — taking total_rows with it, which is the one
+// number the caller still needs there.
 //
 // Measured live 2026-07-30, three independent ways, always `[]` and never `{}`:
 // a page past the end (total_rows 96), a date window with no days in it
 // (total_rows 0), and a schedule with an empty queue.
+//
+// The cause is PHP's json_encode, which cannot distinguish an empty
+// associative array from an empty list — but do NOT generalise that to the
+// whole API: testdata/live/schedule_edit.json records
+// selected_albums_by_source_ids and selected_pages_by_source_ids as `{}`, two
+// empty PHP associative arrays that arrive as objects. The `[]` form is
+// measured for THIS field; adding UnmarshalJSON to other map fields on the
+// strength of the general claim would be cargo-culting it.
 type ScheduleCalendar map[string]ScheduleDay
+
+// MarshalJSON emits `{}` for a nil calendar rather than `null`. Both
+// front-ends re-emit this envelope verbatim, and the repo's own rule for
+// day_counts is that the output shape must not change between branches.
+func (c ScheduleCalendar) MarshalJSON() ([]byte, error) {
+	if c == nil {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(map[string]ScheduleDay(c))
+}
 
 // UnmarshalJSON accepts the object form and PHP's empty-list form. A NON-empty
 // list is still an error: that would be a real shape change, not this quirk.
@@ -1405,10 +1417,19 @@ func (c *ScheduleCalendar) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(trimmed, &m); err != nil {
 		return err
 	}
+	if m == nil {
+		// `null`, or the field absent from an object we still decode: make the
+		// non-nil guarantee unconditional rather than true-for-two-encodings.
+		m = map[string]ScheduleDay{}
+	}
 	*c = m
 	return nil
 }
 
+// SchedulePostsResponse is the envelope for GET /posts/schedules/{id}/posts
+// (issue #106). PostsByDays is keyed dd.mm.yyyy → that day's cell. TotalRows
+// is the queue depth; the LAST key in PostsByDays is the booked-until date.
+// One call returns the whole calendar — no paged walk.
 type SchedulePostsResponse struct {
 	PostsByDays ScheduleCalendar `json:"posts_by_days"`
 	TotalRows   int              `json:"total_rows"`
