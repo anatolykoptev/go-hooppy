@@ -1,0 +1,50 @@
+{
+  "api_token": "str",
+  "coupon_code": null,
+  "director": null,
+  "gpt_key": null,
+  "gpt_type": 0,
+  "gpt_version": 0,
+  "id": 0,
+  "is_commit_delete_for_planned_posts": 0,
+  "is_commit_edit_for_planned_posts": 0,
+  "is_has_email": true,
+  "is_has_news": 0,
+  "is_has_notifications": 0,
+  "is_has_publication_notifications": 0,
+  "is_has_special_offer": 0,
+  "is_keep_passwords": 0,
+  "is_parse_instagram_posts_by_us": 0,
+  "is_private_offers": 0,
+  "is_save_posts_settings": 0,
+  "is_vk_extended_activated": 0,
+  "navigation": [
+    {
+      "disabled": true,
+      "icon": "str",
+      "route": "str"
+    }
+  ],
+  "partners_count": 0,
+  "plan_type": 0,
+  "posts_count": 0,
+  "pro_subscription_days": 0,
+  "ru_captcha_key": null,
+  "start_subscription_days": 0,
+  "subscriptions": null,
+  "timezone_id": 0,
+  "timezone_offset": 0,
+  "timezones": [
+    {
+      "id": 0,
+      "name": "str"
+    }
+  ],
+  "vip_2_subscription_days": 0,
+  "vip_3_subscription_days": 0,
+  "vip_4_subscription_days": 0,
+  "vip_5_subscription_days": 0,
+  "vip_6_subscription_days": 0,
+  "vip_7_subscription_days": 0,
+  "vip_subscription_days": 0
+}
