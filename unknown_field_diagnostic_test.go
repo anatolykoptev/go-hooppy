@@ -118,6 +118,7 @@ package hooppy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -234,6 +235,13 @@ func countKeysBeneath(v interface{}) int {
 // treated as leaves — their custom unmarshaller owns the whole value, so
 // there are no "unmodelled keys" below them. interface{} fields are leaves
 // too (anything is accepted).
+// traversableUnmarshalers lists types that implement json.Unmarshaler purely
+// to accept an alternate ENCODING, and whose contents remain fully modelled.
+// walkJSON must descend into these instead of stopping at them.
+var traversableUnmarshalers = map[reflect.Type]bool{
+	reflect.TypeOf(ScheduleCalendar{}): true,
+}
+
 func walkJSON(node interface{}, targetType reflect.Type, path string, results *[]unmodelledKey) {
 	targetType = derefType(targetType)
 
@@ -241,7 +249,14 @@ func walkJSON(node interface{}, targetType reflect.Type, path string, results *[
 	// and PhotoID declare UnmarshalJSON on a POINTER receiver, so a VALUE
 	// field of those types does not satisfy the interface directly; test the
 	// pointer type too so they are still recognised as leaves.
-	if targetType.Implements(jsonUnmarshalerType) || reflect.PointerTo(targetType).Implements(jsonUnmarshalerType) {
+	//
+	// EXCEPT for a type whose unmarshaller only tolerates an alternate
+	// ENCODING of a structure it still models fully (ScheduleCalendar accepts
+	// PHP's `[]` for an empty map). Treating those as leaves would drop
+	// everything beneath them — all 24 keys of a scheduled Post — out of the
+	// diagnostic's coverage, silently and in the direction that looks clean.
+	if !traversableUnmarshalers[targetType] &&
+		(targetType.Implements(jsonUnmarshalerType) || reflect.PointerTo(targetType).Implements(jsonUnmarshalerType)) {
 		return
 	}
 
@@ -417,6 +432,7 @@ var liveFixtureSpecs = []fixtureSpec{
 	{"schedule_edit.json", "GET /posts/schedules/{id}/edit", reflect.TypeOf(ScheduleEditResponse{})},
 	{"post_edit.json", "GET /posts/{id}/edit", reflect.TypeOf(PostEditResponse{})},
 	{"search_post_edit.json", "GET /posts-search/{id}/edit", reflect.TypeOf(SearchPostEditResponse{})},
+	{"schedule_posts.json", "GET /posts/schedules/{id}/posts", reflect.TypeOf(SchedulePostsResponse{})},
 }
 
 // unmodelledBaselines is the declared baseline: for each endpoint, the set of
@@ -992,6 +1008,100 @@ func TestUnknownFieldDiagnostic(t *testing.T) {
 	t.Logf("TOTAL: %d directly unmodelled, %d hidden beneath unmodelled roots (direct is a floor, not a total)", totalDirect, totalHidden)
 }
 
+// TestLiveFixtureDecodes is the SHAPE half of the fixture gate, and it exists
+// because the key-walker above is structurally blind to a wrong shape.
+// walkJSON dispatches on the JSON node kind and then switches on the target's
+// reflect.Kind: a JSON OBJECT landing on a Go SLICE matches neither the Struct
+// arm nor the Map arm, so it falls through and reports nothing at all.
+//
+// The walker asks "does the struct model every key the server sends" — the
+// QUIET failure, where one field is silently dropped. A wrong SHAPE is the
+// LOUD one: encoding/json aborts the entire decode, so every other field is
+// lost too and the call returns an error to the user.
+//
+// Measured 2026-07-30: SchedulePostsResponse.PostsByDays was declared
+// map[string][]Post while the server sends
+// map[string]{day_name, day_date, posts[]}, so `hooppy schedules queue` failed
+// on every single invocation. Registering the real fixture did NOT catch it —
+// the key-walker stayed green. Only decoding does.
+//
+// The oracle is deliberately not a hand-written table of which reflect.Kinds
+// are compatible; that table would encode the same guess the struct already
+// encodes. It is encoding/json itself, the decoder the client actually runs.
+func TestLiveFixtureDecodes(t *testing.T) {
+	for _, spec := range liveFixtureSpecs {
+		t.Run(spec.endpoint, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("testdata", "live", spec.file))
+			if err != nil {
+				t.Fatalf("read testdata/live/%s: %v", spec.file, err)
+			}
+			err = json.Unmarshal(data, reflect.New(spec.targetTyp).Interface())
+
+			// Only STRUCTURAL failures count. A custom UnmarshalJSON that
+			// rejects a placeholder VALUE (FlexInt reading "str") is an
+			// artifact of the reduction, not a struct bug — the fixtures carry
+			// no real values by construction, and failing on that would force
+			// them to. json.UnmarshalTypeError is exactly the "this shape
+			// cannot go into that type" error, and json.SyntaxError catches a
+			// fixture corrupted in the repo.
+			var typeErr *json.UnmarshalTypeError
+			var syntaxErr *json.SyntaxError
+			switch {
+			case errors.As(err, &typeErr):
+				t.Errorf("%s does not decode into %s: %v\n\nThe struct cannot parse what the server actually sends, so EVERY call to this endpoint fails: encoding/json aborts the whole decode on a shape mismatch, losing the other fields too. Fix the STRUCT; never edit the fixture to agree with it.",
+					spec.file, spec.targetTyp, err)
+			case errors.As(err, &syntaxErr):
+				t.Errorf("testdata/live/%s is not valid JSON: %v", spec.file, err)
+			case err != nil:
+				t.Logf("non-structural decode error, not a shape failure (a custom UnmarshalJSON rejected a placeholder value): %v", err)
+			}
+		})
+	}
+}
+
+// TestLiveFixtureDecodes_DetectsAWrongShape is the gate on the gate above.
+//
+// TestLiveFixtureDecodes deliberately ignores non-structural decode errors,
+// and schedule_posts.json produces one: a FlexInt field reads the "str"
+// placeholder and its custom UnmarshalJSON rejects the value. If that error
+// were returned BEFORE the structural one, the shape check would be silently
+// blind on the very fixture it was written for — and blind in the direction
+// that looks green.
+//
+// The obvious way to test this is to revert SchedulePostsResponse to the wrong
+// declaration and watch the suite go red, but that mutation does not COMPILE
+// (the consumers read .Posts), and a compile error falsifies nothing. So the
+// wrong declaration lives here instead, as a local type, where it compiles and
+// can be asserted on permanently.
+func TestLiveFixtureDecodes_DetectsAWrongShape(t *testing.T) {
+	// Verbatim the declaration that shipped in 96f872a and broke every
+	// `hooppy schedules queue` invocation.
+	type wrongSchedulePostsResponse struct {
+		PostsByDays map[string][]Post `json:"posts_by_days"`
+		TotalRows   int               `json:"total_rows"`
+	}
+	data, err := os.ReadFile(filepath.Join("testdata", "live", "schedule_posts.json"))
+	if err != nil {
+		t.Fatalf("read testdata/live/schedule_posts.json: %v", err)
+	}
+
+	var typeErr *json.UnmarshalTypeError
+	err = json.Unmarshal(data, &wrongSchedulePostsResponse{})
+	if !errors.As(err, &typeErr) {
+		t.Fatalf("decoding the real fixture into the WRONG shape gave %v, want a *json.UnmarshalTypeError — if a custom unmarshaller's value error is returned first, TestLiveFixtureDecodes is blind on this fixture and a wrong shape ships green", err)
+	}
+	if typeErr.Field != "posts_by_days" {
+		t.Errorf("UnmarshalTypeError.Field = %q, want \"posts_by_days\" — the error must point at the field whose shape is wrong", typeErr.Field)
+	}
+
+	// And the correct declaration decodes the same bytes without a structural
+	// error, so the assertion above is discriminating rather than universal.
+	err = json.Unmarshal(data, &SchedulePostsResponse{})
+	if errors.As(err, &typeErr) {
+		t.Errorf("the CORRECT shape still reports a structural error: %v", err)
+	}
+}
+
 // TestUnmarshalerLeafPointerReceiver verifies Fix 1: Metric (and FlexInt,
 // PhotoID) declare UnmarshalJSON on a POINTER receiver, while struct fields
 // hold VALUE types. A value type does not satisfy an interface that only a
@@ -1078,5 +1188,26 @@ func TestStaleDeclarationArrayIndexReason(t *testing.T) {
 	}
 	if strings.Contains(stale[0], "no longer present") {
 		t.Errorf("wrong reason 'no longer present' for a path that DOES exist in the fixture: %s", stale[0])
+	}
+}
+
+// TestWalkJSON_TraversesScheduleCalendar guards the exemption added to
+// walkJSON's leaf rule. ScheduleCalendar implements json.Unmarshaler only to
+// accept PHP's `[]` for an empty map; everything beneath it is still fully
+// modelled. Treating it as a leaf — which the unmodified rule does — would
+// drop all 24 keys of a scheduled Post out of the diagnostic's coverage
+// silently, and in the direction that looks clean.
+func TestWalkJSON_TraversesScheduleCalendar(t *testing.T) {
+	data := []byte(`{"posts_by_days":{"15.01.2027":{"day_name":"Пт","day_date":"15 Января","posts":[{"id":1,"brand_new_server_field":"x"}]}}}`)
+	got := unmodelledKeys(data, reflect.TypeOf(SchedulePostsResponse{}))
+
+	var found bool
+	for _, k := range got {
+		if strings.HasSuffix(k.path, "brand_new_server_field") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an unmodelled key beneath posts_by_days was NOT reported (got %+v) — ScheduleCalendar is being treated as an Unmarshaler leaf, which removes every Post field from the diagnostic", got)
 	}
 }

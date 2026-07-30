@@ -1,6 +1,7 @@
 package hooppy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -1352,15 +1353,67 @@ type BatchMovePostsResult struct {
 	Moved   []MovedPost `json:"moved"`
 }
 
+// ScheduleDay is one day's cell in the calendar returned by
+// GET /posts/schedules/{id}/posts. The day's dd.mm.yyyy date is the MAP KEY;
+// DayName and DayDate are the server's display strings for that same date
+// ("Пт", "1 Января") and carry no information the key does not already hold.
+//
+// Measured live 2026-07-30: the day value is an OBJECT, not a bare post array.
+// It was first declared as []Post, which made every decode of this endpoint
+// fail — see TestLiveFixtureDecodes.
+type ScheduleDay struct {
+	DayName string `json:"day_name"` // short weekday, e.g. "Пт"
+	DayDate string `json:"day_date"` // display date, e.g. "1 Января"
+	Posts   []Post `json:"posts"`
+}
+
 // SchedulePostsResponse is the envelope for GET /posts/schedules/{id}/posts
-// (issue #106). PostsByDays is keyed dd.mm.yyyy → the posts scheduled for
-// that day. TotalRows is the queue depth; the LAST key in PostsByDays is the
-// booked-until date. One call returns the whole calendar — no paged walk.
+// (issue #106). PostsByDays is keyed dd.mm.yyyy → that day's cell. TotalRows
+// is the queue depth; the LAST key in PostsByDays is the booked-until date.
+// One call returns the whole calendar — no paged walk.
+// ScheduleCalendar is the posts_by_days calendar: dd.mm.yyyy → that day's
+// cell. It exists as a named type solely to carry UnmarshalJSON.
+//
+// The server is PHP, and PHP cannot distinguish an empty associative array
+// from an empty list: json_encode emits `[]` for both. So an EMPTY calendar
+// arrives as a JSON list while a populated one arrives as an object, and a
+// plain map[string]ScheduleDay field aborts the ENTIRE decode on the empty
+// case — taking total_rows with it, which is the one number the caller still
+// needs there.
+//
+// Measured live 2026-07-30, three independent ways, always `[]` and never `{}`:
+// a page past the end (total_rows 96), a date window with no days in it
+// (total_rows 0), and a schedule with an empty queue.
+type ScheduleCalendar map[string]ScheduleDay
+
+// UnmarshalJSON accepts the object form and PHP's empty-list form. A NON-empty
+// list is still an error: that would be a real shape change, not this quirk.
+func (c *ScheduleCalendar) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var list []json.RawMessage
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			return err
+		}
+		if len(list) > 0 {
+			return fmt.Errorf("posts_by_days: got a JSON array of %d elements; only the EMPTY array is accepted (PHP's encoding of an empty calendar), a populated calendar must be an object", len(list))
+		}
+		*c = ScheduleCalendar{}
+		return nil
+	}
+	var m map[string]ScheduleDay
+	if err := json.Unmarshal(trimmed, &m); err != nil {
+		return err
+	}
+	*c = m
+	return nil
+}
+
 type SchedulePostsResponse struct {
-	PostsByDays map[string][]Post `json:"posts_by_days"`
-	TotalRows   int               `json:"total_rows"`
-	RowsLimit   int               `json:"rows_limit"`
-	IsHasMore   bool              `json:"is_has_more"`
+	PostsByDays ScheduleCalendar `json:"posts_by_days"`
+	TotalRows   int              `json:"total_rows"`
+	RowsLimit   int              `json:"rows_limit"`
+	IsHasMore   bool             `json:"is_has_more"`
 }
 
 // UploadMediaResponse is returned by POST /files/media/upload.

@@ -489,7 +489,7 @@ type ListSchedulePostsFilter struct {
 }
 
 // ListSchedulePosts returns a schedule's queue — its depth (TotalRows) and
-// per-day calendar (PostsByDays, keyed dd.mm.yyyy) — in ONE request via
+// per-day calendar (PostsByDays, keyed dd.mm.yyyy → a ScheduleDay) — in ONE request via
 // GET /posts/schedules/{id}/posts. The LAST key in PostsByDays is the
 // booked-until date. One call returns the whole calendar; this method does
 // NOT page (issue #106 explicitly forbids a paged walk — the endpoint

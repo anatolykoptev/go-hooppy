@@ -225,7 +225,7 @@ func buildScheduleQueueSummary(resp *hooppy.SchedulePostsResponse, scheduleID in
 	for _, k := range keys {
 		s.DayCounts = append(s.DayCounts, scheduleDayCount{
 			Day:   k.raw,
-			Count: len(resp.PostsByDays[k.raw]),
+			Count: len(resp.PostsByDays[k.raw].Posts),
 		})
 	}
 	// Schedule-wide first_booked_day/booked_until are emitted ONLY for an

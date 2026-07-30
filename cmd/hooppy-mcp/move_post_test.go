@@ -241,7 +241,7 @@ func TestListSchedulePostsTool_WireIssuesOneRequest(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1,"text":"a"}]},"total_rows":1,"rows_limit":200,"is_has_more":true}`))
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":{"day_name":"Пт","day_date":"15 Января","posts":[{"id":1,"text":"a"}]}},"total_rows":1,"rows_limit":200,"is_has_more":true}`))
 	}))
 	defer srv.Close()
 	t.Setenv("HOOPPY_TOKEN", "test-token")
@@ -287,7 +287,7 @@ func TestListSchedulePostsTool_WireIssuesOneRequest(t *testing.T) {
 // and the result is not valid JSON — the json.Unmarshal assertion fails.
 func TestListSchedulePostsTool_TruncationWarningIsStructuredData(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"posts_by_days":{"15.01.2027":[{"id":1}]},"total_rows":500,"rows_limit":200,"is_has_more":true}`))
+		w.Write([]byte(`{"posts_by_days":{"15.01.2027":{"day_name":"Пт","day_date":"15 Января","posts":[{"id":1}]}},"total_rows":500,"rows_limit":200,"is_has_more":true}`))
 	}))
 	defer srv.Close()
 	t.Setenv("HOOPPY_TOKEN", "test-token")
@@ -352,7 +352,7 @@ func TestListSchedulePostsTool_PageOverrunWarningIsStructuredData(t *testing.T) 
 		// The live shape of a page past the end: the collection total is
 		// unchanged, the calendar is empty, and is_has_more is FALSE — so the
 		// truncation branch cannot catch this one.
-		w.Write([]byte(`{"posts_by_days":{},"total_rows":96,"rows_limit":200,"is_has_more":false}`))
+		w.Write([]byte(`{"posts_by_days":[],"total_rows":96,"rows_limit":200,"is_has_more":false}`))
 	}))
 	defer srv.Close()
 	t.Setenv("HOOPPY_TOKEN", "test-token")
@@ -410,7 +410,7 @@ func TestListSchedulePostsTool_PageFieldPassedToEndpoint(t *testing.T) {
 	var gotPage string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPage = r.URL.Query().Get("page")
-		w.Write([]byte(`{"posts_by_days":{},"total_rows":0,"rows_limit":200,"is_has_more":false}`))
+		w.Write([]byte(`{"posts_by_days":[],"total_rows":0,"rows_limit":200,"is_has_more":false}`))
 	}))
 	defer srv.Close()
 	t.Setenv("HOOPPY_TOKEN", "test-token")

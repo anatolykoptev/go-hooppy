@@ -1120,7 +1120,7 @@ func registerListSchedulePosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name: "hooppy_list_schedule_posts",
-			Description: "Show a schedule's queue — its depth (total_rows) and per-day calendar (posts_by_days, keyed dd.mm.yyyy) — in ONE request. " +
+			Description: "Show a schedule's queue — its depth (total_rows) and per-day calendar (posts_by_days, keyed dd.mm.yyyy, each value an object {day_name, day_date, posts[]}) — in ONE request. " +
 				"The LAST key in posts_by_days is the booked-until date ONLY when is_has_more is false AND no date_from/date_to/page narrowing was applied (a narrowed query's last key is the WINDOW's last day, not the schedule's booked-until). " +
 				"When is_has_more is true the result is TRUNCATED to the first page and a `warning` field is set; the caller MUST narrow with date_from/date_to to recover the rest. " +
 				"A `warning` field is ALSO set when page>0 returns zero day keys with total_rows>0 (a page past the end — total_rows is the collection total and does not change with paging). " +
