@@ -15,7 +15,7 @@
 //
 // # Fixtures
 //
-// The 16 fixtures in testdata/live/ were recorded from live authenticated GETs
+// The 18 fixtures in testdata/live/ were recorded from live authenticated GETs
 // on 2026-07-29 and then mechanically reduced: every scalar value is replaced
 // by a type placeholder ("str", 0, 0.0, true, null) while key names, nesting,
 // and JSON types are preserved exactly. Zero non-placeholder values are
@@ -157,6 +157,16 @@ func jsonFields(t reflect.Type) map[string]reflect.Type {
 			for k, v := range jsonFields(derefType(f.Type)) {
 				m[k] = v
 			}
+			continue
+		}
+		// encoding/json never populates an unexported field, so treating one
+		// as modelled makes the walker report a key as covered while the
+		// runtime silently drops it — a false-clean gate, which is the exact
+		// failure this file exists to prevent. Anonymous fields are handled
+		// above: an embedded UNEXPORTED struct type still promotes its
+		// exported fields, so exportedness of the embedding field is not the
+		// question there.
+		if !f.IsExported() {
 			continue
 		}
 		tag := f.Tag.Get("json")
@@ -1155,7 +1165,7 @@ func TestUnknownFieldDiagnostic(t *testing.T) {
 // discards the *json.UnmarshalTypeError it had already saved, so for these
 // fixtures the decode oracle reports nothing about shape at all.
 //
-// Measured 2026-07-30 — 3 of 17. The list is checked in BOTH directions: an
+// Measured 2026-07-30 — 3 of 18. The list is checked in BOTH directions: an
 // undeclared fixture that goes blind fails, and a declared one that starts
 // decoding cleanly fails as stale. A suppression list that cannot expire
 // outlives the reason it was written.
@@ -1371,20 +1381,18 @@ func TestUnmarshalerContractsAreMeasured(t *testing.T) {
 				// the Kind: FlexInt is a struct too, and declaring traverse on
 				// it passes a Kind check while descending into nothing — its
 				// fields are unexported, so jsonFields is empty.
+				// The criterion is what the walker would actually FIND, not
+				// the Kind: FlexInt is a struct too, and declaring traverse on
+				// it passes a Kind check while descending into nothing.
+				// jsonFields is now exactly the walker's own view — it skips
+				// unexported fields and `json:"-"` — so this asks the question
+				// in the same terms the walker answers it.
 				var descendable bool
 				switch typ.Kind() {
 				case reflect.Map, reflect.Slice, reflect.Array:
 					descendable = true
 				case reflect.Struct:
-					// Exported fields, not jsonFields: that helper also
-					// returns UNEXPORTED ones, so it reports FlexInt{raw, set}
-					// as having two fields to descend into when it has none
-					// the walker can ever surface.
-					for i := 0; i < typ.NumField(); i++ {
-						if typ.Field(i).IsExported() {
-							descendable = true
-						}
-					}
+					descendable = len(jsonFields(typ)) > 0
 				}
 				if !descendable {
 					t.Errorf("declared traverse but there is nothing modelled beneath %s (kind %s) — the declaration only strips the leaf rule, which is the half that can go WRONG, while buying no coverage", typ, typ.Kind())
@@ -1396,6 +1404,13 @@ func TestUnmarshalerContractsAreMeasured(t *testing.T) {
 
 // exemptFromContracts names json.Unmarshaler types that legitimately need no
 // contract: they accept ANY shape, so there is nothing for the walker to judge.
+//
+// The reason string is NOT decoration and NOT taken on trust — every entry is
+// probed in TestUnmarshalerContractsAreComplete against an object, an array
+// and a scalar, and an entry whose type rejects any of them fails. Measured
+// 2026-07-30: moving Metric here with a hand-waved reason kept the suite green
+// while the both-oracle blind set grew from 40 to 48. An escape hatch nothing
+// measures is how a gate quietly stops gating.
 var exemptFromContracts = map[reflect.Type]string{
 	reflect.TypeOf(json.RawMessage{}): "accepts any JSON value verbatim",
 }
@@ -1429,7 +1444,12 @@ func TestUnmarshalerContractsAreComplete(t *testing.T) {
 			for i := 0; i < t0.NumField(); i++ {
 				visit(t0.Field(i).Type)
 			}
-		case reflect.Slice, reflect.Array, reflect.Map:
+		case reflect.Slice, reflect.Array:
+			visit(t0.Elem())
+		case reflect.Map:
+			// The KEY type counts too: a map[PhotoID]X would otherwise slip
+			// the census entirely.
+			visit(t0.Key())
 			visit(t0.Elem())
 		}
 	}
@@ -1453,6 +1473,33 @@ func TestUnmarshalerContractsAreComplete(t *testing.T) {
 	sort.Strings(missing)
 	for _, m := range missing {
 		t.Errorf("%s implements json.Unmarshaler but has no unmarshalerContract and no exemption — the walker will leaf-skip it, and on a fixture in fixturesBlindToDecode that leaves NO oracle covering it", m)
+	}
+
+	// An exemption is a claim that the type accepts ANY shape. Measure it.
+	for typ, reason := range exemptFromContracts {
+		if !typ.Implements(jsonUnmarshalerType) && !reflect.PointerTo(typ).Implements(jsonUnmarshalerType) {
+			t.Errorf("exemptFromContracts names %s (%q), which is not a json.Unmarshaler — it was never leaf-skipped, so exempting it says nothing and hides that the entry is meaningless", typ, reason)
+			continue
+		}
+		var typeErr *json.UnmarshalTypeError
+		for _, body := range []string{`{"a":1}`, `[1,2]`, `0`} {
+			if err := json.Unmarshal([]byte(body), reflect.New(typ).Interface()); errors.As(err, &typeErr) {
+				t.Errorf("exemptFromContracts claims %s accepts any shape (%q), but %s is rejected: %v — a type that DISCRIMINATES needs a contract, not an exemption", typ, reason, body, err)
+			}
+		}
+	}
+
+	// Both populations must also expire. An entry for a type nothing reaches
+	// outlives whatever justified it, and nothing would ever say so.
+	for typ := range unmarshalerContracts {
+		if !seen[typ] {
+			t.Errorf("unmarshalerContracts declares %s, which is not reachable from any registered response type — remove it, or the table records a belief about code that no longer exists", typ)
+		}
+	}
+	for typ := range exemptFromContracts {
+		if !seen[typ] {
+			t.Errorf("exemptFromContracts declares %s, which is not reachable from any registered response type — remove it", typ)
+		}
 	}
 }
 
@@ -1571,6 +1618,91 @@ func TestWalkJSON_ByteSliceAcceptsBothForms(t *testing.T) {
 			t.Errorf("%s reported %+v, want none — encoding/json accepts it, so a mismatch here is a false positive on working code", body, got)
 		}
 	}
+}
+
+// TestEveryRecordedFixtureIsRegistered counts the population on disk against
+// the population the gate runs. A fixture recorded and then never added to
+// liveFixtureSpecs is checked by nothing, and its absence looks exactly like
+// coverage — the directory listing says it is there.
+func TestEveryRecordedFixtureIsRegistered(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join("testdata", "live"))
+	if err != nil {
+		t.Fatalf("read testdata/live: %v", err)
+	}
+	registered := make(map[string]bool, len(liveFixtureSpecs))
+	for _, spec := range liveFixtureSpecs {
+		registered[spec.file] = true
+	}
+	onDisk := map[string]bool{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		onDisk[e.Name()] = true
+		if !registered[e.Name()] {
+			t.Errorf("testdata/live/%s is recorded but not in liveFixtureSpecs — nothing runs against it, and the file's presence reads as coverage", e.Name())
+		}
+	}
+	for _, spec := range liveFixtureSpecs {
+		if !onDisk[spec.file] {
+			t.Errorf("liveFixtureSpecs registers %s, which is not on disk", spec.file)
+		}
+	}
+}
+
+// TestJSONFields_MatchesWhatEncodingJSONPopulates pins jsonFields to the
+// decoder it is meant to model. It returned UNEXPORTED fields until
+// 2026-07-30, which makes the walker treat a server key as MODELLED while the
+// runtime silently drops it — a false-clean gate, the exact failure this file
+// exists to prevent. It was reachable only latently (the four unexported
+// fields on FlexInt and Metric sit on leaf types), but "latent" is a property
+// of today's structs, not of the helper.
+//
+// Every case carries its own decode as the premise, so this cannot rot into a
+// belief about what encoding/json does.
+func TestJSONFields_MatchesWhatEncodingJSONPopulates(t *testing.T) {
+	type embedded struct {
+		Promoted string `json:"promoted"`
+	}
+	type subject struct {
+		Kept     string `json:"kept"`
+		Excluded string `json:"-"`
+		embedded        // an UNEXPORTED struct type still promotes its exported fields
+		hidden   string //nolint:unused // the point of the test
+	}
+
+	got := jsonFields(reflect.TypeOf(subject{}))
+	for _, want := range []string{"kept", "promoted"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("jsonFields lost %q (got %v) — the walker would report a key the decoder DOES populate as unmodelled", want, keysOf(got))
+		}
+	}
+	for _, unwanted := range []string{"-", "Excluded", "hidden"} {
+		if _, ok := got[unwanted]; ok {
+			t.Errorf("jsonFields returned %q (got %v) — encoding/json never populates it, so the walker would call a dropped key modelled", unwanted, keysOf(got))
+		}
+	}
+
+	// The premise, measured rather than assumed.
+	var s subject
+	if err := json.Unmarshal([]byte(`{"kept":"a","promoted":"b","hidden":"c","Excluded":"d"}`), &s); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if s.Kept != "a" || s.Promoted != "b" {
+		t.Fatalf("premise broken: encoding/json did not fill the exported fields (%+v)", s)
+	}
+	if s.Excluded != "" {
+		t.Error(`premise broken: encoding/json filled a json:"-" field, so excluding it from jsonFields is now wrong`)
+	}
+}
+
+func keysOf(m map[string]reflect.Type) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // TestUnmarshalerLeafPointerReceiver verifies Fix 1: Metric (and FlexInt,
