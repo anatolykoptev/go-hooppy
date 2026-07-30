@@ -259,11 +259,34 @@ func (o *walkOut) mismatch(path, jsonKind string, t reflect.Type) {
 	o.mismatches = append(o.mismatches, shapeMismatch{path: path, jsonKind: jsonKind, goType: t.String()})
 }
 
-// traversableUnmarshalers lists types that implement json.Unmarshaler purely
-// to accept an alternate ENCODING, and whose contents remain fully modelled.
-// walkJSON must descend into these instead of stopping at them.
-var traversableUnmarshalers = map[reflect.Type]bool{
-	reflect.TypeOf(ScheduleCalendar{}): true,
+// unmarshalerContract describes what a json.Unmarshaler in this package
+// accepts, so the walker can classify a value it would otherwise have to skip.
+//
+// A hand-written table is the very thing this file refuses to trust elsewhere,
+// so TestUnmarshalerContractsAreMeasured probes every entry against the real
+// UnmarshalJSON and fails when a declaration and the code disagree. The table
+// is a cache of a measurement, not a belief.
+type unmarshalerContract struct {
+	// traverse: the unmarshaller only accepts an alternate ENCODING of a
+	// structure that is still fully modelled, so the walker must descend
+	// instead of stopping. Treating such a type as a leaf drops everything
+	// beneath it out of the diagnostic, silently and in the direction that
+	// looks clean.
+	traverse bool
+	// acceptsEmptyArray: a JSON `[]` is legal here even though the Go kind is
+	// a map. Without this the walker reports a mismatch on a body that decodes
+	// perfectly — and the failure message tells the reader to change the
+	// struct, which is the opposite of what is needed.
+	acceptsEmptyArray bool
+	// scalarOnly: containers are rejected outright, so an object or array here
+	// is a real shape error the walker can name even though the value is a
+	// leaf to it.
+	scalarOnly bool
+}
+
+var unmarshalerContracts = map[reflect.Type]unmarshalerContract{
+	reflect.TypeOf(ScheduleCalendar{}): {traverse: true, acceptsEmptyArray: true},
+	reflect.TypeOf(FlexInt{}):          {scalarOnly: true},
 }
 
 // walkJSON walks a generic-decoded JSON tree against a target Go struct type
@@ -286,8 +309,18 @@ func walkJSON(node interface{}, targetType reflect.Type, path string, out *walkO
 	// PHP's `[]` for an empty map). Treating those as leaves would drop
 	// everything beneath them — all 24 keys of a scheduled Post — out of the
 	// diagnostic's coverage, silently and in the direction that looks clean.
-	if !traversableUnmarshalers[targetType] &&
+	contract, hasContract := unmarshalerContracts[targetType]
+	if !contract.traverse &&
 		(targetType.Implements(jsonUnmarshalerType) || reflect.PointerTo(targetType).Implements(jsonUnmarshalerType)) {
+		// A leaf — but a leaf with a declared contract can still be judged.
+		if hasContract && contract.scalarOnly {
+			switch node.(type) {
+			case map[string]interface{}:
+				out.mismatch(path, "object", targetType)
+			case []interface{}:
+				out.mismatch(path, "array", targetType)
+			}
+		}
 		return
 	}
 
@@ -347,9 +380,16 @@ func walkJSON(node interface{}, targetType reflect.Type, path string, out *walkO
 		case reflect.Interface:
 			// interface{} accepts anything — modelled, stop.
 		default:
-			// A JSON array cannot go into a struct, a map, a scalar.
+			// A JSON array cannot go into a struct, a map, a scalar — UNLESS
+			// the target declared that it accepts the EMPTY one. Without that
+			// exemption the walker contradicts ScheduleCalendar.UnmarshalJSON
+			// and reports a mismatch on a body that decodes perfectly, with a
+			// message telling the reader to change the struct.
 			// json.RawMessage never reaches here: it implements Unmarshaler
 			// and is stopped by the leaf rule above.
+			if contract.acceptsEmptyArray && len(n) == 0 {
+				break
+			}
 			out.mismatch(path, "array", targetType)
 		}
 	case nil:
@@ -364,6 +404,10 @@ func walkJSON(node interface{}, targetType reflect.Type, path string, out *walkO
 			out.mismatch(path, jsonTypeName(node), targetType)
 		case reflect.Slice:
 			// []byte is exempt: encoding/json decodes a base64 STRING into it.
+			// The exemption belongs to THIS arm only, and only for a string.
+			// Measured 2026-07-30: []byte also accepts a JSON ARRAY of numbers
+			// ([1,2] -> [1 2]), so the array arm must keep recursing and must
+			// NOT report a mismatch there.
 			if targetType.Elem().Kind() != reflect.Uint8 {
 				out.mismatch(path, jsonTypeName(node), targetType)
 			}
@@ -502,6 +546,7 @@ var liveFixtureSpecs = []fixtureSpec{
 	{"post_edit.json", "GET /posts/{id}/edit", reflect.TypeOf(PostEditResponse{})},
 	{"search_post_edit.json", "GET /posts-search/{id}/edit", reflect.TypeOf(SearchPostEditResponse{})},
 	{"schedule_posts.json", "GET /posts/schedules/{id}/posts", reflect.TypeOf(SchedulePostsResponse{})},
+	{"schedule_posts_empty.json", "GET /posts/schedules/{id}/posts (empty)", reflect.TypeOf(SchedulePostsResponse{})},
 }
 
 // unmodelledBaselines is the declared baseline: for each endpoint, the set of
@@ -1152,7 +1197,11 @@ func TestLiveFixtureDecodes(t *testing.T) {
 				t.Errorf("%s now decodes cleanly but is still declared in fixturesBlindToDecode — remove the entry, or the decode oracle stays voluntarily switched off for a fixture that no longer needs it", spec.file)
 			}
 
-			// The walker sees what the decode cannot, on every fixture.
+			// The walker sees what the decode cannot, on every fixture. This
+			// loop is also the DISCRIMINATING half of the shape assertions:
+			// every recorded fixture against the type it really decodes into
+			// must report zero, so a mismatch claim elsewhere cannot be
+			// universal rather than specific.
 			for _, m := range shapeMismatches(data, spec.targetTyp) {
 				t.Errorf("shape mismatch in %s at %s: the server sends a JSON %s, the struct declares %s — encoding/json aborts the WHOLE decode on this, losing every other field. Fix the STRUCT; never edit the fixture to agree with it.",
 					spec.file, m.path, m.jsonKind, m.goType)
@@ -1269,17 +1318,160 @@ func TestShapeMismatches_SeesWhatTheDecodeCannot(t *testing.T) {
 	}
 }
 
-// TestShapeMismatches_CleanOnTheRealTypes is the discriminating half: the
-// assertion above must not be universal. Every recorded fixture, against the
-// type it really decodes into, must report ZERO mismatches.
-func TestShapeMismatches_CleanOnTheRealTypes(t *testing.T) {
+// TestUnmarshalerContractsAreMeasured keeps unmarshalerContracts honest. A
+// hand-written table of what a custom unmarshaller accepts is exactly the kind
+// of belief this file refuses to trust — so every entry is probed against the
+// real UnmarshalJSON, and a declaration that disagrees with the code fails.
+//
+// Written after the walker reported a mismatch on `{"posts_by_days":[]}`, a
+// body that decodes perfectly: the leaf rule had been stripped wholesale by a
+// bare bool, so the classifier contradicted the type's own contract and the
+// failure message told the reader to change the struct.
+func TestUnmarshalerContractsAreMeasured(t *testing.T) {
+	probe := func(typ reflect.Type, body string) error {
+		return json.Unmarshal([]byte(body), reflect.New(typ).Interface())
+	}
+	for typ, c := range unmarshalerContracts {
+		t.Run(typ.String(), func(t *testing.T) {
+			if c.acceptsEmptyArray {
+				if err := probe(typ, `[]`); err != nil {
+					t.Errorf("declared acceptsEmptyArray, but `[]` fails to decode: %v — the walker would exempt a value the type rejects", err)
+				}
+				if err := probe(typ, `[1]`); err == nil {
+					t.Error("a NON-empty array decodes, so the tolerance is wider than declared — a real shape change would then pass as this quirk")
+				}
+			} else if err := probe(typ, `[]`); err == nil {
+				t.Error("`[]` decodes but acceptsEmptyArray is false — the walker will report a mismatch on a body that works")
+			}
+
+			if c.scalarOnly {
+				var typeErr *json.UnmarshalTypeError
+				for _, body := range []string{`{"a":1}`, `[1,2]`} {
+					if err := probe(typ, body); !errors.As(err, &typeErr) {
+						t.Errorf("declared scalarOnly, but %s gives %v — a container must be reported as *json.UnmarshalTypeError, because that is the only shape signal the DECODE oracle can classify", body, err)
+					}
+				}
+				if err := probe(typ, `0`); err != nil {
+					t.Errorf("declared scalarOnly but a plain number fails: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestShapeMismatches_EmptyCalendarIsNotAMismatch is the regression for that
+// false positive, against the body measured live from a page past the end.
+func TestShapeMismatches_EmptyCalendarIsNotAMismatch(t *testing.T) {
+	body := []byte(`{"posts_by_days":[],"total_rows":96,"rows_limit":200,"is_has_more":false}`)
+	if err := json.Unmarshal(body, &SchedulePostsResponse{}); err != nil {
+		t.Fatalf("premise broken — this body must decode: %v", err)
+	}
+	if got := shapeMismatches(body, reflect.TypeOf(SchedulePostsResponse{})); len(got) != 0 {
+		t.Errorf("shapeMismatches reported %+v on a body that decodes cleanly — the walker is contradicting ScheduleCalendar.UnmarshalJSON, and its message tells the reader to change the struct", got)
+	}
+	// The exemption must stay narrow: a POPULATED array is a real shape error.
+	populated := []byte(`{"posts_by_days":[{"id":1}],"total_rows":1}`)
+	if got := shapeMismatches(populated, reflect.TypeOf(SchedulePostsResponse{})); len(got) == 0 {
+		t.Error("a populated array was NOT reported — the empty-array exemption has widened into blanket tolerance of an array")
+	}
+}
+
+// TestShapeMismatches_SeesDriftOnAMaskedLeaf is the measured proof for the
+// claim fixturesBlindToDecode makes: where the decode oracle is masked, the
+// walker still sees the shape error.
+//
+// Measured 2026-07-30 on schedule_posts.json — a container landing on the
+// FlexInt at publication_date.timestamp:
+//
+//	decode structural = false   (the "str" placeholder error fires first)
+//	walker mismatches = 1
+//
+// Before FlexInt reported a container as *json.UnmarshalTypeError, and before
+// the walker judged declared-contract leaves, this drift was invisible to BOTH
+// oracles at once on three fixtures.
+func TestShapeMismatches_SeesDriftOnAMaskedLeaf(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "live", "schedule_posts.json"))
+	if err != nil {
+		t.Fatalf("read testdata/live/schedule_posts.json: %v", err)
+	}
+	const leaf = `"timestamp": 0`
+	if !strings.Contains(string(data), leaf) {
+		t.Fatalf("fixture no longer contains %s — re-anchor this test on another FlexInt leaf", leaf)
+	}
+	drifted := []byte(strings.Replace(string(data), leaf, `"timestamp": [1,2]`, 1))
+
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(json.Unmarshal(drifted, &SchedulePostsResponse{}), &typeErr) {
+		t.Log("the decode now catches this too — re-measure fixturesBlindToDecode, it may be able to shrink")
+	}
+	if got := shapeMismatches(drifted, reflect.TypeOf(SchedulePostsResponse{})); len(got) == 0 {
+		t.Error("the walker did not report a container on a FlexInt leaf — on the blind-listed fixtures it is the only oracle left, so this drift would ship green")
+	}
+}
+
+// TestScheduleCalendar_MarshalsAbsentAsAnObject covers the nil branch of
+// MarshalJSON, whose only trigger is the one case UnmarshalJSON cannot reach:
+// posts_by_days absent from the response entirely, leaving the field at its
+// zero value. Both front-ends re-emit this envelope verbatim.
+func TestScheduleCalendar_MarshalsAbsentAsAnObject(t *testing.T) {
+	var resp SchedulePostsResponse
+	if err := json.Unmarshal([]byte(`{"total_rows":5}`), &resp); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if resp.PostsByDays != nil {
+		t.Fatalf("premise changed: an ABSENT posts_by_days now yields a non-nil map, so this test no longer covers the nil branch")
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"posts_by_days":{}`) {
+		t.Errorf("re-emitted envelope = %s, want posts_by_days as {} — a nil map ships as null and the output shape then differs from every other branch", b)
+	}
+}
+
+// TestFixturesBlindToDecode_NamesRealFixtures closes the last hole in the
+// self-expiry: the stale check only fires for names that appear in
+// liveFixtureSpecs, so an entry naming a file that no longer exists survives
+// forever.
+func TestFixturesBlindToDecode_NamesRealFixtures(t *testing.T) {
+	known := make(map[string]bool, len(liveFixtureSpecs))
 	for _, spec := range liveFixtureSpecs {
-		data, err := os.ReadFile(filepath.Join("testdata", "live", spec.file))
-		if err != nil {
-			t.Fatalf("read testdata/live/%s: %v", spec.file, err)
+		known[spec.file] = true
+	}
+	for file := range fixturesBlindToDecode {
+		if !known[file] {
+			t.Errorf("fixturesBlindToDecode names %q, which is not in liveFixtureSpecs — an entry for a fixture nothing runs can never be found stale", file)
 		}
-		for _, m := range shapeMismatches(data, spec.targetTyp) {
-			t.Errorf("%s: %s is a JSON %s, declared %s", spec.file, m.path, m.jsonKind, m.goType)
+	}
+}
+
+// TestWalkJSON_ByteSliceAcceptsBothForms pins the []byte special case, which is
+// the one place encoding/json makes a slice behave like a scalar too: it fills
+// []byte from a base64 STRING **and** from a JSON array of numbers.
+//
+// Review round two called the array form a decode error and asked for it to be
+// reported. Measured 2026-07-30 it is not:
+//
+//	{"b":[1,2]}   -> nil error, [1 2]
+//	{"b":"aGk="}  -> nil error, [104 105]
+//	{"b":[300]}   -> error, but on the ELEMENT (300 overflows uint8)
+//
+// So the exemption belongs to the scalar arm only, and reporting the array
+// form would be a false positive on working code. Each assertion below carries
+// its own decode as the premise, so this cannot rot into a belief.
+func TestWalkJSON_ByteSliceAcceptsBothForms(t *testing.T) {
+	type wrapper struct {
+		B []byte `json:"b"`
+	}
+	typ := reflect.TypeOf(wrapper{})
+
+	for _, body := range []string{`{"b":"aGk="}`, `{"b":[1,2]}`} {
+		if err := json.Unmarshal([]byte(body), &wrapper{}); err != nil {
+			t.Fatalf("premise broken: %s no longer decodes into []byte (%v) — if encoding/json changed, the walker must start reporting this form", body, err)
+		}
+		if got := shapeMismatches([]byte(body), typ); len(got) != 0 {
+			t.Errorf("%s reported %+v, want none — encoding/json accepts it, so a mismatch here is a false positive on working code", body, got)
 		}
 	}
 }

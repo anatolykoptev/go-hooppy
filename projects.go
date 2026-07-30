@@ -489,9 +489,16 @@ type ListSchedulePostsFilter struct {
 }
 
 // ListSchedulePosts returns a schedule's queue — its depth (TotalRows) and
-// per-day calendar (PostsByDays, keyed dd.mm.yyyy → a ScheduleDay) — in ONE request via
-// GET /posts/schedules/{id}/posts. The LAST key in PostsByDays is the
-// booked-until date. One call returns the whole calendar; this method does
+// per-day calendar (PostsByDays, keyed dd.mm.yyyy → a ScheduleDay) — in ONE
+// request via GET /posts/schedules/{id}/posts.
+//
+// The LAST key in PostsByDays is the booked-until date ONLY when IsHasMore is
+// false AND no dateFrom/dateTo/page narrowing was applied: a narrowed query's
+// last key is the WINDOW's last day, not the schedule's end. The CLI and MCP
+// surfaces both state this; it belongs here too, since a library caller reads
+// only this comment.
+//
+// One call returns the whole calendar; this method does
 // NOT page (issue #106 explicitly forbids a paged walk — the endpoint
 // returns the full calendar in one envelope, and paging would issue
 // multiple requests against a one-request contract).

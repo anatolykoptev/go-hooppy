@@ -14,7 +14,47 @@ import (
 // fixture is deliberately OUT OF lexicographic order (15.01.2027 before
 // 31.01.2027 is fine, but 01.02.2027 must sort AFTER 31.01.2027
 // chronologically, not before it as a raw-string sort would do).
-const schedulePostsBody = `{"posts_by_days":{"15.01.2027":{"day_name":"Пт","day_date":"15 Января","posts":[{"id":101,"text":"a"},{"id":102,"text":"b"}]},"31.01.2027":{"day_name":"Вс","day_date":"31 Января","posts":[{"id":103,"text":"c"}]},"01.02.2027":{"day_name":"Пн","day_date":"1 Февраля","posts":[{"id":104,"text":"d"}]}},"total_rows":4,"rows_limit":1000,"is_has_more":false}`
+const schedulePostsBody = `{
+	  "posts_by_days": {
+	    "15.01.2027": {
+	      "day_name": "Пт",
+	      "day_date": "15 Января",
+	      "posts": [
+	        {
+	          "id": 101,
+	          "text": "a"
+	        },
+	        {
+	          "id": 102,
+	          "text": "b"
+	        }
+	      ]
+	    },
+	    "31.01.2027": {
+	      "day_name": "Вс",
+	      "day_date": "31 Января",
+	      "posts": [
+	        {
+	          "id": 103,
+	          "text": "c"
+	        }
+	      ]
+	    },
+	    "01.02.2027": {
+	      "day_name": "Пн",
+	      "day_date": "1 Февраля",
+	      "posts": [
+	        {
+	          "id": 104,
+	          "text": "d"
+	        }
+	      ]
+	    }
+	  },
+	  "total_rows": 4,
+	  "rows_limit": 1000,
+	  "is_has_more": false
+	}`
 
 // TestListSchedulePosts_IssuesExactlyOneRequest is THE one-request-contract
 // guard for issue #106: the endpoint returns the whole calendar in one

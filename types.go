@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -992,6 +993,21 @@ func (f *FlexInt) UnmarshalJSON(b []byte) error {
 	}
 	// Validate: must be a number or a quoted string. Reject objects/arrays
 	// outright so a shape change is loud, not silent.
+	//
+	// A container is reported as a *json.UnmarshalTypeError specifically. The
+	// error TYPE is load-bearing, not decoration: the fixture gate classifies
+	// a decode failure by errors.As, and a fmt.Errorf around a strconv error —
+	// which this returned until 2026-07-30 — reads as a VALUE problem. A shape
+	// regression landing on any FlexInt field was then invisible to both
+	// oracles at once. "Loud" has to mean loud in the channel someone listens
+	// on.
+	if s[0] == '[' || s[0] == '{' {
+		kind := "array"
+		if s[0] == '{' {
+			kind = "object"
+		}
+		return &json.UnmarshalTypeError{Value: kind, Type: reflect.TypeOf(FlexInt{})}
+	}
 	if s[0] == '"' {
 		var str string
 		if err := json.Unmarshal(b, &str); err != nil {
