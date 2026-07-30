@@ -154,6 +154,119 @@ func TestRunListPages_AllReturnsMoreRows(t *testing.T) {
 	}
 }
 
+// postRows builds a JSON page body for /posts with `count` rows of sequential
+// ids starting at `start`, the given total_rows, and is_has_more. Only the
+// `id` field is populated — runListPosts only needs the id for the
+// unique-count check; the rest of the Post struct is irrelevant to the
+// truncation logic under test.
+func postRows(start, count, total int, hasMore bool) string {
+	type post struct {
+		ID int `json:"id"`
+	}
+	list := make([]post, 0, count)
+	for i := 0; i < count; i++ {
+		list = append(list, post{ID: start + i})
+	}
+	b, _ := json.Marshal(struct {
+		List      []post `json:"list"`
+		TotalRows int    `json:"total_rows"`
+		IsHasMore bool   `json:"is_has_more"`
+		RowsLimit int    `json:"rows_limit"`
+	}{list, total, hasMore, 20})
+	return string(b)
+}
+
+// postRowsIDs builds a JSON page body for /posts with the given explicit ids
+// (not sequential), the given total_rows, and is_has_more. Used to simulate
+// offset-shift duplicates (same id served on two pages) and missing rows.
+func postRowsIDs(ids []int, total int, hasMore bool) string {
+	type post struct {
+		ID int `json:"id"`
+	}
+	list := make([]post, 0, len(ids))
+	for _, id := range ids {
+		list = append(list, post{ID: id})
+	}
+	b, _ := json.Marshal(struct {
+		List      []post `json:"list"`
+		TotalRows int    `json:"total_rows"`
+		IsHasMore bool   `json:"is_has_more"`
+		RowsLimit int    `json:"rows_limit"`
+	}{list, total, hasMore, 20})
+	return string(b)
+}
+
+// TestRunListPosts_AllHighChurn_BenignInsertSucceeds verifies that a high-churn
+// --all walk with a benign mid-walk insert SUCCEEDS. /posts is a high-churn
+// collection: a post created between page fetches shifts the offset window,
+// making unique != lastTotal on a healthy account. The old equality check
+// (NewAllListEnvelope, unique == lastTotal) false-alarms here; the first-total
+// rule (NewAllListEnvelopeHighChurn, unique >= firstTotal) does not.
+//
+// Setup: page 1 serves ids [1,2] with total_rows=2, is_has_more=true →
+// firstTotal=2. Page 2 serves ids [3,4] (a new row was inserted mid-walk,
+// shifting the offset window) with total_rows=3, is_has_more=false →
+// lastTotal=3. unique={1,2,3,4}=4 >= firstTotal=2 → not truncated.
+// Old equality check: unique=4 != lastTotal=3 → ERROR (false alarm).
+//
+// RED-on-revert: if runListPosts is changed back to NewAllListEnvelope with
+// ListAllPostsWithTotal, the equality check false-alarms (exit 1) and this
+// test fails.
+func TestRunListPosts_AllHighChurn_BenignInsertSucceeds(t *testing.T) {
+	srv := stubPagedServer(t, "/posts", map[string]string{
+		"1": postRows(1, 2, 2, true),
+		"2": postRows(3, 2, 3, false),
+	})
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListPosts(context.Background(), c, &out, &errOut, hooppy.ListPostsFilter{}, true)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 — a benign mid-walk insert (unique=4, firstTotal=2, lastTotal=3) must NOT fail the walk; the old equality check false-alarmed here (4 != 3); stderr=%s", code, errOut.String())
+	}
+	// stdout must be valid JSON (an AllListEnvelope).
+	var env hooppy.AllListEnvelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("stdout is not a valid AllListEnvelope: %v (stdout=%q)", err, out.String())
+	}
+	if env.IsHasMore {
+		t.Errorf("AllListEnvelope.is_has_more = true, want false — an --all walk pins is_has_more false")
+	}
+}
+
+// TestRunListPosts_AllHighChurn_TruncatedWalkFails verifies that a genuinely
+// truncated high-churn --all walk FAILS. The server said total_rows=5 on
+// page 1 but the walk only collected 2 unique ids — the server adjusted
+// total_rows down to 2 on the last page (a shrinking collection), so the
+// old equality check (unique == lastTotal) PASSES (2 == 2) and misses the
+// truncation. The first-total rule (unique < firstTotal) catches it
+// (2 < 5) and errors.
+//
+// Setup: page 1 serves ids [1,2] with total_rows=5, is_has_more=true →
+// firstTotal=5. Page 2 serves ids [1,2] again (offset-shift duplicates,
+// rows 3-5 missing) with total_rows=2, is_has_more=false → lastTotal=2.
+// unique={1,2}=2 < firstTotal=5 → TRUNCATED.
+// Old equality check: unique=2 == lastTotal=2 → PASSES (false negative).
+//
+// RED-on-revert: if runListPosts is changed back to NewAllListEnvelope with
+// ListAllPostsWithTotal, the equality check passes (exit 0) and this test
+// fails — the truncation goes undetected.
+func TestRunListPosts_AllHighChurn_TruncatedWalkFails(t *testing.T) {
+	srv := stubPagedServer(t, "/posts", map[string]string{
+		"1": postRowsIDs([]int{1, 2}, 5, true),
+		"2": postRowsIDs([]int{1, 2}, 2, false),
+	})
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListPosts(context.Background(), c, &out, &errOut, hooppy.ListPostsFilter{}, true)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 — a genuinely truncated walk (unique=2 < firstTotal=5) must fail; the old equality check missed this because the server adjusted total_rows down to match (2 == 2); stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
 // TestRunListPages_NoWarningWhenComplete verifies the warning does NOT fire
 // when is_has_more is false (a complete single page) — the warning is gated
 // on truncation, not emitted unconditionally.

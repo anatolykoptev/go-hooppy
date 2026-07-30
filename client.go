@@ -111,6 +111,17 @@ func NewClient(cfg Config) (*Client, error) {
 // NewClientFromEnv creates a client using HOOPPY_TOKEN (and optionally
 // HOOPPY_BASE_URL) from the environment. If HOOPPY_TOKEN is unset, it
 // falls back to ~/.config/hooppy/token.
+//
+// Retry is ENABLED with bounded options: capped attempts, exponential
+// backoff, and Retry-After honoured when the server sends it. A paged walk
+// issues one request per page by construction, so --all is the feature most
+// certain to meet a rate limit; without retry every shipped binary died on
+// the first 429 with no backoff. Create-shaped calls (POST creates,
+// streaming uploads, create-shaped PUTs) never retry regardless — their
+// retryable flag is false at the call site, enforced by
+// TestRetryPolicySweep and pinned behaviourally by
+// TestRetryPolicy_CreateNotRetried. Context is the sole deadline
+// authority: retry.Do respects ctx.Done() before every attempt.
 func NewClientFromEnv() (*Client, error) {
 	token := os.Getenv("HOOPPY_TOKEN")
 	if token == "" {
@@ -126,9 +137,24 @@ func NewClientFromEnv() (*Client, error) {
 		return nil, errors.New("hooppy: token not found — set HOOPPY_TOKEN env var or create ~/.config/hooppy/token")
 	}
 	return NewClient(Config{
-		BaseURL: os.Getenv("HOOPPY_BASE_URL"),
-		Token:   token,
+		BaseURL:      os.Getenv("HOOPPY_BASE_URL"),
+		Token:        token,
+		RetryOptions: defaultRetryOptions(),
 	})
+}
+
+// defaultRetryOptions returns the bounded retry policy NewClientFromEnv
+// enables: 4 attempts, exponential backoff (500ms initial, 5s cap), no
+// jitter. Retry-After is honoured by doWithRetry when the server sends it.
+// MaxElapsedTime is left 0 (no limit) — doWithRetry applies a 30s per-request
+// safety cap, but the context remains the sole deadline authority for the
+// overall operation (retry.Do checks ctx.Done() before every attempt).
+func defaultRetryOptions() *retry.Options {
+	return &retry.Options{
+		MaxAttempts:  4,
+		InitialDelay: 500 * time.Millisecond,
+		MaxDelay:     5 * time.Second,
+	}
 }
 
 // checkJWTExpiry parses the token as a JWT (without signature verification)

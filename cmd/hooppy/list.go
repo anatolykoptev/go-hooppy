@@ -93,17 +93,17 @@ func runListAccounts(ctx context.Context, c *hooppy.Client, out, errOut io.Write
 // runListNotifications is the testable core of `hooppy notifications`.
 func runListNotifications(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, page int, all bool) int {
 	if all {
-		list, total, err := c.ListAllNotificationsWithTotal(ctx)
+		list, firstTotal, lastTotal, err := c.ListAllNotificationsWithFirstAndLastTotal(ctx)
 		if err != nil {
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		env, err := hooppy.NewAllListEnvelope(list, total, func(n hooppy.Notification) int { return n.ID })
+		env, err := hooppy.NewAllListEnvelopeHighChurn(list, firstTotal, lastTotal, func(n hooppy.Notification) int { return n.ID })
 		if err != nil {
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		return emitList(out, errOut, "notifications", true, len(list), total, false, env)
+		return emitList(out, errOut, "notifications", true, len(list), lastTotal, false, env)
 	}
 	resp, err := c.ListNotifications(ctx, page)
 	if err != nil {
@@ -162,17 +162,17 @@ func runListWatermarks(ctx context.Context, c *hooppy.Client, out, errOut io.Wri
 // runListPosts is the testable core of `hooppy posts list`.
 func runListPosts(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, f hooppy.ListPostsFilter, all bool) int {
 	if all {
-		list, total, err := c.ListAllPostsWithTotal(ctx, f)
+		list, firstTotal, lastTotal, err := c.ListAllPostsWithFirstAndLastTotal(ctx, f)
 		if err != nil {
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		env, err := hooppy.NewAllListEnvelope(list, total, func(p hooppy.Post) int { return p.ID })
+		env, err := hooppy.NewAllListEnvelopeHighChurn(list, firstTotal, lastTotal, func(p hooppy.Post) int { return p.ID })
 		if err != nil {
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		return emitList(out, errOut, "posts", true, len(list), total, false, env)
+		return emitList(out, errOut, "posts", true, len(list), lastTotal, false, env)
 	}
 	resp, err := c.ListPosts(ctx, f)
 	if err != nil {
@@ -185,17 +185,17 @@ func runListPosts(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, 
 // runListSearchPosts is the testable core of `hooppy search posts`.
 func runListSearchPosts(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, f hooppy.SearchPostsFilter, all bool) int {
 	if all {
-		list, total, err := c.ListAllSearchPostsWithTotal(ctx, f)
+		list, firstTotal, lastTotal, err := c.ListAllSearchPostsWithFirstAndLastTotal(ctx, f)
 		if err != nil {
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		env, err := hooppy.NewAllListEnvelope(list, total, func(p hooppy.SearchPost) int { return p.ID })
+		env, err := hooppy.NewAllListEnvelopeHighChurn(list, firstTotal, lastTotal, func(p hooppy.SearchPost) int { return p.ID })
 		if err != nil {
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		return emitList(out, errOut, "search posts", true, len(list), total, false, env)
+		return emitList(out, errOut, "search posts", true, len(list), lastTotal, false, env)
 	}
 	resp, err := c.ListSearchPosts(ctx, f)
 	if err != nil {

@@ -138,26 +138,44 @@ func (c *Client) ListAllPosts(ctx context.Context, f ListPostsFilter) ([]Post, e
 // check (unique == total) false-alarms on every active account: a post
 // created or published mid-walk makes the last-seen total_rows differ from
 // the unique-id count. The right shape is the unique < firstTotal rule
-// doctor uses for /notifications (see RunDoctor), but no /posts entry point
-// exposes the first-page total yet; tracked in #70. See NewAllListEnvelope
-// for the per call-site table of which collections the equality check does
-// suit.
+// doctor uses for /notifications (see RunDoctor); use
+// ListAllPostsWithFirstAndLastTotal and NewAllListEnvelopeHighChurn. See
+// NewAllListEnvelope for the per call-site table of which collections the
+// equality check does suit.
 func (c *Client) ListAllPostsWithTotal(ctx context.Context, f ListPostsFilter) ([]Post, int, error) {
+	all, _, last, err := c.ListAllPostsWithFirstAndLastTotal(ctx, f)
+	return all, last, err
+}
+
+// ListAllPostsWithFirstAndLastTotal is ListAllPosts but also returns the
+// server's total_rows from the FIRST page and the LAST page. The triple
+// (list, firstTotalRows, lastTotalRows) lets a caller distinguish a
+// truncated walk (unique count < firstTotalRows) from a benign mid-walk
+// insert (lastTotalRows > firstTotalRows) — the distinction
+// NewAllListEnvelope cannot make because it receives only one total.
+// High-churn --all call sites (cmd/hooppy/list.go, cmd/hooppy-mcp/main.go)
+// use this with NewAllListEnvelopeHighChurn to apply the first-total rule
+// instead of the equality check. See NewAllListEnvelopeHighChurn and
+// RunDoctor for the rule and the gaps it does not close.
+func (c *Client) ListAllPostsWithFirstAndLastTotal(ctx context.Context, f ListPostsFilter) ([]Post, int, int, error) {
 	all := make([]Post, 0)
-	var totalRows int
+	var firstTotalRows, lastTotalRows int
 	for page := 1; ; page++ {
 		if page > maxListAllPages {
-			return nil, 0, fmt.Errorf("hooppy: ListAllPosts exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+			return nil, 0, 0, fmt.Errorf("hooppy: ListAllPosts exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
 		}
 		f.Page = page
 		resp, err := c.ListPosts(ctx, f)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
+		}
+		if page == 1 {
+			firstTotalRows = resp.TotalRows
 		}
 		all = append(all, resp.List...)
-		totalRows = resp.TotalRows
+		lastTotalRows = resp.TotalRows
 		if !resp.IsHasMore {
-			return all, totalRows, nil
+			return all, firstTotalRows, lastTotalRows, nil
 		}
 	}
 }

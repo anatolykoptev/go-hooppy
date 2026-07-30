@@ -263,7 +263,7 @@ func registerListPosts(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			if in.All {
-				all, total, err := c.ListAllPostsWithTotal(ctx, hooppy.ListPostsFilter{
+				all, firstTotal, lastTotal, err := c.ListAllPostsWithFirstAndLastTotal(ctx, hooppy.ListPostsFilter{
 					IsPublished:     in.IsPublished,
 					PublicationDate: in.PublicationDate,
 					SourceID:        in.SourceID,
@@ -275,7 +275,7 @@ func registerListPosts(server *mcp.Server) {
 				if err != nil {
 					return errResult(err.Error())
 				}
-				env, err := hooppy.NewAllListEnvelope(all, total, func(p hooppy.Post) int { return p.ID })
+				env, err := hooppy.NewAllListEnvelopeHighChurn(all, firstTotal, lastTotal, func(p hooppy.Post) int { return p.ID })
 				if err != nil {
 					return errResult(err.Error())
 				}
@@ -814,11 +814,11 @@ func registerListNotifications(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			if in.All {
-				all, total, err := c.ListAllNotificationsWithTotal(ctx)
+				all, firstTotal, lastTotal, err := c.ListAllNotificationsWithFirstAndLastTotal(ctx)
 				if err != nil {
 					return errResult(err.Error())
 				}
-				env, err := hooppy.NewAllListEnvelope(all, total, func(n hooppy.Notification) int { return n.ID })
+				env, err := hooppy.NewAllListEnvelopeHighChurn(all, firstTotal, lastTotal, func(n hooppy.Notification) int { return n.ID })
 				if err != nil {
 					return errResult(err.Error())
 				}
@@ -1479,11 +1479,11 @@ func registerListSearchPosts(server *mcp.Server) {
 				ContentTypesExclude: in.ContentTypesExclude,
 			}
 			if in.All {
-				all, total, err := c.ListAllSearchPostsWithTotal(ctx, f)
+				all, firstTotal, lastTotal, err := c.ListAllSearchPostsWithFirstAndLastTotal(ctx, f)
 				if err != nil {
 					return errResult(err.Error())
 				}
-				env, err := hooppy.NewAllListEnvelope(all, total, func(p hooppy.SearchPost) int { return p.ID })
+				env, err := hooppy.NewAllListEnvelopeHighChurn(all, firstTotal, lastTotal, func(p hooppy.SearchPost) int { return p.ID })
 				if err != nil {
 					return errResult(err.Error())
 				}

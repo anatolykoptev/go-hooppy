@@ -109,29 +109,31 @@ var retryPolicies = map[string]struct {
 	"DeleteSchedule":         {retryAllowed, false},
 	"GetScheduleEdit":        {retryAllowed, false},
 	// --- posts search (scraping) ---
-	"ListSearchPosts":                 {retryAllowed, false},
-	"ListAllSearchPosts":              {retryComposite, false},
-	"ListAllSearchPostsWithTotal":     {retryComposite, false},
-	"ListSourceResources":             {retryAllowed, false},
-	"ListAllSourceResources":          {retryComposite, false},
-	"ListAllSourceResourcesWithTotal": {retryComposite, false},
-	"GetParsingForm":                  {retryAllowed, false},
-	"StartParsing":                    {retryNever, true},
-	"StopParsing":                     {retryAllowed, false},
-	"CopySearchPost":                  {retryNever, true}, // PUT /posts/copy creates a copy
-	"GetSearchPostEdit":               {retryAllowed, false},
-	"RewriteSearchPost":               {retryNever, true}, // POST /posts with as_copy=1 creates
-	"ImportSearchPost":                {retryNever, true}, // PUT /posts/import creates — the #87 case
+	"ListSearchPosts":                         {retryAllowed, false},
+	"ListAllSearchPosts":                      {retryComposite, false},
+	"ListAllSearchPostsWithTotal":             {retryComposite, false},
+	"ListAllSearchPostsWithFirstAndLastTotal": {retryComposite, false},
+	"ListSourceResources":                     {retryAllowed, false},
+	"ListAllSourceResources":                  {retryComposite, false},
+	"ListAllSourceResourcesWithTotal":         {retryComposite, false},
+	"GetParsingForm":                          {retryAllowed, false},
+	"StartParsing":                            {retryNever, true},
+	"StopParsing":                             {retryAllowed, false},
+	"CopySearchPost":                          {retryNever, true}, // PUT /posts/copy creates a copy
+	"GetSearchPostEdit":                       {retryAllowed, false},
+	"RewriteSearchPost":                       {retryNever, true}, // POST /posts with as_copy=1 creates
+	"ImportSearchPost":                        {retryNever, true}, // PUT /posts/import creates — the #87 case
 	// --- posts ---
-	"ListPosts":             {retryAllowed, false},
-	"ListAllPosts":          {retryComposite, false},
-	"ListAllPostsWithTotal": {retryComposite, false},
-	"CreatePost":            {retryNever, true},
-	"UpdatePost":            {retryAllowed, false},
-	"GetPostEdit":           {retryAllowed, false},
-	"UpdatePostText":        {retryComposite, false}, // delegates to GetPostEdit + UpdatePost
-	"DeletePost":            {retryAllowed, false},
-	"BatchDeletePosts":      {retryNever, true}, // POST /posts/batch/delete
+	"ListPosts":                         {retryAllowed, false},
+	"ListAllPosts":                      {retryComposite, false},
+	"ListAllPostsWithTotal":             {retryComposite, false},
+	"ListAllPostsWithFirstAndLastTotal": {retryComposite, false},
+	"CreatePost":                        {retryNever, true},
+	"UpdatePost":                        {retryAllowed, false},
+	"GetPostEdit":                       {retryAllowed, false},
+	"UpdatePostText":                    {retryComposite, false}, // delegates to GetPostEdit + UpdatePost
+	"DeletePost":                        {retryAllowed, false},
+	"BatchDeletePosts":                  {retryNever, true}, // POST /posts/batch/delete
 	// MovePost is composite: GetPostEdit (retryAllowed) + UpdatePost
 	// (retryAllowed full-state PUT) + GetPostEdit (date recovery). The move
 	// itself is a full-state PUT to a known id, which converges on re-send;

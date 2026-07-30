@@ -229,25 +229,43 @@ func (c *Client) ListAllSearchPosts(ctx context.Context, f SearchPostsFilter) ([
 // ListAll*WithTotal entry points; for /posts-search specifically, passing
 // (list, totalRows) to NewAllListEnvelope is NOT suitable (see
 // ListAllSearchPosts). The right shape is the unique < firstTotal rule
-// doctor uses for /notifications, but no /posts-search entry point exposes
-// the first-page total yet; see NewAllListEnvelope for the per call-site
-// table.
+// doctor uses for /notifications; use ListAllSearchPostsWithFirstAndLastTotal
+// and NewAllListEnvelopeHighChurn. See NewAllListEnvelope for the per
+// call-site table.
 func (c *Client) ListAllSearchPostsWithTotal(ctx context.Context, f SearchPostsFilter) ([]SearchPost, int, error) {
+	all, _, last, err := c.ListAllSearchPostsWithFirstAndLastTotal(ctx, f)
+	return all, last, err
+}
+
+// ListAllSearchPostsWithFirstAndLastTotal is ListAllSearchPosts but also
+// returns the server's total_rows from the FIRST page and the LAST page.
+// The triple (list, firstTotalRows, lastTotalRows) lets a caller distinguish
+// a truncated walk (unique count < firstTotalRows) from a benign mid-walk
+// insert (lastTotalRows > firstTotalRows) — the distinction
+// NewAllListEnvelope cannot make because it receives only one total.
+// High-churn --all call sites (cmd/hooppy/list.go, cmd/hooppy-mcp/main.go)
+// use this with NewAllListEnvelopeHighChurn to apply the first-total rule
+// instead of the equality check. See NewAllListEnvelopeHighChurn and
+// RunDoctor for the rule and the gaps it does not close.
+func (c *Client) ListAllSearchPostsWithFirstAndLastTotal(ctx context.Context, f SearchPostsFilter) ([]SearchPost, int, int, error) {
 	all := make([]SearchPost, 0)
-	var totalRows int
+	var firstTotalRows, lastTotalRows int
 	for page := 1; ; page++ {
 		if page > maxListAllPages {
-			return nil, 0, fmt.Errorf("hooppy: ListAllSearchPosts exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+			return nil, 0, 0, fmt.Errorf("hooppy: ListAllSearchPosts exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
 		}
 		f.Page = page
 		resp, err := c.ListSearchPosts(ctx, f)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
+		}
+		if page == 1 {
+			firstTotalRows = resp.TotalRows
 		}
 		all = append(all, resp.List...)
-		totalRows = resp.TotalRows
+		lastTotalRows = resp.TotalRows
 		if !resp.IsHasMore {
-			return all, totalRows, nil
+			return all, firstTotalRows, lastTotalRows, nil
 		}
 	}
 }
