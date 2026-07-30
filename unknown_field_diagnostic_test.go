@@ -856,14 +856,10 @@ var unmodelledBaselines = map[string]map[string]string{
 		"list[0].views_source":          "number",
 		"selected_filters_placeholders": "array",
 	},
-	"GET /posts-search/source-resources": {
-		"is_has_more": "boolean",
-		"rows_limit":  "number",
-		"total_rows":  "number",
-	},
-	"GET /posts-search/parsing/form": {},
-	"GET /proxies":                   {},
-	"GET /watermarks":                {},
+	"GET /posts-search/source-resources": {},
+	"GET /posts-search/parsing/form":     {},
+	"GET /proxies":                       {},
+	"GET /watermarks":                    {},
 	"GET /notifications": {
 		"filters_plug":                  "array",
 		"list[0].page":                  "object",

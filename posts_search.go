@@ -197,16 +197,130 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	return &resp, nil
 }
 
-// ListSourceResources returns the configured source resources (groups of
-// external social media pages to scrape from).
+// ListAllSearchPosts walks GET /posts-search from page 1 with the given
+// filter, accumulating scraped posts until is_has_more is false. The walk
+// starts at page 1 so the first page is not fetched twice (the Hooppy API is
+// 1-indexed and a request with no page param is byte-identical to ?page=1).
+// The filter's non-page fields are preserved across the walk; only Page is
+// incremented. See projects.ListAllSchedules for the 1-indexed rationale and
+// the sanity cap.
 //
-// UNDOCUMENTED: GET /posts-search/source-resources is not in the public OpenAPI spec.
-func (c *Client) ListSourceResources(ctx context.Context) (*SourceResourcesResponse, error) {
+// Duplicates arising from a mid-walk collection shift are NOT removed: with
+// offset pagination, a row inserted or deleted mid-walk shifts the window
+// and the server re-serves a row already seen. This entry point drops the
+// server's total_rows, so it cannot detect such duplicates. /posts-search is
+// a high-churn collection (scraped posts accumulate), so passing (list,
+// totalRows) to NewAllListEnvelope is NOT suitable — its equality check
+// (unique == total) false-alarms on every active account, exactly as it does
+// for /posts and /notifications (see NewAllListEnvelope for the per call-site
+// table). Use ListAllSearchPostsWithTotal and the unique < firstTotal rule
+// (see RunDoctor) when a truncated-walk check is needed.
+//
+// The walk is bounded by maxListAllPages; if the server never clears
+// is_has_more within that bound, ListAllSearchPosts returns an error instead
+// of looping forever or silently truncating.
+func (c *Client) ListAllSearchPosts(ctx context.Context, f SearchPostsFilter) ([]SearchPost, error) {
+	all, _, err := c.ListAllSearchPostsWithTotal(ctx, f)
+	return all, err
+}
+
+// ListAllSearchPostsWithTotal is ListAllSearchPosts but also returns the
+// server's last-seen total_rows. It exists for symmetry with the other
+// ListAll*WithTotal entry points; for /posts-search specifically, passing
+// (list, totalRows) to NewAllListEnvelope is NOT suitable (see
+// ListAllSearchPosts). The right shape is the unique < firstTotal rule
+// doctor uses for /notifications, but no /posts-search entry point exposes
+// the first-page total yet; see NewAllListEnvelope for the per call-site
+// table.
+func (c *Client) ListAllSearchPostsWithTotal(ctx context.Context, f SearchPostsFilter) ([]SearchPost, int, error) {
+	all := make([]SearchPost, 0)
+	var totalRows int
+	for page := 1; ; page++ {
+		if page > maxListAllPages {
+			return nil, 0, fmt.Errorf("hooppy: ListAllSearchPosts exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+		}
+		f.Page = page
+		resp, err := c.ListSearchPosts(ctx, f)
+		if err != nil {
+			return nil, 0, err
+		}
+		all = append(all, resp.List...)
+		totalRows = resp.TotalRows
+		if !resp.IsHasMore {
+			return all, totalRows, nil
+		}
+	}
+}
+
+// ListSourceResources returns the configured source resources (groups of
+// external social media pages to scrape from). page is 1-indexed (0 or omit
+// = first page); a negative is rejected before any request so a paging loop
+// cannot silently re-read page 1. Same defect class as the search/posts/
+// accounts/pages page guards (see ListSearchPosts).
+//
+// UNDOCUMENTED: GET /posts-search/source-resources is not in the public
+// OpenAPI spec. The endpoint carries the standard {list, total_rows,
+// is_has_more, rows_limit} envelope (see testdata/live/source_resources.json
+// and issue #98), so it is paged like its siblings; the page parameter is
+// sent verbatim and the server answers.
+func (c *Client) ListSourceResources(ctx context.Context, page int) (*SourceResourcesResponse, error) {
+	params := url.Values{}
+	if page < 0 {
+		return nil, fmt.Errorf("hooppy: ListSourceResources: page must be non-negative (got %d); pass 0 to leave unset", page)
+	}
+	if page > 0 {
+		params.Set("page", strconv.Itoa(page))
+	}
 	var resp SourceResourcesResponse
-	if err := c.doGET(ctx, pathPostsSearchSources, nil, &resp, true); err != nil {
+	if err := c.doGET(ctx, pathPostsSearchSources, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// ListAllSourceResources walks GET /posts-search/source-resources from page
+// 1, accumulating source resources until is_has_more is false. The walk
+// starts at page 1 so the first page is not fetched twice (the Hooppy API is
+// 1-indexed and a request with no page param is byte-identical to ?page=1).
+// See projects.ListAllSchedules for the 1-indexed rationale and the sanity
+// cap.
+//
+// Duplicates arising from a mid-walk collection shift are NOT removed: with
+// offset pagination, a row inserted or deleted mid-walk shifts the window
+// and the server re-serves a row already seen. This entry point drops the
+// server's total_rows, so it cannot detect such duplicates. Use
+// ListAllSourceResourcesWithTotal with NewAllListEnvelope to detect them
+// (see NewAllListEnvelope for what it does and does not catch).
+//
+// The walk is bounded by maxListAllPages; if the server never clears
+// is_has_more within that bound, ListAllSourceResources returns an error
+// instead of looping forever or silently truncating.
+func (c *Client) ListAllSourceResources(ctx context.Context) ([]SourceResource, error) {
+	all, _, err := c.ListAllSourceResourcesWithTotal(ctx)
+	return all, err
+}
+
+// ListAllSourceResourcesWithTotal is ListAllSourceResources but also returns
+// the server's last-seen total_rows. The pair (list, totalRows) is meant to
+// be passed to NewAllListEnvelope. See projects.ListAllSchedulesWithTotal
+// and NewAllListEnvelope for what the envelope catches and what it does not.
+func (c *Client) ListAllSourceResourcesWithTotal(ctx context.Context) ([]SourceResource, int, error) {
+	all := make([]SourceResource, 0)
+	var totalRows int
+	for page := 1; ; page++ {
+		if page > maxListAllPages {
+			return nil, 0, fmt.Errorf("hooppy: ListAllSourceResources exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+		}
+		resp, err := c.ListSourceResources(ctx, page)
+		if err != nil {
+			return nil, 0, err
+		}
+		all = append(all, resp.List...)
+		totalRows = resp.TotalRows
+		if !resp.IsHasMore {
+			return all, totalRows, nil
+		}
+	}
 }
 
 // GetParsingForm returns the parsing form data (available source resources,

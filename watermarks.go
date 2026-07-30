@@ -31,6 +31,50 @@ func (c *Client) ListWatermarks(ctx context.Context, page int) (*WatermarksRespo
 	return &resp, nil
 }
 
+// ListAllWatermarks walks GET /watermarks from page 1, accumulating
+// watermarks until is_has_more is false. The walk starts at page 1 so the
+// first page is not fetched twice (the Hooppy API is 1-indexed and a request
+// with no page param is byte-identical to ?page=1). See
+// projects.ListAllSchedules for the 1-indexed rationale and the sanity cap.
+//
+// Duplicates arising from a mid-walk collection shift are NOT removed: with
+// offset pagination, a row inserted or deleted mid-walk shifts the window
+// and the server re-serves a row already seen. This entry point drops the
+// server's total_rows, so it cannot detect such duplicates. Use
+// ListAllWatermarksWithTotal with NewAllListEnvelope to detect them (see
+// NewAllListEnvelope for what it does and does not catch).
+//
+// The walk is bounded by maxListAllPages; if the server never clears
+// is_has_more within that bound, ListAllWatermarks returns an error instead
+// of looping forever or silently truncating.
+func (c *Client) ListAllWatermarks(ctx context.Context) ([]Watermark, error) {
+	all, _, err := c.ListAllWatermarksWithTotal(ctx)
+	return all, err
+}
+
+// ListAllWatermarksWithTotal is ListAllWatermarks but also returns the
+// server's last-seen total_rows. The pair (list, totalRows) is meant to be
+// passed to NewAllListEnvelope. See projects.ListAllSchedulesWithTotal and
+// NewAllListEnvelope for what the envelope catches and what it does not.
+func (c *Client) ListAllWatermarksWithTotal(ctx context.Context) ([]Watermark, int, error) {
+	all := make([]Watermark, 0)
+	var totalRows int
+	for page := 1; ; page++ {
+		if page > maxListAllPages {
+			return nil, 0, fmt.Errorf("hooppy: ListAllWatermarks exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+		}
+		resp, err := c.ListWatermarks(ctx, page)
+		if err != nil {
+			return nil, 0, err
+		}
+		all = append(all, resp.List...)
+		totalRows = resp.TotalRows
+		if !resp.IsHasMore {
+			return all, totalRows, nil
+		}
+	}
+}
+
 // CreateWatermark creates a new watermark via POST /watermarks.
 //
 // UNDOCUMENTED: not in the public OpenAPI spec (v0.1.0).

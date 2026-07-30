@@ -459,7 +459,7 @@ func TestListSourceResources(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	resp, err := c.ListSourceResources(context.Background())
+	resp, err := c.ListSourceResources(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("ListSourceResources: %v", err)
 	}
@@ -469,6 +469,72 @@ func TestListSourceResources(t *testing.T) {
 	s := resp.List[0]
 	if s.ID != 123 || s.Name != "Test Source" || s.SourceID != 1 {
 		t.Errorf("Source = %+v", s)
+	}
+}
+
+// TestListSourceResources_DecodesPagingFields pins the issue #98 fix: the
+// server sends total_rows/is_has_more/rows_limit on /posts-search/source-
+// resources, and SourceResourcesResponse now models them (previously only
+// List was modelled, so the signal was dropped at decode and a truncation
+// above 20 source resources was undetectable).
+//
+// RED-on-revert: remove any of the three paging fields from
+// SourceResourcesResponse and the corresponding assertion fails (zero value
+// instead of the wire value).
+func TestListSourceResources_DecodesPagingFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"list":[{"id":1,"name":"S","source_type":1,"search_type":1,"source_id":1,"data":"","hashtag":"","link":""}],"total_rows":25,"is_has_more":true,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ListSourceResources(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("ListSourceResources: %v", err)
+	}
+	if resp.TotalRows != 25 {
+		t.Errorf("TotalRows = %d, want 25 — the field must be modelled so a truncation warning can be computed (issue #98)", resp.TotalRows)
+	}
+	if !resp.IsHasMore {
+		t.Errorf("IsHasMore = false, want true — the field must be modelled (issue #98)")
+	}
+	if resp.RowsLimit != 20 {
+		t.Errorf("RowsLimit = %d, want 20 (issue #98)", resp.RowsLimit)
+	}
+}
+
+// TestListAllSourceResources_TwoPages verifies the source-resources walker
+// accumulates both pages and terminates on is_has_more=false. This is the
+// library half of the issue #103 --all fix for `search sources`.
+//
+// RED-on-revert: break the ListAllSourceResourcesWithTotal walk (or revert
+// ListSourceResources to take no page param) and len(all) < 4 fails.
+func TestListAllSourceResources_TwoPages(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("page"))
+		switch r.URL.Query().Get("page") {
+		case "2":
+			w.Write([]byte(`{"list":[{"id":3,"name":"C","source_type":1,"search_type":1,"source_id":1,"data":"","hashtag":"","link":""},{"id":4,"name":"D","source_type":1,"search_type":1,"source_id":1,"data":"","hashtag":"","link":""}],"total_rows":4,"is_has_more":false,"rows_limit":20}`))
+		default:
+			w.Write([]byte(`{"list":[{"id":1,"name":"A","source_type":1,"search_type":1,"source_id":1,"data":"","hashtag":"","link":""},{"id":2,"name":"B","source_type":1,"search_type":1,"source_id":1,"data":"","hashtag":"","link":""}],"total_rows":4,"is_has_more":true,"rows_limit":20}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	all, total, err := c.ListAllSourceResourcesWithTotal(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllSourceResourcesWithTotal: %v", err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("len(all) = %d, want 4 (two 2-row pages)", len(all))
+	}
+	if total != 4 {
+		t.Errorf("total = %d, want 4", total)
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Fatalf("page params = %v, want [1 2] — the walk must start at page 1", pages)
 	}
 }
 

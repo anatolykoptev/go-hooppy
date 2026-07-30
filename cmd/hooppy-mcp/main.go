@@ -161,21 +161,34 @@ func parseOrderedIDListStr(s string) ([]int, error) {
 // --- list_accounts ---
 
 type listAccountsInput struct {
-	SourceID int `json:"source_id,omitempty" jsonschema:"Filter by social network source ID (e.g. 1=VK, 6=Pinterest, 9=Telegram channels). 0=no filter."`
+	SourceID int  `json:"source_id,omitempty" jsonschema:"Filter by social network source ID (e.g. 1=VK, 6=Pinterest, 9=Telegram channels). 0=no filter."`
+	Page     int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
+	All      bool `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page."`
 }
 
 func registerListAccounts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_accounts",
-			Description: "List connected social network accounts on Hooppy. Returns account IDs, social network type (source_id), and profile info.",
+			Description: "List connected social network accounts on Hooppy. Returns account IDs, social network type (source_id), and profile info. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listAccountsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListAccounts(ctx, hooppy.ListAccountsFilter{SourceID: in.SourceID})
+			if in.All {
+				all, total, err := c.ListAllAccountsWithTotal(ctx, hooppy.ListAccountsFilter{SourceID: in.SourceID})
+				if err != nil {
+					return errResult(err.Error())
+				}
+				env, err := hooppy.NewAllListEnvelope(all, total, func(a hooppy.Account) int { return a.ID })
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
+			}
+			resp, err := c.ListAccounts(ctx, hooppy.ListAccountsFilter{SourceID: in.SourceID, Page: in.Page})
 			if err != nil {
 				return errResult(err.Error())
 			}
@@ -187,22 +200,35 @@ func registerListAccounts(server *mcp.Server) {
 // --- list_pages ---
 
 type listPagesInput struct {
-	SourceID  int `json:"source_id,omitempty" jsonschema:"Filter by social network source ID. 0=no filter."`
-	AccountID int `json:"account_id,omitempty" jsonschema:"Filter by parent account ID. 0=no filter."`
+	SourceID  int  `json:"source_id,omitempty" jsonschema:"Filter by social network source ID. 0=no filter."`
+	AccountID int  `json:"account_id,omitempty" jsonschema:"Filter by parent account ID. 0=no filter."`
+	Page      int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
+	All       bool `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page."`
 }
 
 func registerListPages(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_pages",
-			Description: "List connected groups/pages for social network accounts. Page IDs are needed for create_post (selected_pages_ids).",
+			Description: "List connected groups/pages for social network accounts. Page IDs are needed for create_post (selected_pages_ids). Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listPagesInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListPages(ctx, hooppy.ListPagesFilter{SourceID: in.SourceID, AccountID: in.AccountID})
+			if in.All {
+				all, total, err := c.ListAllPagesWithTotal(ctx, hooppy.ListPagesFilter{SourceID: in.SourceID, AccountID: in.AccountID})
+				if err != nil {
+					return errResult(err.Error())
+				}
+				env, err := hooppy.NewAllListEnvelope(all, total, func(p hooppy.Page) int { return p.ID })
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
+			}
+			resp, err := c.ListPages(ctx, hooppy.ListPagesFilter{SourceID: in.SourceID, AccountID: in.AccountID, Page: in.Page})
 			if err != nil {
 				return errResult(err.Error())
 			}
@@ -695,20 +721,34 @@ func registerGetUser(server *mcp.Server) {
 
 // --- list_watermarks (undocumented) ---
 
-type listWatermarksInput struct{}
+type listWatermarksInput struct {
+	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
+	All  bool `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page."`
+}
 
 func registerListWatermarks(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_watermarks",
-			Description: "List watermarks on Hooppy. UNDOCUMENTED endpoint.",
+			Description: "List watermarks on Hooppy. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows). UNDOCUMENTED endpoint.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ listWatermarksInput) (*mcp.CallToolResult, error) {
+		func(ctx context.Context, _ *mcp.CallToolRequest, in listWatermarksInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListWatermarks(ctx, 0)
+			if in.All {
+				all, total, err := c.ListAllWatermarksWithTotal(ctx)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				env, err := hooppy.NewAllListEnvelope(all, total, func(w hooppy.Watermark) int { return w.ID })
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
+			}
+			resp, err := c.ListWatermarks(ctx, in.Page)
 			if err != nil {
 				return errResult(err.Error())
 			}
@@ -719,20 +759,34 @@ func registerListWatermarks(server *mcp.Server) {
 
 // --- list_proxies (undocumented) ---
 
-type listProxiesInput struct{}
+type listProxiesInput struct {
+	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
+	All  bool `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page."`
+}
 
 func registerListProxies(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_proxies",
-			Description: "List proxy servers on Hooppy. UNDOCUMENTED endpoint.",
+			Description: "List proxy servers on Hooppy. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows). UNDOCUMENTED endpoint.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ listProxiesInput) (*mcp.CallToolResult, error) {
+		func(ctx context.Context, _ *mcp.CallToolRequest, in listProxiesInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListProxies(ctx)
+			if in.All {
+				all, total, err := c.ListAllProxiesWithTotal(ctx)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				env, err := hooppy.NewAllListEnvelope(all, total, func(p hooppy.Proxy) int { return p.ID })
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
+			}
+			resp, err := c.ListProxies(ctx, in.Page)
 			if err != nil {
 				return errResult(err.Error())
 			}
@@ -743,20 +797,34 @@ func registerListProxies(server *mcp.Server) {
 
 // --- list_notifications (undocumented) ---
 
-type listNotificationsInput struct{}
+type listNotificationsInput struct {
+	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
+	All  bool `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page."`
+}
 
 func registerListNotifications(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_notifications",
-			Description: "List publication status notifications on Hooppy. UNDOCUMENTED endpoint.",
+			Description: "List publication status notifications on Hooppy. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows). UNDOCUMENTED endpoint.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ listNotificationsInput) (*mcp.CallToolResult, error) {
+		func(ctx context.Context, _ *mcp.CallToolRequest, in listNotificationsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListNotifications(ctx, 0)
+			if in.All {
+				all, total, err := c.ListAllNotificationsWithTotal(ctx)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				env, err := hooppy.NewAllListEnvelope(all, total, func(n hooppy.Notification) int { return n.ID })
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
+			}
+			resp, err := c.ListNotifications(ctx, in.Page)
 			if err != nil {
 				return errResult(err.Error())
 			}
@@ -1375,20 +1443,21 @@ type listSearchPostsInput struct {
 	VideoDuration       int     `json:"video_duration,omitempty" jsonschema:"Video duration bucket (non-negative; 0 = unset). Measured against a live account (video content only): 1 -> 710; 2 -> 159; 3 -> 3525; 4 -> 4036; 5 -> 4128; 6 -> 4161; 7 -> 644; 8 -> 677; 9 and 10 return a server error. Keys 5-8 are real and each returns a distinct result set — the prior 1..4 guard hard-errored on four working filters. The valid key space is not enumerable client-side (the vendor may add keys); any non-negative value is passed through verbatim and the server answers. The filters_plug values array is empty."`
 	ContentTypes        string  `json:"content_types,omitempty" jsonschema:"Comma-separated content types to include: photos, videos, audios, documents, links (AND filter)."`
 	ContentTypesExclude string  `json:"content_types_exclude,omitempty" jsonschema:"Comma-separated content types to exclude."`
+	All                 bool    `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page."`
 }
 
 func registerListSearchPosts(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_search_posts",
-			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. Supports sorting by metrics (sort_by: likes, views, comments, reposts, involvement) and filtering by content types, photo count, and video duration. Metric THRESHOLD filters (min_likes/min_views/min_comments/min_reposts/min_involvement) are NOT server-side — the API silently ignores them; setting any of them errors, so use sort_by to rank by a metric instead. source_id, source_resource_id, and owner_id are also NOT server-side on this endpoint — the API accepts and silently ignores them; setting any of them errors, so use source_type, content_types, photos_amount, video_duration, or text to narrow. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "List posts scraped from external social media pages. Posts must be scraped first via start_parsing. Supports sorting by metrics (sort_by: likes, views, comments, reposts, involvement) and filtering by content types, photo count, and video duration. Metric THRESHOLD filters (min_likes/min_views/min_comments/min_reposts/min_involvement) are NOT server-side — the API silently ignores them; setting any of them errors, so use sort_by to rank by a metric instead. source_id, source_resource_id, and owner_id are also NOT server-side on this endpoint — the API accepts and silently ignores them; setting any of them errors, so use source_type, content_types, photos_amount, video_duration, or text to narrow. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows). UNDOCUMENTED endpoint — may change without notice.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listSearchPostsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListSearchPosts(ctx, hooppy.SearchPostsFilter{
+			f := hooppy.SearchPostsFilter{
 				Text:                in.Text,
 				DateFrom:            in.DateFrom,
 				DateTo:              in.DateTo,
@@ -1408,7 +1477,19 @@ func registerListSearchPosts(server *mcp.Server) {
 				VideoDuration:       in.VideoDuration,
 				ContentTypes:        in.ContentTypes,
 				ContentTypesExclude: in.ContentTypesExclude,
-			})
+			}
+			if in.All {
+				all, total, err := c.ListAllSearchPostsWithTotal(ctx, f)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				env, err := hooppy.NewAllListEnvelope(all, total, func(p hooppy.SearchPost) int { return p.ID })
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
+			}
+			resp, err := c.ListSearchPosts(ctx, f)
 			if err != nil {
 				return errResult(err.Error())
 			}
@@ -1419,18 +1500,34 @@ func registerListSearchPosts(server *mcp.Server) {
 
 // --- list_source_resources ---
 
+type listSourceResourcesInput struct {
+	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
+	All  bool `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page."`
+}
+
 func registerListSourceResources(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_source_resources",
-			Description: "List configured source resources — groups of external social media pages to scrape posts from. Each resource has an ID (needed for start_parsing), a name, and the URLs to scrape. UNDOCUMENTED endpoint.",
+			Description: "List configured source resources — groups of external social media pages to scrape posts from. Each resource has an ID (needed for start_parsing), a name, and the URLs to scrape. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows). UNDOCUMENTED endpoint.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, error) {
+		func(ctx context.Context, _ *mcp.CallToolRequest, in listSourceResourcesInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ListSourceResources(ctx)
+			if in.All {
+				all, total, err := c.ListAllSourceResourcesWithTotal(ctx)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				env, err := hooppy.NewAllListEnvelope(all, total, func(s hooppy.SourceResource) int { return s.ID })
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
+			}
+			resp, err := c.ListSourceResources(ctx, in.Page)
 			if err != nil {
 				return errResult(err.Error())
 			}
