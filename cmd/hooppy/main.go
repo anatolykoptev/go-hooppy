@@ -70,6 +70,20 @@ func die(err error) {
 	}
 }
 
+// groupHelpRun is the RunE for group (parent) commands that have no action of
+// their own. It prints help for the bare group — preserving cobra's default
+// behaviour for `hooppy pages` invoked with no subcommand — while making the
+// group runnable so that its declared Args (cobra.NoArgs) is actually
+// enforced. Without a Run/RunE, cobra returns flag.ErrHelp BEFORE
+// ValidateArgs runs (command.go: `if !c.Runnable() { return flag.ErrHelp }`
+// precedes `c.ValidateArgs`), so a junk positional like `hooppy pages wibble`
+// would silently show help and exit 0 instead of erroring — the group half of
+// issue #77. With RunE set, ValidateArgs fires first and NoArgs rejects the
+// junk positional before this RunE is reached.
+func groupHelpRun(cmd *cobra.Command, _ []string) error {
+	return cmd.Help()
+}
+
 // --- accounts ---
 
 func registerAccounts(root *cobra.Command) {
@@ -77,6 +91,7 @@ func registerAccounts(root *cobra.Command) {
 		Name:  "accounts",
 		Short: "List connected social network accounts",
 	})
+	cmd.Args = cobra.NoArgs
 	var sourceID int
 	cmd.Flags().IntVar(&sourceID, "source", 0, "filter by social network source ID")
 	cmd.Run = func(_ *cobra.Command, _ []string) {
@@ -94,12 +109,15 @@ func registerPages(root *cobra.Command) {
 		Name:  "pages",
 		Short: "Manage connected groups/pages",
 	})
+	pagesCmd.Args = cobra.NoArgs
+	pagesCmd.RunE = groupHelpRun
 
 	// pages list
 	listCmd := cli.RegisterSubcommand(pagesCmd, cli.SubcommandConfig{
 		Name:  "list",
 		Short: "List connected groups/pages",
 	})
+	listCmd.Args = cobra.NoArgs
 	var sourceID, accountID int
 	listCmd.Flags().IntVar(&sourceID, "source", 0, "filter by social network source ID")
 	listCmd.Flags().IntVar(&accountID, "account", 0, "filter by account ID")
@@ -115,11 +133,8 @@ func registerPages(root *cobra.Command) {
 		Name:  "disconnect",
 		Short: "Disconnect a page by ID (undocumented endpoint)",
 	})
+	disconnectCmd.Args = cobra.ExactArgs(1)
 	disconnectCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy pages disconnect <id>")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -136,12 +151,15 @@ func registerPosts(root *cobra.Command) {
 		Name:  "posts",
 		Short: "Manage posts",
 	})
+	postsCmd.Args = cobra.NoArgs
+	postsCmd.RunE = groupHelpRun
 
 	// posts list
 	listCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
 		Name:  "list",
 		Short: "List posts",
 	})
+	listCmd.Args = cobra.NoArgs
 	var published, unpublished bool
 	var pubDate string
 	var pageID, sourceID, projectID, scheduleID, accountID, pageNum int
@@ -187,6 +205,7 @@ func registerPosts(root *cobra.Command) {
 		Name:  "create",
 		Short: "Create and publish a post immediately",
 	})
+	createCmd.Args = cobra.NoArgs
 	var text string
 	var pageIDs string
 	createCmd.Flags().StringVar(&text, "text", "", "post text (required)")
@@ -211,11 +230,8 @@ func registerPosts(root *cobra.Command) {
 		Name:  "delete",
 		Short: "Delete a post by ID",
 	})
+	deleteCmd.Args = cobra.ExactArgs(1)
 	deleteCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy posts delete <id>")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -229,11 +245,8 @@ func registerPosts(root *cobra.Command) {
 		Name:  "edit",
 		Short: "View a post's full editable state (texts, attachments, schedule)",
 	})
+	editPostCmd.Args = cobra.ExactArgs(1)
 	editPostCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy posts edit <id>")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -247,6 +260,7 @@ func registerPosts(root *cobra.Command) {
 		Name:  "update",
 		Short: "Update an existing post by ID (undocumented endpoint)",
 	})
+	updateCmd.Args = cobra.ExactArgs(1)
 	var updText, updPageIDs string
 	var updTextOnly bool
 	updateCmd.Flags().StringVar(&updText, "text", "", "new post text (required)")
@@ -254,10 +268,6 @@ func registerPosts(root *cobra.Command) {
 	updateCmd.Flags().BoolVar(&updTextOnly, "text-only", false, "change only the text, preserve schedule + attachments")
 	_ = updateCmd.MarkFlagRequired("text")
 	updateCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy posts update <id> --text=... [--text-only | --to=...]")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -290,6 +300,7 @@ func registerPosts(root *cobra.Command) {
 		Name:  "crosspost",
 		Short: "Create a post via an alternative mode (undocumented endpoints)",
 	})
+	crossPostCmd.Args = cobra.NoArgs
 	var cpMode, cpText, cpPageIDs string
 	crossPostCmd.Flags().StringVar(&cpMode, "mode", "", "cross-post mode: search, copy, sources, import, crosspost, rewrite, translate, queue, drafts, templates, rss, feeds, tags, watermarks, batch (required)")
 	crossPostCmd.Flags().StringVar(&cpText, "text", "", "post text (required)")
@@ -333,12 +344,15 @@ func registerProjects(root *cobra.Command) {
 		Name:  "projects",
 		Short: "Manage post projects",
 	})
+	projectsCmd.Args = cobra.NoArgs
+	projectsCmd.RunE = groupHelpRun
 
 	// projects list
 	listCmd := cli.RegisterSubcommand(projectsCmd, cli.SubcommandConfig{
 		Name:  "list",
 		Short: "List post projects",
 	})
+	listCmd.Args = cobra.NoArgs
 	var projPage int
 	var projAll bool
 	listCmd.Flags().IntVar(&projPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
@@ -363,6 +377,7 @@ func registerProjects(root *cobra.Command) {
 		Name:  "create",
 		Short: "Create a project (undocumented endpoint)",
 	})
+	createCmd.Args = cobra.NoArgs
 	var projName string
 	var projPageID int
 	createCmd.Flags().StringVar(&projName, "name", "", "project name (required)")
@@ -381,11 +396,8 @@ func registerProjects(root *cobra.Command) {
 		Name:  "delete",
 		Short: "Delete a project by ID (undocumented endpoint)",
 	})
+	deleteCmd.Args = cobra.ExactArgs(1)
 	deleteCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy projects delete <id>")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -399,14 +411,11 @@ func registerProjects(root *cobra.Command) {
 		Name:  "update",
 		Short: "Update a project name by ID (undocumented endpoint)",
 	})
+	projUpdateCmd.Args = cobra.ExactArgs(1)
 	var projUpdName string
 	projUpdateCmd.Flags().StringVar(&projUpdName, "name", "", "new project name (required)")
 	_ = projUpdateCmd.MarkFlagRequired("name")
 	projUpdateCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy projects update <id> --name=...")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -423,12 +432,15 @@ func registerSchedules(root *cobra.Command) {
 		Name:  "schedules",
 		Short: "Manage publication schedules",
 	})
+	schedulesCmd.Args = cobra.NoArgs
+	schedulesCmd.RunE = groupHelpRun
 
 	// schedules list
 	listCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
 		Name:  "list",
 		Short: "List publication schedules",
 	})
+	listCmd.Args = cobra.NoArgs
 	var schedPage int
 	var schedAll bool
 	listCmd.Flags().IntVar(&schedPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
@@ -453,6 +465,7 @@ func registerSchedules(root *cobra.Command) {
 		Name:  "create",
 		Short: "Create a schedule (undocumented endpoint)",
 	})
+	createCmd.Args = cobra.NoArgs
 	var schedName string
 	createCmd.Flags().StringVar(&schedName, "name", "", "schedule name (required)")
 	_ = createCmd.MarkFlagRequired("name")
@@ -468,11 +481,8 @@ func registerSchedules(root *cobra.Command) {
 		Name:  "delete",
 		Short: "Delete a schedule by ID (undocumented endpoint)",
 	})
+	deleteCmd.Args = cobra.ExactArgs(1)
 	deleteCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy schedules delete <id>")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -490,15 +500,12 @@ func registerSchedules(root *cobra.Command) {
 		Name:  "update",
 		Short: "Update a schedule by ID, preserving all fields (read-modify-write, undocumented endpoint)",
 	})
+	schedUpdateCmd.Args = cobra.ExactArgs(1)
 	var schedUpdName string
 	var schedUpdState int
 	schedUpdateCmd.Flags().StringVar(&schedUpdName, "name", "", "schedule name (applied via read-modify-write; all other fields preserved)")
 	schedUpdateCmd.Flags().IntVar(&schedUpdState, "state", 0, "state override: 1=active, 2=deferred, 3=stopped (0 = leave unchanged)")
 	schedUpdateCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy schedules update <id> --name=... [--state=1]")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		os.Exit(runScheduleUpdate(context.Background(), mustClient(), os.Stdout, os.Stderr, scheduleUpdateArgs{
@@ -513,11 +520,8 @@ func registerSchedules(root *cobra.Command) {
 		Name:  "times",
 		Short: "Print a schedule's posting slots per weekday (undocumented endpoint)",
 	})
+	timesCmd.Args = cobra.ExactArgs(1)
 	timesCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy schedules times <id>")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -577,16 +581,15 @@ func registerFiles(root *cobra.Command) {
 		Name:  "files",
 		Short: "Upload files for posts",
 	})
+	filesCmd.Args = cobra.NoArgs
+	filesCmd.RunE = groupHelpRun
 
 	uploadMedia := cli.RegisterSubcommand(filesCmd, cli.SubcommandConfig{
 		Name:  "upload-media",
 		Short: "Upload a photo or video file",
 	})
+	uploadMedia.Args = cobra.ExactArgs(1)
 	uploadMedia.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy files upload-media <path>")
-			os.Exit(1)
-		}
 		c := mustClient()
 		resp, err := c.UploadMedia(context.Background(), args[0], "")
 		die(err)
@@ -597,11 +600,8 @@ func registerFiles(root *cobra.Command) {
 		Name:  "upload-document",
 		Short: "Upload a document file",
 	})
+	uploadDoc.Args = cobra.ExactArgs(1)
 	uploadDoc.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy files upload-document <path>")
-			os.Exit(1)
-		}
 		c := mustClient()
 		resp, err := c.UploadDocument(context.Background(), args[0], "")
 		die(err)
@@ -616,6 +616,7 @@ func registerUser(root *cobra.Command) {
 		Name:  "user",
 		Short: "Get current user profile (undocumented endpoint)",
 	})
+	cmd.Args = cobra.NoArgs
 	cmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.GetUser(context.Background())
@@ -631,12 +632,15 @@ func registerWatermarks(root *cobra.Command) {
 		Name:  "watermarks",
 		Short: "Manage watermarks (undocumented endpoints)",
 	})
+	wmCmd.Args = cobra.NoArgs
+	wmCmd.RunE = groupHelpRun
 
 	// watermarks list
 	listCmd := cli.RegisterSubcommand(wmCmd, cli.SubcommandConfig{
 		Name:  "list",
 		Short: "List watermarks",
 	})
+	listCmd.Args = cobra.NoArgs
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.ListWatermarks(context.Background(), 0)
@@ -649,6 +653,7 @@ func registerWatermarks(root *cobra.Command) {
 		Name:  "create",
 		Short: "Create a watermark",
 	})
+	createCmd.Args = cobra.NoArgs
 	var wmName, wmFile string
 	var wmSpace, wmPosition, wmOpacity, wmSize int
 	createCmd.Flags().StringVar(&wmName, "name", "", "watermark name (required)")
@@ -672,11 +677,8 @@ func registerWatermarks(root *cobra.Command) {
 		Name:  "delete",
 		Short: "Delete a watermark by ID",
 	})
+	deleteCmd.Args = cobra.ExactArgs(1)
 	deleteCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy watermarks delete <id>")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -690,6 +692,7 @@ func registerWatermarks(root *cobra.Command) {
 		Name:  "update",
 		Short: "Update a watermark by ID",
 	})
+	wmUpdateCmd.Args = cobra.ExactArgs(1)
 	var wmUpdName, wmUpdFile string
 	var wmUpdSpace, wmUpdPosition, wmUpdOpacity, wmUpdSize int
 	wmUpdateCmd.Flags().StringVar(&wmUpdName, "name", "", "watermark name")
@@ -699,10 +702,6 @@ func registerWatermarks(root *cobra.Command) {
 	wmUpdateCmd.Flags().IntVar(&wmUpdOpacity, "opacity", 0, "opacity (0-100)")
 	wmUpdateCmd.Flags().IntVar(&wmUpdSize, "size", 0, "size")
 	wmUpdateCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy watermarks update <id> [--name=...] [--file=...] ...")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -721,12 +720,15 @@ func registerProxies(root *cobra.Command) {
 		Name:  "proxies",
 		Short: "Manage proxy servers (undocumented endpoints)",
 	})
+	proxyCmd.Args = cobra.NoArgs
+	proxyCmd.RunE = groupHelpRun
 
 	// proxies list
 	listCmd := cli.RegisterSubcommand(proxyCmd, cli.SubcommandConfig{
 		Name:  "list",
 		Short: "List proxies",
 	})
+	listCmd.Args = cobra.NoArgs
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.ListProxies(context.Background())
@@ -739,6 +741,7 @@ func registerProxies(root *cobra.Command) {
 		Name:  "create",
 		Short: "Create a proxy",
 	})
+	createCmd.Args = cobra.NoArgs
 	var pName, pIP, pPort, pLogin, pPassword string
 	createCmd.Flags().StringVar(&pName, "name", "", "proxy name")
 	createCmd.Flags().StringVar(&pIP, "ip", "", "IP address (required)")
@@ -761,11 +764,8 @@ func registerProxies(root *cobra.Command) {
 		Name:  "delete",
 		Short: "Delete a proxy by ID",
 	})
+	deleteCmd.Args = cobra.ExactArgs(1)
 	deleteCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy proxies delete <id>")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -779,6 +779,7 @@ func registerProxies(root *cobra.Command) {
 		Name:  "update",
 		Short: "Update a proxy by ID",
 	})
+	proxyUpdateCmd.Args = cobra.ExactArgs(1)
 	var pUpdName, pUpdIP, pUpdPort, pUpdLogin, pUpdPassword string
 	proxyUpdateCmd.Flags().StringVar(&pUpdName, "name", "", "proxy name")
 	proxyUpdateCmd.Flags().StringVar(&pUpdIP, "ip", "", "IP address")
@@ -786,10 +787,6 @@ func registerProxies(root *cobra.Command) {
 	proxyUpdateCmd.Flags().StringVar(&pUpdLogin, "login", "", "login")
 	proxyUpdateCmd.Flags().StringVar(&pUpdPassword, "password", "", "password")
 	proxyUpdateCmd.Run = func(_ *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: hooppy proxies update <id> [--name=...] [--ip=...] ...")
-			os.Exit(1)
-		}
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		c := mustClient()
@@ -808,6 +805,7 @@ func registerNotifications(root *cobra.Command) {
 		Name:  "notifications",
 		Short: "List publication status notifications (undocumented endpoint)",
 	})
+	cmd.Args = cobra.NoArgs
 	cmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.ListNotifications(context.Background(), 0)
@@ -823,6 +821,7 @@ func registerMCPConfig(root *cobra.Command) {
 		Name:  "mcp-config",
 		Short: "Print the claude mcp add command for hooppy-mcp",
 	})
+	cmd.Args = cobra.NoArgs
 	cmd.Run = func(_ *cobra.Command, _ []string) {
 		fmt.Println("# Add the Hooppy MCP server to Claude Code:")
 		fmt.Println("claude mcp add hooppy --transport stdio -- hooppy-mcp")
@@ -837,12 +836,15 @@ func registerSearch(root *cobra.Command) {
 		Name:  "search",
 		Short: "Search and scrape posts from external social media pages",
 	})
+	searchCmd.Args = cobra.NoArgs
+	searchCmd.RunE = groupHelpRun
 
 	// search sources
 	sourcesCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
 		Name:  "sources",
 		Short: "List configured source resources (external pages to scrape from)",
 	})
+	sourcesCmd.Args = cobra.NoArgs
 	sourcesCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.ListSourceResources(context.Background())
@@ -855,6 +857,7 @@ func registerSearch(root *cobra.Command) {
 		Name:  "posts",
 		Short: "List scraped posts from external pages",
 	})
+	postsCmd.Args = cobra.NoArgs
 	var sText, sDateFrom, sDateTo, sSortBy, sSortDir, sContentTypes, sContentTypesExclude string
 	var sSourceType, sSourceID, sSourceResourceID, sOwnerID, sPage, sMinLikes, sMinViews, sMinComments, sMinReposts, sPhotosAmount, sVideoDuration int
 	var sMinInvolvement float64
@@ -909,6 +912,7 @@ func registerSearch(root *cobra.Command) {
 		Name:  "status",
 		Short: "Show parsing status (in-progress or not)",
 	})
+	statusCmd.Args = cobra.NoArgs
 	statusCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		resp, err := c.GetParsingForm(context.Background())
@@ -921,6 +925,7 @@ func registerSearch(root *cobra.Command) {
 		Name:  "parse",
 		Short: "Start scraping posts from an external source resource",
 	})
+	parseCmd.Args = cobra.NoArgs
 	var pSourceType, pSearchType, pSourceID, pSourceResourceID, pAccountID, pDateFrom, pDateTo int
 	parseCmd.Flags().IntVar(&pSourceType, "source-type", 1, "source type: 1=social, 2=RSS")
 	parseCmd.Flags().IntVar(&pSearchType, "search-type", 1, "search method: 1=pages, 2=hashtag")
@@ -953,6 +958,7 @@ func registerSearch(root *cobra.Command) {
 		Name:  "stop",
 		Short: "Stop any in-progress scraping job",
 	})
+	stopCmd.Args = cobra.NoArgs
 	stopCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		err := c.StopParsing(context.Background())
@@ -965,6 +971,7 @@ func registerSearch(root *cobra.Command) {
 		Name:  "copy",
 		Short: "Copy a scraped post to your own pages (auto-fills text + photos from the scraped post)",
 	})
+	copyCmd.Args = cobra.NoArgs
 	var copyPostID int
 	var copyPages string
 	var copyWhenType, copyHowType int
@@ -997,6 +1004,7 @@ func registerSearch(root *cobra.Command) {
 		Name:  "rewrite",
 		Short: "Rewrite a scraped post with custom text and publish to your pages",
 	})
+	rewriteCmd.Args = cobra.NoArgs
 	var rwPostID int
 	var rwPostIDs string
 	var rwText, rwPages, rwSchedules string
@@ -1091,6 +1099,7 @@ func registerSearch(root *cobra.Command) {
 		Name:  "import",
 		Short: "Copy a scraped post with full text + photos/videos via PUT /posts/import (server downloads photos async)",
 	})
+	importCmd.Args = cobra.NoArgs
 	var impPostID int
 	var impPostIDs string
 	var impSchedules string
@@ -1345,6 +1354,7 @@ func registerDoctor(root *cobra.Command) {
 		Name:  "doctor",
 		Short: "Diagnose broken connections from the notification log (read-only)",
 	})
+	cmd.Args = cobra.NoArgs
 	var sinceDays int
 	var exitCode bool
 	cmd.Flags().IntVar(&sinceDays, "since", 7, "only report errors whose operation_date falls within the last N days. 0 = no window (all dated rows included); negative values are rejected. Unparseable-date rows are reported REGARDLESS of --since (they cannot be dated, so the window check does not apply). NOTE: the window is computed in the HOST's local timezone (time.Now), but the vendor renders operation_date in the ACCOUNT's timezone (a user setting on hooppy.ru, not exposed by the API). If the two differ, the window boundary can be off by the offset between them — a row the account considers inside the window may be excluded, or vice versa, by up to that offset.")
