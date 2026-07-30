@@ -1355,8 +1355,11 @@ type BatchMovePostsResult struct {
 
 // ScheduleDay is one day's cell in the calendar returned by
 // GET /posts/schedules/{id}/posts. The day's dd.mm.yyyy date is the MAP KEY;
-// DayName and DayDate are the server's display strings for that same date
-// ("Пт", "1 Января") and carry no information the key does not already hold.
+// DayName and DayDate are the server's DISPLAY strings for that same date,
+// measured live 2026-07-30 as "Пт" and "1 Января" on a ru account.
+//
+// Do not derive them from the key: they are localised by the server, and only
+// the ru rendering has been observed. Read them, do not reconstruct them.
 //
 // Measured live 2026-07-30: the day value is an OBJECT, not a bare post array.
 // It was first declared as []Post, which made every decode of this endpoint
