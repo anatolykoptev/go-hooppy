@@ -1347,6 +1347,16 @@ func buildImportPayload(postID int, postIDs string, whenType, howType int, sched
 	if whenType == 3 && len(schedIDs) == 0 {
 		return hooppy.CopySearchPostPayload{}, errors.New("--schedules is required for --when-type 3 (by schedule) — a schedule-driven import targeted at no schedule publishes to nothing")
 	}
+	// The same guard copy and rewrite carry (issue #111), and import needs it
+	// more than they do: they assign SchedulesIDs inside a `switch whenType`,
+	// so a non-3 when-type silently drops the flag. Import assigns it in the
+	// payload literal below with no switch, so the schedules would reach the
+	// wire while publication_when_type says publish-now — the server receives
+	// a payload naming two contradictory intents and picks one. Refuse before
+	// the request rather than let it publish under a meaning nobody chose.
+	if len(schedIDs) > 0 && whenType != 3 {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("--schedules is only meaningful with --when-type 3 (by schedule); with --when-type %d the schedules are sent alongside a publish-now/at-time intent and the server resolves the contradiction on its own (issue #111) — pass --when-type 3 to queue by schedule, or drop --schedules to publish as --when-type %d intends", whenType, whenType)
+	}
 	idList, err := parseIntListErr(postIDs)
 	if err != nil {
 		return hooppy.CopySearchPostPayload{}, err

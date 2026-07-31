@@ -194,3 +194,70 @@ func TestRunCopySearchPost_SchedulesQueued_OK(t *testing.T) {
 		t.Errorf("schedules_ids on the PUT wire = %v, want [10 11] — the schedules must be sent when when-type is 3", putBody["schedules_ids"])
 	}
 }
+
+// F6 — `search import --schedules 10,11` with when-type 1 fails before issuing
+// any request. import completed the guard set: copy and rewrite refuse the
+// combination, import accepted it (PR #138 review, F1).
+//
+// import is a worse case than its two siblings, not an equal one. copy and
+// rewrite set SchedulesIDs inside a `switch whenType` so a non-3 when-type
+// merely drops the flag; buildImportPayload set it in the payload literal with
+// no switch at all, so the schedules reached the wire while when_type said
+// publish-now — the server was handed a payload naming both intents.
+//
+// RED-on-revert: remove the schedules-dropped guard from buildImportPayload
+// and the builder returns err == nil → runImport proceeds to the client →
+// reqCount becomes non-zero → this assertion fails.
+func TestRunImport_SchedulesDropped_NoRequest_F6(t *testing.T) {
+	var reqCount atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCount.Add(1)
+		w.Write([]byte(`{"id":5001}`))
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	code := runImport(context.Background(), newStubClient(t, srv), &out, &errOut,
+		importArgs{postID: 1001, whenType: 1, howType: 1, schedules: "10,11"})
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 — schedules with when-type 1 must be refused before any request (issue #111)", code)
+	}
+	if got := reqCount.Load(); got != 0 {
+		t.Fatalf("reqCount = %d, want 0 — the guard must fail BEFORE any request reaches the server; a request means the post was published with a different meaning than the caller asked (issue #111). stderr: %s", got, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "when-type 3") {
+		t.Errorf("stderr should name the schedules/when-type-3 cause, got:\n%s", errOut.String())
+	}
+}
+
+// TestRunImport_SchedulesQueued_OK is the pair to F6: with when-type 3 the
+// schedules ARE sent and the request reaches the server. Without this, F6 is
+// satisfied by a guard that refuses every schedule.
+func TestRunImport_SchedulesQueued_OK(t *testing.T) {
+	var putBody map[string]interface{}
+	var sawPut atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && r.URL.Path == "/posts/import" {
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &putBody)
+			sawPut.Store(true)
+		}
+		w.Write([]byte(`{"id":5001}`))
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	code := runImport(context.Background(), newStubClient(t, srv), &out, &errOut,
+		importArgs{postIDs: "3001,3002", whenType: 3, howType: 2, schedules: "10,11"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 — schedules with when-type 3 should queue and succeed:\nstderr: %s", code, errOut.String())
+	}
+	if !sawPut.Load() {
+		t.Fatalf("no PUT /posts/import reached the server — the request must be issued when schedules pair with when-type 3")
+	}
+	sched, _ := putBody["schedules_ids"].([]interface{})
+	if len(sched) != 2 {
+		t.Errorf("schedules_ids on the PUT wire = %v, want [10 11] — the schedules must be sent when when-type is 3", putBody["schedules_ids"])
+	}
+}
