@@ -188,6 +188,13 @@ func (c *Client) CreatePost(ctx context.Context, payload interface{}) (*CreatePo
 	if err := c.doPOST(ctx, pathPosts, payload, &resp); err != nil {
 		return nil, err
 	}
+	// A 2xx with no id (id:0 / absent) is a create that produced no handle —
+	// the server accepted the request but returned nothing the caller can
+	// move/update/delete. Surface it instead of returning a zero that flows
+	// into posts move/update/delete as a real-looking handle (issue #131).
+	if err := checkCreateID("POST "+pathPosts, resp.ID, nil, ""); err != nil {
+		return nil, err
+	}
 	return &resp, nil
 }
 

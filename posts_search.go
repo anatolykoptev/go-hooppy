@@ -566,6 +566,15 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 	// SlotLookupError, not an error return — the post exists. CopySearchPost
 	// is always single, so idsSentCount=1.
 	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs, beforeSnapshot, beforeErr, 1)
+	// A 2xx with no id (id:0 / absent) is a create that produced no handle.
+	// CopySearchPost is always single, so IDs is never populated — the wire
+	// id is the handle. Surface a missing id instead of returning a zero that
+	// flows into posts move/update/delete as a real-looking handle (issue
+	// #131). Runs AFTER fillScheduleSlots so a batch-recovered id (none here,
+	// but kept uniform with Rewrite/Import) would satisfy the guard.
+	if err := checkCreateID("PUT "+pathPostsCopy, resp.ID, resp.IDs, resp.SlotLookupError); err != nil {
+		return nil, err
+	}
 	return &resp, nil
 }
 
@@ -823,6 +832,16 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	// (when_type=3). Best-effort: a lookup failure populates
 	// SlotLookupError, not an error return — the post exists.
 	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs, beforeSnapshot, beforeErr, idsSentCount)
+	// A 2xx with no id (id:0 / absent) is a create that produced no handle.
+	// For a batch the client recovers ids via fillScheduleSlots (sets ID to
+	// the first recovered id, populates IDs); when BOTH are empty the create
+	// produced nothing the caller can act on. Surface it instead of returning
+	// a zero that flows into posts move/update/delete as a real-looking handle
+	// (issue #131). Runs AFTER fillScheduleSlots so a recovered id satisfies
+	// the guard.
+	if err := checkCreateID("POST "+pathPosts, resp.ID, resp.IDs, resp.SlotLookupError); err != nil {
+		return nil, err
+	}
 	return &resp, nil
 }
 
@@ -999,5 +1018,15 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 	// (when_type=3). Best-effort: a lookup failure populates
 	// SlotLookupError, not an error return — the post exists.
 	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs, beforeSnapshot, beforeErr, idsSentCount)
+	// A 2xx with no id (id:0 / absent) is a create that produced no handle.
+	// For a batch the client recovers ids via fillScheduleSlots (sets ID to
+	// the first recovered id, populates IDs); when BOTH are empty the create
+	// produced nothing the caller can act on. Surface it instead of returning
+	// a zero that flows into posts move/update/delete as a real-looking handle
+	// (issue #131). Runs AFTER fillScheduleSlots so a recovered id satisfies
+	// the guard.
+	if err := checkCreateID("PUT "+pathPostsImport, resp.ID, resp.IDs, resp.SlotLookupError); err != nil {
+		return nil, err
+	}
 	return &resp, nil
 }
