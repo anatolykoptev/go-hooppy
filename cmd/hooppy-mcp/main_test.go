@@ -154,8 +154,8 @@ func TestBuildRewriteSearchPostPayload_StrictParse(t *testing.T) {
 
 // TestBuildRewriteSearchPostPayload_BatchTextRefusal verifies finding 4 at
 // the MCP surface: batch rewrite cannot express per-post text, so text with
-// search_post_ids errors; batch alone sends an empty Texts slice (the server
-// keeps each post's original text, like import); single-post requires text.
+// search_post_ids errors; batch alone sends no Texts (each post's text comes
+// from the resolve step); single-post requires text.
 func TestBuildRewriteSearchPostPayload_BatchTextRefusal(t *testing.T) {
 	t.Run("batch + text → error", func(t *testing.T) {
 		_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{
@@ -169,7 +169,7 @@ func TestBuildRewriteSearchPostPayload_BatchTextRefusal(t *testing.T) {
 		}
 	})
 
-	t.Run("batch alone → empty Texts slice (no override)", func(t *testing.T) {
+	t.Run("batch alone → no text override (resolve fills per post)", func(t *testing.T) {
 		p, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{
 			SearchPostIDs: "2003,2001,2002", PublicationWhenType: 1,
 		})
@@ -179,12 +179,8 @@ func TestBuildRewriteSearchPostPayload_BatchTextRefusal(t *testing.T) {
 		if got, want := p.SearchPostIDs, []int{2003, 2001, 2002}; !sliceEq(got, want) {
 			t.Errorf("SearchPostIDs = %v, want %v (caller order)", got, want)
 		}
-		if p.Texts == nil {
-			t.Fatal("Texts = nil, want []PostText{} (empty non-nil) — server keeps original text")
-		}
-		if len(p.Texts) != 0 {
-			t.Errorf("Texts = %v, want [] (no text override for batch)", p.Texts)
-		}
+		// Texts is nil for batch — RewriteSearchPost ignores it and resolves
+		// each post's text independently via the resolve step.
 	})
 
 	t.Run("single + no text → error", func(t *testing.T) {

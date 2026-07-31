@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // SuccessFalseError is the typed error returned when the API answers a 2xx
@@ -132,6 +134,53 @@ type CreateNoIDError struct {
 
 func (e *CreateNoIDError) Error() string {
 	return fmt.Sprintf("hooppy: %s: server returned 2xx with no post id (id is 0 or absent) — the create did not return a usable handle; the returned id must not be treated as real (a zero flows into posts move/update/delete as a real-looking handle)", e.Endpoint)
+}
+
+// PartialPostError is the typed error returned by RewriteSearchPost and
+// ImportSearchPost when a batch (SearchPostIDs with >1 element) completes
+// some posts but fails on others. It carries the populated *PostIDResponse
+// (with every id that DID land) alongside the per-post failures, so a caller
+// never loses already-published posts from the return value — the defect this
+// closes is a batch partial failure discarding every post already created
+// (a caller's only recourse was a re-run, which duplicates them).
+//
+// A caller distinguishes the three batch outcomes by type-asserting the error:
+//   - err == nil                       → every post succeeded
+//   - err is *PartialPostError          → some succeeded, some failed
+//     (resp is NON-nil and populated with the successful ids)
+//   - err is non-nil, not *PartialPostError → every post failed (resp is nil)
+//
+// The single-post path (SearchPostIDs empty, SearchPostID set) does NOT use
+// this type — a single-post failure returns a plain wrapped error with a nil
+// result, matching the pre-batch contract. PartialPostError is batch-only.
+//
+// Result is the accumulated PostIDResponse: IDs/Slots hold every successfully
+// published post, ID is the first successful id, SlotLookupError aggregates
+// per-post slot lookup failures. Failed holds the per-post errors in
+// caller-order, each carrying the scraped-post id that failed and the wrapped
+// error. A caller re-running after a partial failure reads Result.IDs to skip
+// what already landed — the same dedup-via-stdout design runImport uses.
+type PartialPostError struct {
+	Result *PostIDResponse
+	Failed []PostFailure
+}
+
+// PostFailure is one failed post in a PartialPostError.Failed slice.
+type PostFailure struct {
+	SearchPostID int
+	Err          error
+}
+
+func (e *PartialPostError) Error() string {
+	ids := make([]string, 0, len(e.Result.IDs))
+	for _, id := range e.Result.IDs {
+		ids = append(ids, strconv.Itoa(id))
+	}
+	failed := make([]string, 0, len(e.Failed))
+	for _, f := range e.Failed {
+		failed = append(failed, fmt.Sprintf("%d: %v", f.SearchPostID, f.Err))
+	}
+	return fmt.Sprintf("hooppy: partial batch: %d succeeded (ids: [%s]), %d failed ([%s])", len(e.Result.IDs), strings.Join(ids, ", "), len(e.Failed), strings.Join(failed, ", "))
 }
 
 // checkCreateID errors when a create-shaped response carries no usable id AND

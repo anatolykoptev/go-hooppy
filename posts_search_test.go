@@ -3,11 +3,11 @@ package hooppy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -829,118 +829,29 @@ func TestStopParsing_RetriedToTheSamePath(t *testing.T) {
 	}
 }
 
-func TestCopySearchPost(t *testing.T) {
-	var capturedBody map[string]interface{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut || r.URL.Path != "/posts/copy" {
-			t.Errorf("PUT /posts/copy, got %s %s", r.Method, r.URL.Path)
-		}
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
-		w.Write([]byte(`{"id":5001}`))
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	resp, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        1001,
-		PublicationWhenType: 1,
-		PublicationHowType:  1,
-		SelectedPagesIDs:    []int{123456},
-	})
-	if err != nil {
-		t.Fatalf("CopySearchPost: %v", err)
-	}
-	if resp.ID != 5001 {
-		t.Errorf("ID = %d, want 5001", resp.ID)
-	}
-	if capturedBody["search_post_id"].(float64) != 1001 {
-		t.Errorf("search_post_id = %v, want 1001", capturedBody["search_post_id"])
-	}
-	if capturedBody["publication_when_type"].(float64) != 1 {
-		t.Errorf("publication_when_type = %v, want 1", capturedBody["publication_when_type"])
-	}
-}
-
-func TestCopySearchPost_NilSlicesInitialized(t *testing.T) {
-	var capturedBody map[string]interface{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
-		w.Write([]byte(`{"id":5002}`))
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	// Pass no slices at all — verify they're initialized to [] not null
-	_, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        1002,
-		PublicationWhenType: 1,
-		PublicationHowType:  1,
-	})
-	if err != nil {
-		t.Fatalf("CopySearchPost: %v", err)
-	}
-	// Server expects arrays, not null
-	if capturedBody["texts"] == nil {
-		t.Errorf("texts = null, want []")
-	}
-	if capturedBody["attachments"] == nil {
-		t.Errorf("attachments = null, want []")
-	}
-	if capturedBody["selected_pages_ids"] == nil {
-		t.Errorf("selected_pages_ids = null, want []")
-	}
-}
-
-func TestCopySearchPost_Scheduled(t *testing.T) {
-	var capturedBody map[string]interface{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
-		w.Write([]byte(`{"id":5003}`))
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	resp, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        1003,
-		PublicationWhenType: 2,
-		PublicationHowType:  1,
-		SelectedPagesIDs:    []int{123456},
-		PublicationDate: &PublicationDate{
-			Date:    "01.02.2026",
-			Hours:   "14",
-			Minutes: "30",
-		},
-	})
-	if err != nil {
-		t.Fatalf("CopySearchPost: %v", err)
-	}
-	if resp.ID != 5003 {
-		t.Errorf("ID = %d, want 5003", resp.ID)
-	}
-	if capturedBody["publication_when_type"].(float64) != 2 {
-		t.Errorf("publication_when_type = %v, want 2", capturedBody["publication_when_type"])
-	}
-	pubDate, ok := capturedBody["publication_date"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("publication_date not a map: %T", capturedBody["publication_date"])
-	}
-	if pubDate["date"] != "01.02.2026" || pubDate["hours"] != "14" || pubDate["minutes"] != "30" {
-		t.Errorf("publication_date = %+v", pubDate)
-	}
-}
-
 func TestRewriteSearchPost(t *testing.T) {
 	var capturedBody map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/posts" {
-			t.Errorf("POST /posts, got %s %s", r.Method, r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "2001",
+				"publication_when_type": 1,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "original", "source_id": 0}],
+				"attachments": []
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &capturedBody)
+			w.Write([]byte(`{"id":6001}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
 		}
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
-		w.Write([]byte(`{"id":6001}`))
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -970,16 +881,30 @@ func TestRewriteSearchPost(t *testing.T) {
 	}
 	textMap := texts[0].(map[string]interface{})
 	if textMap["text"] != "Rewritten text" {
-		t.Errorf("texts[0].text = %v, want 'Rewritten text'", textMap["text"])
+		t.Errorf("texts[0].text = %v, want 'Rewritten text' (payload.Texts overrides resolved text)", textMap["text"])
 	}
 }
 
 func TestRewriteSearchPost_Scheduled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/posts" {
-			t.Errorf("POST /posts, got %s %s", r.Method, r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "2002",
+				"publication_when_type": 2,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "original", "source_id": 0}],
+				"attachments": []
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			w.Write([]byte(`{"id":6002}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
 		}
-		w.Write([]byte(`{"id":6002}`))
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -1039,51 +964,6 @@ func TestGetSearchPostEdit(t *testing.T) {
 	}
 	if edit.Attachments[0].Type != "photo" {
 		t.Errorf("Attachments[0].Type = %q, want 'photo'", edit.Attachments[0].Type)
-	}
-}
-
-func TestSearchPostPhotos(t *testing.T) {
-	edit := &SearchPostEditResponse{
-		Attachments: []Attachment{
-			{Type: "photo", Data: map[string]interface{}{"id": "photo1", "url": "https://example.com/1.jpg"}},
-			{Type: "video", Data: map[string]interface{}{"id": "video1", "url": "https://example.com/1.mp4"}},
-			{Type: "link", Data: "https://example.com"},
-		},
-	}
-	att := SearchPostPhotos(edit)
-	if att == nil {
-		t.Fatal("SearchPostPhotos returned nil")
-	}
-	if att.Type != "photos" {
-		t.Errorf("Type = %q, want 'photos'", att.Type)
-	}
-	photos, ok := att.Data.([]interface{})
-	if !ok {
-		t.Fatalf("Data = %T, want []interface{}", att.Data)
-	}
-	if len(photos) != 2 {
-		t.Errorf("len(photos) = %d, want 2 (photo + video, not link)", len(photos))
-	}
-}
-
-func TestSearchPostNonPhotoAttachments(t *testing.T) {
-	edit := &SearchPostEditResponse{
-		Attachments: []Attachment{
-			{Type: "photo", Data: map[string]interface{}{"id": "photo1"}},
-			{Type: "copyright", Data: "https://vk.com/wall-123_456"},
-			{Type: "link", Data: "https://example.com"},
-			{Type: "video", Data: map[string]interface{}{"id": "video1"}},
-		},
-	}
-	result := SearchPostNonPhotoAttachments(edit)
-	if len(result) != 2 {
-		t.Fatalf("len = %d, want 2 (copyright + link, not photo/video)", len(result))
-	}
-	if result[0].Type != "copyright" {
-		t.Errorf("result[0].Type = %q, want 'copyright'", result[0].Type)
-	}
-	if result[1].Type != "link" {
-		t.Errorf("result[1].Type = %q, want 'link'", result[1].Type)
 	}
 }
 
@@ -1165,53 +1045,35 @@ func TestTelegramButtonsAttachment(t *testing.T) {
 	}
 }
 
-func TestScrapedPhotoAttachment(t *testing.T) {
-	// ScrapedPhotoAttachment is deprecated — scraped VK photo IDs can't be
-	// attached to your own post (VK doesn't allow cross-group references).
-	// The helper is kept for reference; tests verify it still builds the
-	// correct structure in case it's useful for non-VK sources in the future.
-	photos := []SearchPostPhoto{
-		{ID: 111, OwnerID: -222, URL: "https://example.com/1.jpg"},
-		{ID: 333, OwnerID: -222, URL: "https://example.com/2.jpg"},
-	}
-	att := ScrapedPhotoAttachment(photos)
-	if att.Type != "photos" {
-		t.Errorf("Type = %q, want 'photos'", att.Type)
-	}
-	items, ok := att.Data.([]map[string]interface{})
-	if !ok {
-		t.Fatalf("Data = %T, want []map[string]interface{}", att.Data)
-	}
-	if len(items) != 2 {
-		t.Fatalf("len(items) = %d, want 2", len(items))
-	}
-	if items[0]["id"] != "111" {
-		t.Errorf("items[0].id = %v, want '111'", items[0]["id"])
-	}
-	if items[0]["owner_id"] != -222 {
-		t.Errorf("items[0].owner_id = %v, want -222", items[0]["owner_id"])
-	}
-	if items[0]["type"] != "photo" {
-		t.Errorf("items[0].type = %v, want 'photo'", items[0]["type"])
-	}
-}
-
 // TestImportSearchPost asserts the wire shape of a successful ImportSearchPost
-// request: PUT /posts/import with as_copy=1, the hardcoded
+// request: POST /posts with as_copy=1, the hardcoded
 // publication_where_type=1, ids as the string form of the single search-post
-// id, and the attachments passed through as one {type: "photos"} entry.
-// Mirrors TestCopySearchPost (the nearer sibling) but decodes the body rather
-// than substring-matching, and covers the import-specific fields (as_copy,
-// publication_where_type, ids) that CopySearchPost does not send.
+// id. ImportSearchPost now resolves via GET /posts-search/{id}/edit first,
+// then publishes via POST /posts. The resolved text from GET /edit is kept
+// (import = keep original); payload.Attachments is ignored.
 func TestImportSearchPost(t *testing.T) {
 	var capturedBody map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut || r.URL.Path != "/posts/import" {
-			t.Errorf("PUT /posts/import, got %s %s", r.Method, r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "2003",
+				"publication_when_type": 1,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "original", "source_id": 0}],
+				"attachments": []
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &capturedBody)
+			w.Write([]byte(`{"id":7001}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
 		}
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
-		w.Write([]byte(`{"id":7001}`))
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -1238,35 +1100,47 @@ func TestImportSearchPost(t *testing.T) {
 		t.Errorf("as_copy = %v, want 1", capturedBody["as_copy"])
 	}
 	if capturedBody["publication_where_type"].(float64) != 1 {
-		t.Errorf("publication_where_type = %v, want 1 (hardcoded by ImportSearchPost)", capturedBody["publication_where_type"])
+		t.Errorf("publication_where_type = %v, want 1 (hardcoded by PublishPost)", capturedBody["publication_where_type"])
 	}
 	if capturedBody["ids"] != "2003" {
 		t.Errorf("ids = %v, want '2003' (string form of SearchPostID)", capturedBody["ids"])
 	}
+	// ImportSearchPost ignores payload.Attachments — attachments come from
+	// the resolve step. The GET /edit response has empty attachments, so the
+	// POST body has attachments: [].
 	attachments, ok := capturedBody["attachments"].([]interface{})
-	if !ok || len(attachments) != 1 {
-		t.Fatalf("attachments = %v, want array of 1 {type: \"photos\"} entry", capturedBody["attachments"])
-	}
-	attMap := attachments[0].(map[string]interface{})
-	if attMap["type"] != "photos" {
-		t.Errorf("attachments[0].type = %v, want 'photos'", attMap["type"])
+	if !ok || len(attachments) != 0 {
+		t.Fatalf("attachments = %v, want empty array (resolve step provides attachments; payload.Attachments is ignored)", capturedBody["attachments"])
 	}
 }
 
 // TestImportSearchPost_ScheduleDrivenNoSchedules verifies the fail-closed
 // guard: a schedule-driven import (publication_when_type=3) targeted at an
-// EMPTY schedules list issues NO request and returns an error, rather than
-// sending a PUT with schedules_ids=[] — a schedule-driven import targeted at
-// nothing.
-//
-// Without the guard: ImportSearchPost normalises nil schedules to []int{}
-// and issues the PUT, which the server may accept and silently publish to
-// nothing.
+// EMPTY schedules list issues NO POST /posts and returns an error, rather than
+// sending a POST with schedules_ids=[] — a schedule-driven import targeted at
+// nothing. The resolve GET /edit happens first (before the guard in
+// PublishPost), so the stub handles it; the guard prevents the POST.
 func TestImportSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
-	requestMade := false
+	var postRequestMade bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestMade = true
-		w.Write([]byte(`{"id":7001}`))
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "2003",
+				"publication_when_type": 3,
+				"publication_how_type": 2,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "x", "source_id": 0}],
+				"attachments": []
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			postRequestMade = true
+			w.Write([]byte(`{"id":7001}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -1281,109 +1155,38 @@ func TestImportSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected fail-closed error for when_type=3 with empty schedules, got nil")
 	}
-	if requestMade {
-		t.Fatal("ImportSearchPost issued a request despite when_type=3 + empty schedules — must fail before any request")
+	if postRequestMade {
+		t.Fatal("ImportSearchPost issued a POST /posts despite when_type=3 + empty schedules — the guard must fail before the publish")
 	}
 	if !strings.Contains(err.Error(), "schedule") {
 		t.Errorf("error must explain the schedule requirement, got: %v", err)
 	}
 }
 
-// TestCopySearchPost_ScheduleDrivenNoSchedules mirrors the import guard for
-// the copy endpoint: when_type=3 + empty schedules must fail closed.
-func TestCopySearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
-	requestMade := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestMade = true
-		w.Write([]byte(`{"id":7002}`))
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	_, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        2004,
-		PublicationWhenType: 3,
-		PublicationHowType:  1,
-		SchedulesIDs:        []int{}, // explicit empty
-	})
-	if err == nil {
-		t.Fatal("expected fail-closed error for when_type=3 with empty schedules, got nil")
-	}
-	if requestMade {
-		t.Fatal("CopySearchPost issued a request despite when_type=3 + empty schedules")
-	}
-}
-
-// TestCopySearchPost_RejectsBatchSlice verifies the BLOCKER fix at the library
-// surface: CopySearchPost REFUSES a non-empty SearchPostIDs before any request.
-// PUT /posts/copy takes a singular search_post_id int and silently ignores
-// search_post_ids; this method marshals the payload wholesale, so without the
-// guard a library consumer that sets SearchPostIDs gets the slice on the wire
-// (json:"search_post_ids,omitempty") with err == nil — a phantom batch. The
-// CLI --post-ids removal closed one caller; this closes the published module
-// surface (the CLI is one of several). The error must name the batch-capable
-// endpoints (RewriteSearchPost/ImportSearchPost) so the consumer reaches them.
-//
-// RED-on-revert: drop the `len(payload.SearchPostIDs) > 0` guard from
-// CopySearchPost and the stub is reached (requestMade=true) with err == nil →
-// both assertions fail.
-func TestCopySearchPost_RejectsBatchSlice(t *testing.T) {
-	requestMade := false
-	var capturedBody map[string]interface{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestMade = true
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
-		w.Write([]byte(`{"id":7006}`))
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	_, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        1001,
-		SearchPostIDs:       []int{2001, 2002, 2003},
-		PublicationWhenType: 1,
-		PublicationHowType:  1,
-		SelectedPagesIDs:    []int{123456},
-	})
-	if err == nil {
-		t.Fatal("CopySearchPost with SearchPostIDs: expected an error refusing the batch slice, got nil — PUT /posts/copy takes a singular search_post_id and silently ignores search_post_ids (phantom batch)")
-	}
-	if requestMade {
-		t.Fatal("CopySearchPost issued a request despite a non-empty SearchPostIDs — must fail before any request (the slice would otherwise marshal onto the wire with err == nil)")
-	}
-	if !strings.Contains(err.Error(), "RewriteSearchPost") || !strings.Contains(err.Error(), "ImportSearchPost") {
-		t.Errorf("error must name the batch-capable endpoints RewriteSearchPost/ImportSearchPost, got: %v", err)
-	}
-	// The scalar must stay valid on its own (no batch slice) — sanity-check
-	// the guard does not over-fire on the legacy single-post path.
-	requestMade = false
-	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestMade = true
-		w.Write([]byte(`{"id":7007}`))
-	}))
-	defer srv2.Close()
-	c2 := newTestClient(t, srv2)
-	if _, err := c2.CopySearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        1001,
-		PublicationWhenType: 1,
-		PublicationHowType:  1,
-		SelectedPagesIDs:    []int{123456},
-	}); err != nil {
-		t.Fatalf("CopySearchPost scalar path broke: %v", err)
-	}
-	if !requestMade {
-		t.Fatal("CopySearchPost scalar path did not issue a request — the batch guard must not over-fire when SearchPostIDs is empty")
-	}
-}
-
 // TestRewriteSearchPost_ScheduleDrivenNoSchedules mirrors the guard for the
-// rewrite endpoint: when_type=3 + empty schedules must fail closed.
+// rewrite endpoint: when_type=3 + empty schedules must fail closed. The
+// resolve GET /edit happens first; the guard in PublishPost prevents the POST.
 func TestRewriteSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
-	requestMade := false
+	var postRequestMade bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestMade = true
-		w.Write([]byte(`{"id":7003}`))
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "2005",
+				"publication_when_type": 3,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "x", "source_id": 0}],
+				"attachments": []
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			postRequestMade = true
+			w.Write([]byte(`{"id":7003}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -1398,33 +1201,46 @@ func TestRewriteSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected fail-closed error for when_type=3 with empty schedules, got nil")
 	}
-	if requestMade {
-		t.Fatal("RewriteSearchPost issued a request despite when_type=3 + empty schedules")
+	if postRequestMade {
+		t.Fatal("RewriteSearchPost issued a POST /posts despite when_type=3 + empty schedules")
 	}
 }
 
 // TestRewriteSearchPost_BatchIDsOrder verifies the batch form: a slice of
-// SearchPostIDs reaches the wire as a comma-joined ids string in the
-// CALLER's order. The server assigns schedule slots in the order it receives
-// ids, so order preservation is load-bearing. Decodes the body (does not
-// substring-match) and asserts the exact ids string.
+// SearchPostIDs results in N separate POST /posts calls, each with a single
+// id in the ids field, in the CALLER's order. The batch is now N independent
+// resolve+publish pairs (client-side), NOT one server-side batch.
 //
 // The fixture is deliberately NON-MONOTONIC with a REPEAT ({2003, 2001, 2002,
 // 2001}): an ascending-distinct fixture makes a sort and a dedupe both no-ops,
-// so the test stays green even if copySearchPostIDs silently sorts or dedupes
-// the slice — proven by mutation (injecting sort.Ints + a dedupe pass left the
-// suite green under the old {2001,2002,2003} fixture). This fixture
-// discriminates against both at once: a sort yields "2001,2001,2002,2003", a
-// dedupe yields "2003,2001,2002", and either mutation now goes RED here.
+// so the test stays green even if the loop silently skips or reorders ids.
+// This fixture discriminates: each POST must carry the exact id in caller order.
 func TestRewriteSearchPost_BatchIDsOrder(t *testing.T) {
-	var capturedBody map[string]interface{}
+	var postCount int32
+	var capturedIDs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/posts" {
-			t.Errorf("POST /posts, got %s %s", r.Method, r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "x",
+				"publication_when_type": 1,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "original", "source_id": 0}],
+				"attachments": []
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			atomic.AddInt32(&postCount, 1)
+			body, _ := io.ReadAll(r.Body)
+			var b map[string]interface{}
+			_ = json.Unmarshal(body, &b)
+			capturedIDs = append(capturedIDs, b["ids"].(string))
+			w.Write([]byte(`{"id":6003}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
-		w.Write([]byte(`{"id":6003}`))
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -1434,38 +1250,62 @@ func TestRewriteSearchPost_BatchIDsOrder(t *testing.T) {
 		PublicationWhenType: 1,
 		PublicationHowType:  1,
 		SelectedPagesIDs:    []int{123456},
-		Texts:               []PostText{{Text: "Batch rewrite", SourceID: 0}},
+		// Texts is intentionally NOT set — a batch+Texts is a broadcast guard
+		// (MAJOR 3): one text array overwrites all N posts' resolved text.
+		// Each post keeps its own resolved text (per-post, the whole point of
+		// the client-side loop).
 	})
 	if err != nil {
 		t.Fatalf("RewriteSearchPost batch: %v", err)
 	}
+	// Batch is N separate POST /posts calls, each with a single id.
+	if got := atomic.LoadInt32(&postCount); got != 4 {
+		t.Fatalf("POST /posts count = %d, want 4 (one per id in the batch)", got)
+	}
+	wantIDs := []string{"2003", "2001", "2002", "2001"}
+	if len(capturedIDs) != len(wantIDs) {
+		t.Fatalf("captured ids count = %d, want %d", len(capturedIDs), len(wantIDs))
+	}
+	for i, want := range wantIDs {
+		if capturedIDs[i] != want {
+			t.Errorf("POST %d ids = %q, want %q (caller order + duplicates preserved)", i+1, capturedIDs[i], want)
+		}
+	}
 	if resp.ID != 6003 {
-		t.Errorf("ID = %d, want 6003", resp.ID)
-	}
-	// Decoded assertion, not substring: the exact joined string in caller order.
-	// Non-monotonic + repeat: a sort or dedupe mutation changes this string.
-	if got, want := capturedBody["ids"], "2003,2001,2002,2001"; got != want {
-		t.Errorf("ids = %v, want %q (caller order + duplicates preserved)", got, want)
-	}
-	if capturedBody["as_copy"].(float64) != 1 {
-		t.Errorf("as_copy = %v, want 1", capturedBody["as_copy"])
+		t.Errorf("ID = %d, want 6003 (first created post id)", resp.ID)
 	}
 }
 
 // TestImportSearchPost_BatchIDsOrder mirrors the rewrite batch test for the
-// import endpoint: a slice of SearchPostIDs reaches PUT /posts/import as a
-// comma-joined ids string in caller order. The fixture is non-monotonic with
-// a repeat ({3003, 3001, 3002, 3001}) so a silent sort or dedupe in
-// copySearchPostIDs goes RED here (same rationale as the rewrite test).
+// import endpoint: a slice of SearchPostIDs results in N separate POST /posts
+// calls, each with a single id in caller order. The fixture is non-monotonic
+// with a repeat ({3003, 3001, 3002, 3001}).
 func TestImportSearchPost_BatchIDsOrder(t *testing.T) {
-	var capturedBody map[string]interface{}
+	var postCount int32
+	var capturedIDs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut || r.URL.Path != "/posts/import" {
-			t.Errorf("PUT /posts/import, got %s %s", r.Method, r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "x",
+				"publication_when_type": 1,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "original", "source_id": 0}],
+				"attachments": []
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			atomic.AddInt32(&postCount, 1)
+			body, _ := io.ReadAll(r.Body)
+			var b map[string]interface{}
+			_ = json.Unmarshal(body, &b)
+			capturedIDs = append(capturedIDs, b["ids"].(string))
+			w.Write([]byte(`{"id":7002}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
-		w.Write([]byte(`{"id":7002}`))
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -1480,11 +1320,20 @@ func TestImportSearchPost_BatchIDsOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportSearchPost batch: %v", err)
 	}
-	if resp.ID != 7002 {
-		t.Errorf("ID = %d, want 7002", resp.ID)
+	if got := atomic.LoadInt32(&postCount); got != 4 {
+		t.Fatalf("POST /posts count = %d, want 4 (one per id in the batch)", got)
 	}
-	if got, want := capturedBody["ids"], "3003,3001,3002,3001"; got != want {
-		t.Errorf("ids = %v, want %q (caller order + duplicates preserved)", got, want)
+	wantIDs := []string{"3003", "3001", "3002", "3001"}
+	if len(capturedIDs) != len(wantIDs) {
+		t.Fatalf("captured ids count = %d, want %d", len(capturedIDs), len(wantIDs))
+	}
+	for i, want := range wantIDs {
+		if capturedIDs[i] != want {
+			t.Errorf("POST %d ids = %q, want %q (caller order + duplicates preserved)", i+1, capturedIDs[i], want)
+		}
+	}
+	if resp.ID != 7002 {
+		t.Errorf("ID = %d, want 7002 (first created post id)", resp.ID)
 	}
 }
 
@@ -1594,13 +1443,29 @@ func TestImportSearchPost_BothSet(t *testing.T) {
 
 // TestRewriteSearchPost_BatchScheduleGuard verifies the fail-closed schedule
 // guard fires for the BATCH form too: when_type=3 + an empty schedule list
-// with a multi-id batch must error before any request. A batch of twenty
-// posts targeted at no schedule is twenty times the damage of one.
+// with a multi-id batch must error before any POST. The resolve GET /edit
+// happens first for the first id; the guard in PublishPost prevents the POST.
 func TestRewriteSearchPost_BatchScheduleGuard(t *testing.T) {
-	requestMade := false
+	var postRequestMade bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestMade = true
-		w.Write([]byte(`{"id":6006}`))
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "x",
+				"publication_when_type": 3,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "x", "source_id": 0}],
+				"attachments": []
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			postRequestMade = true
+			w.Write([]byte(`{"id":6006}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -1615,18 +1480,34 @@ func TestRewriteSearchPost_BatchScheduleGuard(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected fail-closed error for batch when_type=3 with empty schedules, got nil")
 	}
-	if requestMade {
-		t.Fatal("RewriteSearchPost issued a request despite batch when_type=3 + empty schedules — must fail before any request")
+	if postRequestMade {
+		t.Fatal("RewriteSearchPost issued a POST /posts despite batch when_type=3 + empty schedules — the guard must fail before the publish")
 	}
 }
 
 // TestImportSearchPost_BatchScheduleGuard mirrors the batch schedule guard
 // for the import endpoint.
 func TestImportSearchPost_BatchScheduleGuard(t *testing.T) {
-	requestMade := false
+	var postRequestMade bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestMade = true
-		w.Write([]byte(`{"id":7005}`))
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "x",
+				"publication_when_type": 3,
+				"publication_how_type": 2,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "x", "source_id": 0}],
+				"attachments": []
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			postRequestMade = true
+			w.Write([]byte(`{"id":7005}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -1641,161 +1522,8 @@ func TestImportSearchPost_BatchScheduleGuard(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected fail-closed error for batch when_type=3 with empty schedules, got nil")
 	}
-	if requestMade {
-		t.Fatal("ImportSearchPost issued a request despite batch when_type=3 + empty schedules — must fail before any request")
-	}
-}
-
-// TestCopySearchPostIDs_NonPositiveRejects verifies the batch validation the
-// scalar path has but the batch path lacked: a zero or negative id in
-// SearchPostIDs is rejected with the offending INDEX, before any request.
-// The scalar path rejects SearchPostID == 0 (nothing to copy); without this
-// guard the batch path joined "0,-5,2001" onto the wire with err=nil.
-//
-// RED-on-revert: drop the `id <= 0` check from copySearchPostIDs and this
-// test fails at the requestMade + err assertions.
-func TestCopySearchPostIDs_NonPositiveRejects(t *testing.T) {
-	cases := []struct {
-		name string
-		ids  []int
-		// wantIndex is the offending slice index named in the error.
-		wantIndex int
-	}{
-		{"zero at head", []int{0, 2001, 2002}, 0},
-		{"negative mid-list", []int{2001, -5, 2002}, 1},
-		{"zero tail", []int{2001, 2002, 0}, 2},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			requestMade := false
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requestMade = true
-				w.Write([]byte(`{"id":6007}`))
-			}))
-			defer srv.Close()
-			c := newTestClient(t, srv)
-
-			_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
-				SearchPostIDs:       tc.ids,
-				PublicationWhenType: 1,
-				PublicationHowType:  1,
-				SelectedPagesIDs:    []int{123456},
-				Texts:               []PostText{{Text: "x", SourceID: 0}},
-			})
-			if err == nil {
-				t.Fatal("expected error for non-positive SearchPostIDs element, got nil")
-			}
-			if requestMade {
-				t.Fatal("RewriteSearchPost issued a request despite a non-positive id — must fail before any request")
-			}
-			want := fmt.Sprintf("SearchPostIDs[%d]", tc.wantIndex)
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q does not name the offending index %q", err.Error(), want)
-			}
-		})
-	}
-}
-
-// TestCopySearchPostIDs_ScalarNegativeRejects verifies finding 5a: the scalar
-// arm of copySearchPostIDs previously sent a negative SearchPostID straight
-// onto the wire (the old `if payload.SearchPostID != 0` took any non-zero,
-// including -5), while the batch arm rejected id <= 0. The doc claimed the
-// batch matched "the scalar path which rejects SearchPostID == 0" — a guard
-// that did not exist (0 is the unset sentinel, not a rejection). The scalar
-// arm now rejects a negative; 0 stays the unset sentinel (the both-empty
-// guard fires when both fields are 0/empty).
-//
-// RED-on-revert: drop the `payload.SearchPostID < 0` guard and the stub is
-// reached (requestMade=true) with err == nil → both assertions fail.
-func TestCopySearchPostIDs_ScalarNegativeRejects(t *testing.T) {
-	requestMade := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestMade = true
-		w.Write([]byte(`{"id":6010}`))
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        -5,
-		PublicationWhenType: 1,
-		PublicationHowType:  1,
-		SelectedPagesIDs:    []int{123456},
-		Texts:               []PostText{{Text: "x", SourceID: 0}},
-	})
-	if err == nil {
-		t.Fatal("expected error for negative scalar SearchPostID, got nil — a negative scraped-post id is never real and must be rejected before any request")
-	}
-	if requestMade {
-		t.Fatal("RewriteSearchPost issued a request despite a negative SearchPostID — must fail before any request")
-	}
-	if !strings.Contains(err.Error(), "SearchPostID = -5") {
-		t.Errorf("error must name the offending scalar value, got: %v", err)
-	}
-}
-
-// TestCopySearchPostIDs_DuplicatesKept verifies the duplicate policy: the
-// same source post in two schedule slots may be intentional, so duplicates
-// are preserved on the wire (NOT deduped). The order test fixtures above
-// ({2003,2001,2002,2001}) already cover this on the wire; this test pins the
-// policy at the helper level and documents the decision.
-//
-// RED-on-revert: if a dedupe pass is added to copySearchPostIDs, the captured
-// ids string loses the repeat and this test fails.
-func TestCopySearchPostIDs_DuplicatesKept(t *testing.T) {
-	var capturedBody map[string]interface{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
-		w.Write([]byte(`{"id":6008}`))
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001, 2001, 2002},
-		PublicationWhenType: 1,
-		PublicationHowType:  1,
-		SelectedPagesIDs:    []int{123456},
-		Texts:               []PostText{{Text: "x", SourceID: 0}},
-	})
-	if err != nil {
-		t.Fatalf("duplicates must be accepted, got error: %v", err)
-	}
-	if got, want := capturedBody["ids"], "2001,2001,2002"; got != want {
-		t.Errorf("ids = %v, want %q (duplicates preserved, not deduped)", got, want)
-	}
-}
-
-// TestCopySearchPostIDs_NoSliceMutation verifies that copySearchPostIDs does
-// NOT mutate the caller's slice — the payload is passed by value but the
-// slice header shares backing storage with the caller's array, and a library
-// that reorders a caller's slice in place is a nasty surprise. The caller's
-// slice must be byte-identical after the call.
-//
-// RED-on-revert: if copySearchPostIDs sorts/dedupes payload.SearchPostIDs in
-// place, the caller's slice changes and this test fails.
-func TestCopySearchPostIDs_NoSliceMutation(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"id":6009}`))
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	original := []int{2003, 2001, 2002, 2001}
-	originalCopy := append([]int(nil), original...)
-	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       original,
-		PublicationWhenType: 1,
-		PublicationHowType:  1,
-		SelectedPagesIDs:    []int{123456},
-		Texts:               []PostText{{Text: "x", SourceID: 0}},
-	})
-	if err != nil {
-		t.Fatalf("RewriteSearchPost: %v", err)
-	}
-	if !reflect.DeepEqual(original, originalCopy) {
-		t.Errorf("copySearchPostIDs mutated the caller's slice: got %v, want %v (slice must be read-only)", original, originalCopy)
+	if postRequestMade {
+		t.Fatal("ImportSearchPost issued a POST /posts despite batch when_type=3 + empty schedules — the guard must fail before the publish")
 	}
 }
 
@@ -1932,5 +1660,489 @@ func TestListAllSearchPosts_MidWalkGeneric500_FailsLoud(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "CAPPED") || strings.Contains(err.Error(), "reachable window") {
 		t.Errorf("error %q mentions a cap, but a generic 500 is not the result-window wall — it must not be mislabelled as capped", err.Error())
+	}
+}
+
+// =========================================================================
+// F1-F5: falsification tests for the resolve+publish collapse (spec §Falsification)
+// =========================================================================
+
+// F1 — a video attachment survives resolve→publish. Break the photos-fold → RED.
+//
+// The edit endpoint returns a video as {type:"video", data:{...}} (singular,
+// object data). The POST /posts write endpoint has NO "videos" case in its
+// getFormData switch — videos ride inside the {type:"photos"} group with
+// array data. Today the client drops videos silently (spec fact 4). This test
+// asserts the video survives the resolve→publish path: ResolveSearchPost maps
+// it into the photos group, and PublishPost sends it in that group on the wire.
+//
+// RED-on-revert: drop the "video" case from mapEditAttachmentsToWriteShape
+// (or put videos in a separate group) → the POST body has no video data →
+// this test fails on the attachments assertion.
+func TestF1_VideoSurvivesResolvePublish(t *testing.T) {
+	var postBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "7077730",
+				"publication_when_type": 1,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "video post", "source_id": 0}],
+				"attachments": [
+					{"type": "video", "data": {"id": 456254173, "owner_id": -26270763, "post_id": "1435865", "preview": "https://example.com/v.jpg", "title": "test video", "description": "", "duration": 12, "access_key": "787c8c3a56b60ef3c8", "type": "video", "source_id": 1}}
+				]
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &postBody)
+			w.Write([]byte(`{"id":93058170}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	content, err := c.ResolveSearchPost(context.Background(), 7077730)
+	if err != nil {
+		t.Fatalf("ResolveSearchPost: %v", err)
+	}
+	// The video must be in a {type: "photos"} group with array data.
+	if len(content.Attachments) != 1 {
+		t.Fatalf("content.Attachments = %d entries, want 1 (the photos group); got %+v", len(content.Attachments), content.Attachments)
+	}
+	if content.Attachments[0].Type != "photos" {
+		t.Fatalf("attachment type = %q, want \"photos\" (videos ride inside the photos group — spec fact 4)", content.Attachments[0].Type)
+	}
+	photosData, ok := content.Attachments[0].Data.([]interface{})
+	if !ok || len(photosData) != 1 {
+		t.Fatalf("photos group data = %v, want array of 1 (the video item)", content.Attachments[0].Data)
+	}
+
+	_, err = c.PublishPost(context.Background(), content, PublishTarget{
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{123456},
+	})
+	if err != nil {
+		t.Fatalf("PublishPost: %v", err)
+	}
+	// Assert the POST body carries the video inside the photos group.
+	atts, ok := postBody["attachments"].([]interface{})
+	if !ok || len(atts) != 1 {
+		t.Fatalf("POST body attachments = %v, want array of 1 (the photos group)", postBody["attachments"])
+	}
+	attMap := atts[0].(map[string]interface{})
+	if attMap["type"] != "photos" {
+		t.Fatalf("POST body attachment type = %v, want \"photos\"", attMap["type"])
+	}
+	attData, ok := attMap["data"].([]interface{})
+	if !ok || len(attData) != 1 {
+		t.Fatalf("POST body photos data = %v, want array of 1 (the video)", attMap["data"])
+	}
+	videoItem, ok := attData[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("POST body photos[0] = %v, want the video object", attData[0])
+	}
+	if videoItem["type"] != "video" {
+		t.Errorf("POST body photos[0].type = %v, want \"video\" (the item's own type field identifies it as a video inside the photos group)", videoItem["type"])
+	}
+	if videoItem["id"] != float64(456254173) {
+		t.Errorf("POST body photos[0].id = %v, want 456254173 (the video's id must survive the round trip)", videoItem["id"])
+	}
+}
+
+// F2 — an unknown attachment kind returns an error AND creates no post.
+// Assert the request count is zero, not merely the exit code.
+//
+// The vendor's getFormData switch knows a fixed set of kinds (photos, audios,
+// documents, link, ad, poll, repost, source, comment, title,
+// telegram_buttons, location, settings). An attachment kind NOT in that set
+// must be an error at resolve time — fact 4 (silently dropped videos) is the
+// whole reason this mapping exists; a mapping that fails open reproduces it.
+//
+// RED-on-revert: remove the unknown-kind error from mapEditAttachmentsToWriteShape
+// → ResolveSearchPost succeeds → PublishPost is called → POST count > 0.
+func TestF2_UnknownAttachmentKindErrorsAndCreatesNoPost(t *testing.T) {
+	var postCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "9999",
+				"publication_when_type": 1,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "has mystery attachment", "source_id": 0}],
+				"attachments": [
+					{"type": "mystery_kind", "data": {"foo": "bar"}}
+				]
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			atomic.AddInt32(&postCount, 1)
+			w.Write([]byte(`{"id":12345}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ResolveSearchPost(context.Background(), 9999)
+	if err == nil {
+		t.Fatal("ResolveSearchPost with unknown attachment kind: expected an error, got nil — a mapping that fails open reproduces the silent video-drop (spec fact 4)")
+	}
+	if !strings.Contains(err.Error(), "mystery_kind") {
+		t.Errorf("error %q does not name the unknown kind \"mystery_kind\" — the operator must be told WHAT was rejected", err.Error())
+	}
+	if got := atomic.LoadInt32(&postCount); got != 0 {
+		t.Fatalf("POST /posts count = %d, want 0 — an unknown attachment kind must error at RESOLVE time, before any publish request is issued (asserting the request count, not merely the exit code — spec F2)", got)
+	}
+}
+
+// F4 — the resolve call carries as_copy=1. Omitting it is the historical bug
+// that yields empty posts, so assert the query parameter itself.
+//
+// as_copy=1 is a GET-side resolver (spec fact 1): the server returns the
+// resolved content only when this parameter is present. Without it, the edit
+// endpoint returns an empty form (no texts, no attachments) — the historical
+// bug that created empty posts. This test asserts the query parameter is on
+// the wire.
+//
+// RED-on-revert: remove the params.Set("as_copy", "1") from GetSearchPostEdit
+// → the query param assertion fails.
+func TestF4_ResolveCarriesAsCopy1(t *testing.T) {
+	var gotAsCopy string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit") {
+			gotAsCopy = r.URL.Query().Get("as_copy")
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "6453701",
+				"publication_when_type": 1,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "x", "source_id": 0}],
+				"attachments": []
+			}`))
+			return
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ResolveSearchPost(context.Background(), 6453701)
+	if err != nil {
+		t.Fatalf("ResolveSearchPost: %v", err)
+	}
+	if gotAsCopy != "1" {
+		t.Fatalf("as_copy query param = %q, want \"1\" — omitting it is the historical bug that yields empty posts (spec fact 1, F4)", gotAsCopy)
+	}
+}
+
+// F5 — a create whose resolved content is empty is refused. Today the client
+// can create an empty post and return 0; that must become impossible.
+//
+// The server accepts a POST /posts with empty texts and empty attachments and
+// creates a post with no content. This is the defect behind the empty-posts
+// ticket. PublishPost must refuse before any request.
+//
+// RED-on-revert: remove the empty-content guard from PublishPost → the POST
+// is sent → postCount > 0 → this test fails.
+func TestF5_EmptyResolvedContentRefused(t *testing.T) {
+	var postCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "8888",
+				"publication_when_type": 1,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [],
+				"attachments": []
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			atomic.AddInt32(&postCount, 1)
+			w.Write([]byte(`{"id":12345}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	content, err := c.ResolveSearchPost(context.Background(), 8888)
+	if err != nil {
+		t.Fatalf("ResolveSearchPost: %v (the resolve itself should succeed — the empty content is valid resolved data; the PUBLISH must refuse it)", err)
+	}
+	if len(content.Texts) != 0 || len(content.Attachments) != 0 {
+		t.Fatalf("resolved content is not empty: texts=%d attachments=%d — the test fixture must produce empty content to exercise the guard", len(content.Texts), len(content.Attachments))
+	}
+	_, err = c.PublishPost(context.Background(), content, PublishTarget{
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{123456},
+	})
+	if err == nil {
+		t.Fatal("PublishPost with empty resolved content: expected an error, got nil — the server would accept it and create an empty post (spec F5)")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error %q does not name the empty-content cause — the operator must be told WHY the publish was refused", err.Error())
+	}
+	if got := atomic.LoadInt32(&postCount); got != 0 {
+		t.Fatalf("POST /posts count = %d, want 0 — an empty-content publish must be refused BEFORE any request (spec F5)", got)
+	}
+}
+
+// =========================================================================
+// F11-F14: falsification tests for the review followups (BLOCKER 1 + MAJOR 3)
+// =========================================================================
+
+// F11 — a batch where post 2 of 3 fails returns a result whose IDs contain
+// post 1, AND a non-nil error. Assert the id is present in the return value,
+// not just that an error came back — a test that only checks the error
+// reproduces the blocker (the result was nil, the id was lost).
+//
+// RED-on-revert: revert resolvePublishBatch to the early-return shape
+// (`return nil, fmt.Errorf(...)` on a per-post failure) → resp is nil → the
+// IDs assertion fails (nil pointer or empty), even though err is non-nil.
+func TestF11_BatchPartialFailureReturnsPopulatedResult(t *testing.T) {
+	var postCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"x","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			n := atomic.AddInt32(&postCount, 1)
+			if n == 2 {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"message":"boom"}`))
+				return
+			}
+			w.Write([]byte(fmt.Sprintf(`{"id":9000%d}`, n))) // post 1 → 90001, post 3 → 90003
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{11, 22, 33},
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{1},
+	})
+	// err MUST be non-nil — a post failed.
+	if err == nil {
+		t.Fatal("ImportSearchPost batch with post 2 failing: expected a non-nil error, got nil — a per-post failure must surface as an error (PartialPostError)")
+	}
+	// resp MUST be non-nil — the blocker is that it was nil, discarding post 1.
+	if resp == nil {
+		t.Fatal("resp is nil — a batch partial failure MUST return a populated result, not discard every post already created (BLOCKER 1: post 90001 is live and unrecoverable from a nil return)")
+	}
+	// The critical assertion: post 1's id (90001) MUST be in resp.IDs.
+	// A test that only checks err != nil reproduces the blocker.
+	found := false
+	for _, id := range resp.IDs {
+		if id == 90001 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("resp.IDs = %v, want 90001 present — post 1 was created (POST count=%d) and its id MUST be in the returned result, not discarded (BLOCKER 1)", resp.IDs, atomic.LoadInt32(&postCount))
+	}
+	// The error must be a *PartialPostError carrying the failed post.
+	var ppe *PartialPostError
+	if !errors.As(err, &ppe) {
+		t.Fatalf("error is not *PartialPostError (got %T): %v — a batch partial failure must return the typed error so callers can distinguish partial from total failure", err, err)
+	}
+	if len(ppe.Failed) != 1 {
+		t.Fatalf("ppe.Failed = %d entries, want 1 (post 2 failed)", len(ppe.Failed))
+	}
+	if ppe.Failed[0].SearchPostID != 22 {
+		t.Errorf("ppe.Failed[0].SearchPostID = %d, want 22 (the failed post)", ppe.Failed[0].SearchPostID)
+	}
+}
+
+// F12 — a direct library call with SearchPostIDs set and Texts non-empty
+// errors before any request (assert request count zero). The guard lives in
+// PublishPost (the single choke point), so a direct RewriteSearchPost caller
+// passing both is refused before any POST /posts.
+//
+// RED-on-revert: remove the batch+Texts guard from PublishPost → the POST is
+// sent → postCount > 0 → this test fails.
+func TestF12_BatchWithTextsErrorsBeforeAnyRequest(t *testing.T) {
+	var postCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			// The resolve step runs before the guard in PublishPost — but the
+			// guard fires on the FIRST PublishPost call, so the edit fetch for
+			// post 1 MAY happen. The assertion is on POST count (the publish),
+			// not GET count (the resolve). However, the guard should fire
+			// BEFORE any resolve too — the batch+Texts broadcast is a payload
+			// invariant, checkable before any request. Assert GET count is
+			// also zero to prove the guard is pre-request.
+			atomic.AddInt32(&postCount, 1) // reuse counter for ANY request
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"x","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			atomic.AddInt32(&postCount, 1)
+			w.Write([]byte(`{"id":999}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{11, 22, 33},
+		Texts:               []PostText{{Text: "broadcast text", SourceID: 0}},
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{1},
+	})
+	if err == nil {
+		t.Fatal("RewriteSearchPost with SearchPostIDs + Texts: expected an error (batch+Texts is a broadcast that overwrites all N posts with one text), got nil")
+	}
+	if got := atomic.LoadInt32(&postCount); got != 0 {
+		t.Fatalf("request count = %d, want 0 — a batch+Texts broadcast must error BEFORE any request (the guard is a payload invariant, checkable pre-request); the broadcast would silently overwrite all N posts' text with no error (MAJOR 3)", got)
+	}
+}
+
+// F13 — the restored CopySearchPost shim produces a post with text AND
+// attachments, i.e. it no longer creates the empty post that made it broken.
+// The shim delegates to ResolveSearchPost + PublishPost, so it carries the
+// resolved text and attachments into the write — the exact thing the old
+// PUT /posts/copy path failed to do (it created empty posts).
+//
+// RED-on-revert: revert CopySearchPost to the old PUT /posts/copy shape (or
+// make it a no-op that returns an empty PostIDResponse) → the POST body has
+// no texts/attachments → this test fails.
+func TestF13_CopySearchPostShimProducesTextAndAttachments(t *testing.T) {
+	var postBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "7077730",
+				"publication_when_type": 1,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "copied post text", "source_id": 0}],
+				"attachments": [
+					{"type": "photo", "data": {"id": 123, "url": "https://example.com/p.jpg"}}
+				]
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &postBody)
+			w.Write([]byte(`{"id":88001}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        7077730,
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{1},
+	})
+	if err != nil {
+		t.Fatalf("CopySearchPost shim: %v", err)
+	}
+	if resp.ID != 88001 {
+		t.Errorf("resp.ID = %d, want 88001", resp.ID)
+	}
+	// Assert the POST body carries the resolved text (not empty).
+	texts, ok := postBody["texts"].([]interface{})
+	if !ok || len(texts) != 1 {
+		t.Fatalf("POST body texts = %v, want array of 1 — the shim must carry the resolved text (the old PUT /posts/copy created empty posts)", postBody["texts"])
+	}
+	textMap, ok := texts[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("POST body texts[0] = %v, want a map", texts[0])
+	}
+	if textMap["text"] != "copied post text" {
+		t.Errorf("POST body texts[0].text = %v, want \"copied post text\" (the resolved text must reach the wire)", textMap["text"])
+	}
+	// Assert the POST body carries the resolved attachments (not empty).
+	atts, ok := postBody["attachments"].([]interface{})
+	if !ok || len(atts) != 1 {
+		t.Fatalf("POST body attachments = %v, want array of 1 (the photos group) — the shim must carry the resolved attachments (the old PUT /posts/copy created empty posts)", postBody["attachments"])
+	}
+	attMap, ok := atts[0].(map[string]interface{})
+	if !ok || attMap["type"] != "photos" {
+		t.Errorf("POST body attachments[0] = %v, want {type:\"photos\"} (the photo must be mapped into the photos group)", atts[0])
+	}
+}
+
+// F14 — an unrecognised read-side attachment kind still fails closed after
+// the vocabulary fix. The fix changes the allowlist to speak the read
+// vocabulary (singular: photo, video, audio, document, ...) but must NOT
+// turn fail-open — an unknown kind must still error.
+//
+// RED-on-revert: if the vocabulary fix accidentally removes the fail-closed
+// guard (e.g. by making the map empty or the check a no-op), ResolveSearchPost
+// succeeds → no error → this test fails.
+func TestF14_UnknownAttachmentKindStillFailsClosedAfterVocabFix(t *testing.T) {
+	var postCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id": "9999",
+				"publication_when_type": 1,
+				"publication_how_type": 1,
+				"publication_where_type": 1,
+				"created_by": 7,
+				"texts": [{"text": "has mystery attachment", "source_id": 0}],
+				"attachments": [
+					{"type": "mystery_kind", "data": {"foo": "bar"}}
+				]
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			atomic.AddInt32(&postCount, 1)
+			w.Write([]byte(`{"id":12345}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ResolveSearchPost(context.Background(), 9999)
+	if err == nil {
+		t.Fatal("ResolveSearchPost with unknown attachment kind: expected an error, got nil — the vocabulary fix must NOT turn the fail-closed guard fail-open (an unknown kind must still error)")
+	}
+	if !strings.Contains(err.Error(), "mystery_kind") {
+		t.Errorf("error %q does not name the unknown kind \"mystery_kind\" — the operator must be told WHAT was rejected", err.Error())
+	}
+	if got := atomic.LoadInt32(&postCount); got != 0 {
+		t.Fatalf("POST /posts count = %d, want 0 — an unknown attachment kind must error at RESOLVE time, before any publish request (the vocabulary fix must preserve fail-closed)", got)
 	}
 }

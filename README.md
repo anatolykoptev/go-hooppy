@@ -185,12 +185,12 @@ hooppy search posts --source-type 1 --text "search query" --date-from 01.01.2026
 hooppy search status                           # check if parsing is in progress
 hooppy search parse --source-resource-id <id> --account-id <id>  # start scraping
 hooppy search stop                             # stop in-progress scraping
-hooppy search copy --post-id <id> --to <page-id>  # copy a scraped post to your page (single-post only; PUT /posts/copy takes one search_post_id)
+hooppy search copy --post-id <id> --to <page-id>  # DEPRECATED: alias for 'search import' (resolve+publish); use 'search import' instead
 hooppy search rewrite --post-id <id> --text "..." --to <page-id>  # rewrite with custom text (attachments preserved)
 hooppy search rewrite --post-id <id> --text "..." --to <page-id> --no-attachments  # rewrite, strip attachments
-hooppy search rewrite --post-ids "id1,id2,id3" --text "..." --to <page-id>  # batch rewrite (server assigns schedule slots in the given order; attachments skipped in batch)
-hooppy search import --post-id <id> --schedules <sched-id>  # copy a scraped post via PUT /posts/import (server downloads photos async, preserves videos)
-hooppy search import --post-ids "id1,id2,id3" --schedules <sched-id>  # batch import (keeps each post's original text; server downloads photos async from the ids)
+hooppy search rewrite --post-ids "id1,id2,id3" --to <page-id>  # batch rewrite (each post resolved+published independently; attachments preserved per post; no text override in batch)
+hooppy search import --post-id <id> --schedules <sched-id>  # copy a scraped post (resolve+publish: text + photos/videos preserved from the resolve step)
+hooppy search import --post-ids "id1,id2,id3" --schedules <sched-id>  # batch import (keeps each post's original text; each post resolved+published independently)
 
 # Diagnose broken connections (read-only). GET /accounts reports status: 1
 # even when an account's OAuth token is dead — the notification log is the
@@ -288,10 +288,11 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 | `hooppy_parsing_status` | Check scraping status + available parsers (UNDOCUMENTED) |
 | `hooppy_start_parsing` | Start scraping posts from an external source (UNDOCUMENTED) |
 | `hooppy_stop_parsing` | Stop in-progress scraping job (UNDOCUMENTED) |
-| `hooppy_copy_search_post` | Copy a scraped post to your own pages (UNDOCUMENTED) |
-| `hooppy_rewrite_search_post` | Rewrite a scraped post with custom text (UNDOCUMENTED) |
+| `hooppy_copy_search_post` | Deprecated: copy a scraped post to your pages (now delegates to resolve+publish; use `hooppy_import_search_post` instead) (UNDOCUMENTED) |
+| `hooppy_rewrite_search_post` | Rewrite one or more scraped posts with custom text (single) or batch keeping original text (UNDOCUMENTED) |
+| `hooppy_import_search_post` | Import one or more scraped posts (single or batch; keeps original text + attachments) (UNDOCUMENTED) |
 
-> **Note — batch import is not exposed via MCP.** `ImportSearchPost` (PUT /posts/import) and the `hooppy search import` CLI command support single- and batch-post import (the batch form keeps each post's original text and downloads photos async), but no `hooppy_import_search_post` MCP tool is registered. This is an omission, not a deliberate scoping decision (no comment/issue records the absence). From the MCP surface, use `hooppy_copy_search_post` for a single scraped post or `hooppy_rewrite_search_post` (single or batch) for a text override; the import-specific async-photo-download batch path is reachable only via the library or the CLI today.
+> **Note — `hooppy_copy_search_post` is deprecated.** The historical `CopySearchPost` (PUT /posts/copy) created empty posts; the restored shim now delegates to resolve+publish (the same path `hooppy_import_search_post` uses), preserving text + attachments. Use `hooppy_import_search_post` for the non-deprecated name, or `hooppy_rewrite_search_post` for a text override. Batch import is fully exposed via MCP (`hooppy_import_search_post` with `search_post_ids`).
 
 ## Social network source IDs
 

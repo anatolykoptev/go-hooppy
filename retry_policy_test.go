@@ -10,11 +10,14 @@ import (
 )
 
 // This file is the mechanical guard for issue #87: retry eligibility is a
-// property of the ENDPOINT, not the HTTP method. PUT /posts/import creates
-// posts, so it must never retry even though doPUT retries for full-state
-// Update* calls. The decision is declared per call site via the retryable
+// property of the ENDPOINT, not the HTTP method. POST /posts (PublishPost)
+// creates posts, so it must never retry even though doPOST would retry for
+// other calls. The decision is declared per call site via the retryable
 // argument on doGET/doPUT/doDELETE (compiler-enforced — no default, so a new
 // call site cannot silently inherit its method's behaviour) and pinned here.
+// (The historical PUT /posts/import endpoint is no longer called by this
+// client — Rewrite/Import now compose ResolveSearchPost + PublishPost, both
+// via POST /posts with as_copy=1.)
 //
 // Two layers, both required:
 //
@@ -27,7 +30,7 @@ import (
 //
 //  2. The TestRetryPolicy_*_NotRetried / _Retried pair behaviourally pins the
 //     invariant: a 500-then-200 stub must yield exactly ONE request for every
-//     create-shaped PUT call site (ImportSearchPost, CopySearchPost, and the
+//     create-shaped call site (PublishPost via POST /posts, and the
 //     createPostWithMode dispatcher that all 16 CrossPost* wrappers funnel
 //     through) and TWO for a full-state Update* PUT. Reverting any create
 //     call site's retryable flag to true makes its test RED.
@@ -119,10 +122,12 @@ var retryPolicies = map[string]struct {
 	"GetParsingForm":                          {retryAllowed, false},
 	"StartParsing":                            {retryNever, true},
 	"StopParsing":                             {retryAllowed, false},
-	"CopySearchPost":                          {retryNever, true}, // PUT /posts/copy creates a copy
 	"GetSearchPostEdit":                       {retryAllowed, false},
-	"RewriteSearchPost":                       {retryNever, true}, // POST /posts with as_copy=1 creates
-	"ImportSearchPost":                        {retryNever, true}, // PUT /posts/import creates — the #87 case
+	"ResolveSearchPost":                       {retryComposite, false}, // delegates to GetSearchPostEdit (retryAllowed) + local mapping
+	"PublishPost":                             {retryNever, true},      // POST /posts creates — doPOST never retries
+	"RewriteSearchPost":                       {retryComposite, false}, // resolve+publish loop; create is in PublishPost (retryNever)
+	"ImportSearchPost":                        {retryComposite, false}, // resolve+publish loop; create is in PublishPost (retryNever)
+	"CopySearchPost":                          {retryComposite, false}, // deprecated shim: resolve+publish loop; create is in PublishPost (retryNever)
 	// --- posts ---
 	"ListPosts":                         {retryAllowed, false},
 	"ListAllPosts":                      {retryComposite, false},
@@ -251,9 +256,9 @@ func stub500Then200(t *testing.T, okBody string) (*httptest.Server, *atomic.Int6
 	return srv, &calls
 }
 
-// TestRetryPolicy_CreateNotRetried pins the #87 case: ImportSearchPost
-// (PUT /posts/import) CREATES posts, so a 500-then-200 must yield exactly ONE
-// request. Reverting its doPUT retryable flag to true makes this RED (calls==2
+// TestRetryPolicy_CreateNotRetried pins the #87 case: PublishPost
+// (POST /posts) CREATES posts, so a 500-then-200 must yield exactly ONE
+// request. Reverting doPOST to retry on creates makes this RED (calls==2
 // and the create is duplicated).
 func TestRetryPolicy_CreateNotRetried(t *testing.T) {
 	srv, calls := stub500Then200(t, `{"id":123}`)
@@ -262,45 +267,25 @@ func TestRetryPolicy_CreateNotRetried(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	// when_type=1 avoids the schedule guard and the before-snapshot GET, so
-	// the only request is the create PUT itself. With retryable=false the
-	// first 500 is returned as an error (no retry to the 200) — that is the
-	// invariant: even when a retry would "succeed", the create must not take
-	// it, because the server may have committed the write before the 500.
-	_, err = c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{1},
-		PublicationWhenType: 1,
-		PublicationHowType:  1,
-		SelectedPagesIDs:    []int{1},
-	})
+	// the only request is the create POST itself. With doPOST non-retryable
+	// the first 500 is returned as an error (no retry to the 200) — that is
+	// the invariant: even when a retry would "succeed", the create must not
+	// take it, because the server may have committed the write before the 500.
+	_, err = c.PublishPost(context.Background(),
+		SourceContent{
+			SearchPostID: 1,
+			Texts:        []PostText{{Text: "x", SourceID: 0}},
+		},
+		PublishTarget{
+			PublicationWhenType: 1,
+			PublicationHowType:  1,
+			SelectedPagesIDs:    []int{1},
+		})
 	if err == nil {
-		t.Fatal("ImportSearchPost: expected the 500 to surface as an error (no retry), got nil — the create must not retry to the 200 even though one is queued")
+		t.Fatal("PublishPost: expected the 500 to surface as an error (no retry), got nil — the create must not retry to the 200 even though one is queued")
 	}
 	if got := calls.Load(); got != 1 {
-		t.Fatalf("ImportSearchPost issued %d requests, want 1 — PUT /posts/import creates posts and MUST NOT retry (reverting doPUT retryable to true makes this 2 and duplicates the write)", got)
-	}
-}
-
-// TestRetryPolicy_CopySearchPost_NotRetried pins the second create-shaped PUT
-// the prior fix missed: CopySearchPost (PUT /posts/copy) CREATES a copy of a
-// scraped post. A 500-then-200 must yield ONE request.
-func TestRetryPolicy_CopySearchPost_NotRetried(t *testing.T) {
-	srv, calls := stub500Then200(t, `{"id":123}`)
-	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	// Scalar SearchPostID (the slice is refused by CopySearchPost); when_type=1
-	// avoids the schedule guard and snapshot GET. The first 500 surfaces as an
-	// error (no retry to the queued 200).
-	_, err = c.CopySearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        1,
-		PublicationWhenType: 1,
-	})
-	if err == nil {
-		t.Fatal("CopySearchPost: expected the 500 to surface as an error (no retry), got nil")
-	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("CopySearchPost issued %d requests, want 1 — PUT /posts/copy creates a post and MUST NOT retry", got)
+		t.Fatalf("PublishPost issued %d requests, want 1 — POST /posts creates a post and MUST NOT retry (reverting doPOST to retry on creates makes this 2 and duplicates the write)", got)
 	}
 }
 

@@ -328,7 +328,7 @@ func TestDetectAdMarkers(t *testing.T) {
 
 // --- runImport integration tests with httptest ---
 
-// importStubServer serves GET /posts-search/{id}/edit and PUT /posts/import,
+// importStubServer serves GET /posts-search/{id}/edit and POST /posts,
 // capturing every import request body. The edit responses are keyed by
 // search-post ID so each post can carry different text.
 func importStubServer(t *testing.T, editBodies map[int]string) (*httptest.Server, *importCapturer) {
@@ -350,7 +350,7 @@ func importStubServer(t *testing.T, editBodies map[int]string) (*httptest.Server
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(body))
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			raw, _ := io.ReadAll(r.Body)
 			cap.add(raw)
 			// Distinguish single (has "id" in response) from batch ({"success":true}).
@@ -555,10 +555,6 @@ func TestRunImport_StripVKMarkup_Batch(t *testing.T) {
 			t.Errorf("import[%d] ids = %q, want a scalar id (per-post path)", i, got)
 		}
 	}
-	// stderr must say it is routing through the per-post path.
-	if !strings.Contains(errOut.String(), "per-post") && !strings.Contains(errOut.String(), "3 import") {
-		t.Errorf("stderr does not announce per-post routing; got:\n%s", errOut.String())
-	}
 	// stdout must be valid JSON.
 	var parsed map[string]interface{}
 	if err := json.Unmarshal([]byte(out.String()), &parsed); err != nil {
@@ -566,9 +562,55 @@ func TestRunImport_StripVKMarkup_Batch(t *testing.T) {
 	}
 }
 
+// TestF3_BatchDistinctTextsYieldsThreePostsWithOwnText verifies that
+// --post-ids a,b,c with distinct source texts yields three posts, each
+// carrying its OWN text (not a broadcast, not blank, not the first post's
+// text). This is the CLI-level falsification of the old server-side batch
+// defect where the batch form could not express per-post text.
+//
+// F3: --post-ids a,b,c with distinct texts → three posts with their own text.
+func TestF3_BatchDistinctTextsYieldsThreePostsWithOwnText(t *testing.T) {
+	editBodies := map[int]string{
+		4001: editBodyFor("First post text"),
+		4002: editBodyFor("Second post text"),
+		4003: editBodyFor("Third post text"),
+	}
+	srv, cap := importStubServer(t, editBodies)
+	c := newImportTestClient(t, srv)
+
+	var out, errOut strings.Builder
+	code := runImport(context.Background(), c, &out, &errOut, importArgs{
+		postIDs:  "4001,4002,4003",
+		whenType: 1,
+		howType:  1,
+		stripVK:  false,
+	})
+	if code != 0 {
+		t.Fatalf("runImport exit %d; stderr=%s", code, errOut.String())
+	}
+	// Three independent resolve+publish pairs (not one batch call).
+	if got, want := cap.count(), 3; got != want {
+		t.Fatalf("publish call count = %d, want %d (one per post)", got, want)
+	}
+	// Each post carries its OWN resolved text — not a broadcast, not blank.
+	wantTexts := []string{"First post text", "Second post text", "Third post text"}
+	for i, want := range wantTexts {
+		if got := cap.texts(i); got != want {
+			t.Errorf("publish[%d] text = %q, want %q (each post keeps its own resolved text)", i, got, want)
+		}
+	}
+	// Each call carries a scalar id, not a comma-joined batch.
+	for i := 0; i < 3; i++ {
+		if got := cap.ids(i); got == "" || strings.Contains(got, ",") {
+			t.Errorf("publish[%d] ids = %q, want a scalar id (per-post, not batch)", i, got)
+		}
+	}
+}
+
 // TestRunImport_NoStrip_BatchUnchanged verifies that with the flag OFF, a
-// batch import is exactly today's behaviour: ONE import call with an empty
-// texts slice (server copies original text), no per-post routing.
+// batch import still routes through the per-post path (N independent
+// resolve+publish pairs). Each call carries the resolved text (no strip)
+// and a scalar id.
 func TestRunImport_NoStrip_BatchUnchanged(t *testing.T) {
 	editBodies := map[int]string{
 		3001: editBodyFor("[https://vk.com/a|First] text"),
@@ -587,17 +629,15 @@ func TestRunImport_NoStrip_BatchUnchanged(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("runImport exit %d; stderr=%s", code, errOut.String())
 	}
-	// Exactly ONE import call (the batch), not N.
-	if got, want := cap.count(), 1; got != want {
-		t.Fatalf("import call count = %d, want %d (flag off = one batch call)", got, want)
+	// N import calls (one per post), not 1 batch call.
+	if got, want := cap.count(), 2; got != want {
+		t.Fatalf("import call count = %d, want %d (N per-post calls)", got, want)
 	}
-	// The texts slice on the wire is empty (server copies original text).
-	if got := cap.texts(0); got != "" {
-		t.Errorf("import text = %q, want empty (flag off = server copies original, no text on wire)", got)
-	}
-	// The ids field is the comma-joined batch, not a scalar.
-	if got, want := cap.ids(0), "3001,3002"; got != want {
-		t.Errorf("import ids = %q, want %q (batch comma-joined)", got, want)
+	// Each call carries a scalar id, not a comma-joined batch.
+	for i := 0; i < 2; i++ {
+		if got := cap.ids(i); got == "" || strings.Contains(got, ",") {
+			t.Errorf("import[%d] ids = %q, want a scalar id", i, got)
+		}
 	}
 	// stderr warns about VK markup (detection always on) and names the flag.
 	stderr := errOut.String()
@@ -660,14 +700,11 @@ func TestRunImport_AdMarkersWarnOnly(t *testing.T) {
 	}
 }
 
-// TestRunImport_AttachmentDelivery_BothModes pins the attachment-delivery
-// divergence between the two batch modes, asserted on the DECODED wire bodies
-// the stub receives. A batch WITHOUT --strip-vk-markup sends NO attachments
-// (the server downloads photos async from the source ids); a batch WITH the
-// flag sends each post's attachments explicitly from the edit response,
-// because the per-post single-id import form cannot express "let the server
-// fetch them" the way the batch form does (see the runImport doc comment).
-// The strip-mode stderr states this divergence so it is never hit unknowingly.
+// TestRunImport_AttachmentDelivery_BothModes verifies that both strip and
+// non-strip batch modes route through the per-post path (N independent
+// resolve+publish pairs). Each call carries the resolved attachments from
+// the edit response — the client-side loop always sends them, regardless of
+// --strip-vk-markup (which only affects text).
 func TestRunImport_AttachmentDelivery_BothModes(t *testing.T) {
 	photo := []map[string]interface{}{
 		{"type": "photo", "data": map[string]interface{}{"id": 555, "url": "https://vk.com/p.jpg"}},
@@ -677,7 +714,7 @@ func TestRunImport_AttachmentDelivery_BothModes(t *testing.T) {
 		4002: editBodyWithAttachments("post two", photo),
 	}
 
-	// --- NON-STRIP batch: no attachments on the wire (server fetches) ---
+	// --- NON-STRIP batch: N per-post calls, attachments from resolve ---
 	srv1, cap1 := importStubServer(t, editBodies)
 	c1 := newImportTestClient(t, srv1)
 	var out1, err1 strings.Builder
@@ -690,17 +727,21 @@ func TestRunImport_AttachmentDelivery_BothModes(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("non-strip exit %d; stderr=%s", code, err1.String())
 	}
-	if got := cap1.count(); got != 1 {
-		t.Fatalf("non-strip import calls = %d, want 1 (batch)", got)
+	if got := cap1.count(); got != 2 {
+		t.Fatalf("non-strip import calls = %d, want 2 (N per-post calls)", got)
 	}
-	if atts := cap1.attachments(0); len(atts) != 0 {
-		t.Errorf("non-strip batch wire attachments = %v, want empty (server fetches from ids)", atts)
-	}
-	if got, want := cap1.ids(0), "4001,4002"; got != want {
-		t.Errorf("non-strip ids = %q, want %q (batch comma-joined)", got, want)
+	for i := 0; i < 2; i++ {
+		atts := cap1.attachments(i)
+		if len(atts) != 1 {
+			t.Fatalf("non-strip import[%d] attachments len = %d, want 1 (photo group from resolve)", i, len(atts))
+		}
+		group, ok := atts[0].(map[string]interface{})
+		if !ok || group["type"] != "photos" {
+			t.Errorf("non-strip import[%d] attachment[0] = %v, want {type:photos, data:[...]}", i, atts[0])
+		}
 	}
 
-	// --- STRIP batch: attachments sent explicitly per post ---
+	// --- STRIP batch: same N per-post calls, attachments from resolve ---
 	srv2, cap2 := importStubServer(t, editBodies)
 	c2 := newImportTestClient(t, srv2)
 	var out2, err2 strings.Builder
@@ -725,10 +766,6 @@ func TestRunImport_AttachmentDelivery_BothModes(t *testing.T) {
 		if !ok || group["type"] != "photos" {
 			t.Errorf("strip import[%d] attachment[0] = %v, want {type:photos, data:[...]}", i, atts[0])
 		}
-	}
-	// stderr must state the attachment divergence so it is never hit unknowingly.
-	if !strings.Contains(err2.String(), "attachment") {
-		t.Errorf("strip stderr does not mention attachment divergence; got:\n%s", err2.String())
 	}
 }
 
@@ -761,7 +798,7 @@ func TestRunImport_CostWarning_SingleIsFree(t *testing.T) {
 }
 
 // importStubServerFailingNth is like importStubServer but the failNth-th
-// PUT /posts/import request (1-based) returns 500, so the per-post import
+// POST /posts request (1-based) returns 500, so the per-post import
 // path sees a failure on exactly one post. Used to pin that a partial batch
 // failure does not discard already-published posts.
 func importStubServerFailingNth(t *testing.T, editBodies map[int]string, failNth int) *httptest.Server {
@@ -784,7 +821,7 @@ func importStubServerFailingNth(t *testing.T, editBodies map[int]string, failNth
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(body))
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			mu.Lock()
 			importCount++
 			n := importCount
@@ -896,9 +933,9 @@ func TestRunImport_StripBatch_PartialFailurePreservesPublished(t *testing.T) {
 			t.Errorf("created post_id %d not in stdout per_post (posts after the failure must still be attempted); got %v", wantID, createdIDs)
 		}
 	}
-	// stderr must name the failed import.
-	if !strings.Contains(errOut.String(), "ImportSearchPost(5003)") {
-		t.Errorf("stderr does not name the failed import; got:\n%s", errOut.String())
+	// stderr must name the failed publish.
+	if !strings.Contains(errOut.String(), "PublishPost(5003)") {
+		t.Errorf("stderr does not name the failed publish; got:\n%s", errOut.String())
 	}
 }
 
@@ -988,7 +1025,7 @@ func TestRunImport_StripBatch_EditFetchFailurePreservesPublished(t *testing.T) {
 		t.Errorf("import call count = %d, want %d (the edit-fetch-failed post is not imported)", got, want)
 	}
 	// stderr must name the failed edit fetch.
-	if !strings.Contains(errOut.String(), "GetSearchPostEdit(5103)") {
+	if !strings.Contains(errOut.String(), "ResolveSearchPost(5103)") {
 		t.Errorf("stderr does not name the failed edit fetch; got:\n%s", errOut.String())
 	}
 }
@@ -1022,7 +1059,7 @@ func importStubServerEditFailing(t *testing.T, editBodies map[int]string, failID
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(body))
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			raw, _ := io.ReadAll(r.Body)
 			cap.add(raw)
 			w.Header().Set("Content-Type", "application/json")
@@ -1037,11 +1074,9 @@ func importStubServerEditFailing(t *testing.T, editBodies map[int]string, failID
 }
 
 // TestRunImport_BatchFlagOff_DetectionReadFailureNonFatal pins F2: in batch
-// flag-off mode, a failed detection GetSearchPostEdit must NOT abort the
-// import — that GET exists only to produce a warning, and before this PR the
-// path made zero such calls. The fix: warn on stderr naming the post id and
-// stating it was NOT scanned, then continue. The import still issues its
-// single batch call and succeeds.
+// mode, a failed resolve (GetSearchPostEdit) for one post must NOT abort the
+// entire batch — the loop records a "failed" result and continues with the
+// remaining posts. The exit is 2 (partial: some succeeded, some failed).
 func TestRunImport_BatchFlagOff_DetectionReadFailureNonFatal(t *testing.T) {
 	editBodies := map[int]string{
 		6001: editBodyFor("post one"),
@@ -1059,31 +1094,39 @@ func TestRunImport_BatchFlagOff_DetectionReadFailureNonFatal(t *testing.T) {
 		howType:  1,
 		stripVK:  false,
 	})
-	// The import MUST still succeed — the detection read is optional.
-	if code != 0 {
-		t.Fatalf("exit %d; want 0 (detection-read failure must not abort the import); stderr=%s", code, errOut.String())
+	// Partial: 2 succeeded, 1 failed → exit 2.
+	if code != 2 {
+		t.Fatalf("exit %d; want 2 (partial: 2 succeeded, 1 resolve failed); stderr=%s", code, errOut.String())
 	}
-	// Exactly ONE batch import call (not aborted before it).
-	if got, want := cap.count(), 1; got != want {
-		t.Fatalf("import call count = %d, want %d (the single batch call must still fire)", got, want)
+	// 2 import calls (6002's resolve failed, so no PublishPost for it).
+	if got, want := cap.count(), 2; got != want {
+		t.Fatalf("import call count = %d, want %d (the failed-resolve post is not published)", got, want)
 	}
-	// stderr must name the unscanned post and state it was NOT scanned, so a
-	// silent gap in coverage is not mistaken for a clean scan.
+	// stderr must name the failed resolve.
 	stderr := errOut.String()
-	if !strings.Contains(stderr, "6002") {
-		t.Errorf("stderr does not name the unscanned post id 6002; got:\n%s", stderr)
+	if !strings.Contains(stderr, "ResolveSearchPost(6002)") {
+		t.Errorf("stderr does not name the failed resolve for post 6002; got:\n%s", stderr)
 	}
-	if !strings.Contains(stderr, "NOT scanned") {
-		t.Errorf("stderr does not state the post was NOT scanned; got:\n%s", stderr)
+	// stdout must still be valid JSON with per_post results.
+	var parsed struct {
+		PerPost []struct {
+			SearchPostID int    `json:"search_post_id"`
+			Status       string `json:"status"`
+		} `json:"per_post"`
 	}
-	// stdout must still be valid JSON.
-	var parsed map[string]interface{}
 	if err := json.Unmarshal([]byte(out.String()), &parsed); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\nstdout=%s", err, out.String())
 	}
+	if len(parsed.PerPost) != 3 {
+		t.Fatalf("per_post len = %d, want 3 (every post attempted)", len(parsed.PerPost))
+	}
+	// The 2nd post (6002) must be "failed".
+	if parsed.PerPost[1].Status != "failed" || parsed.PerPost[1].SearchPostID != 6002 {
+		t.Errorf("per_post[1] = {id:%d status:%q}, want {id:6002 status:failed}", parsed.PerPost[1].SearchPostID, parsed.PerPost[1].Status)
+	}
 }
 
-// importStubServerZeroID is like importStubServer but PUT /posts/import
+// importStubServerZeroID is like importStubServer but POST /posts
 // returns {"id":0} — a create response that carries no identity. Used to pin
 // that a zero-id create is not silently lossy on stdout: the record must make
 // the missing identity visible (post_id field present, distinct status) rather
@@ -1106,7 +1149,7 @@ func importStubServerZeroID(t *testing.T, editBodies map[int]string) *httptest.S
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(body))
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"id":0}`))
 		default:
@@ -1260,7 +1303,13 @@ func TestRunImport_F6_ThreePathsAgreeOnCreateNoID(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("batch_off: exit %d, want 0 (CreateNoIDError → created_no_id, same as strip-batch; round 1 exited 1 here)", code)
 		}
-		if got, want := parsed["status"], "created_no_id"; got != want {
+		// The batch path emits a per_post array (not a bare object).
+		perPost, _ := parsed["per_post"].([]interface{})
+		if len(perPost) != 1 {
+			t.Fatalf("batch_off: per_post len = %d, want 1", len(perPost))
+		}
+		rec, _ := perPost[0].(map[string]interface{})
+		if got, want := rec["status"], "created_no_id"; got != want {
 			t.Errorf("batch_off: status = %v, want %q (must agree with strip-batch)", got, want)
 		}
 	})
