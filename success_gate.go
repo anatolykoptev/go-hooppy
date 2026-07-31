@@ -1,28 +1,10 @@
 package hooppy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
-
-// successReporter is satisfied by every response type that carries a
-// server-sent "success" boolean. client.do and doWithRetry consult it after a
-// successful decode: a success:false is a DECIDED failure (the operation did
-// NOT happen) and becomes a *SuccessFalseError, not a silent nil. The
-// transport layer treats any decodable 2xx as success, so without this gate a
-// 2xx {"success":false} exits 0 — the defect this gate closes (issue #118).
-//
-// OPT-IN IS THE TRAP this repo keeps falling into: a response type that
-// carries "success" but does NOT implement this interface is silently skipped
-// by the gate, and the next type someone adds is ungated with no error, no
-// warning, and a green suite — exactly how the defect existed across 18 call
-// sites. TestSuccessGate_AllSuccessFieldTypesImplementInterface closes that
-// hole by parsing the package source and asserting EVERY struct with a
-// "Success" field implements this interface, so adding an ungated response
-// type fails the build instead of passing quietly.
-type successReporter interface {
-	successState() bool
-}
 
 // SuccessFalseError is the typed error returned when the API answers a 2xx
 // with {"success":false} — a decided failure the HTTP transport (2xx) does
@@ -44,8 +26,11 @@ func (e *SuccessFalseError) Error() string {
 }
 
 // extractSuccessFalseMessage pulls a human-readable message from a 2xx
-// {"success":false} body, mirroring newAPIError's extraction
-// ({"message":"..."} or {"error":"..."}). Returns "" when neither is present —
+// {"success":false} body. It mirrors newAPIError's extraction
+// ({"message":"..."} or {"error":"..."}) and additionally handles the nested
+// ES error shape evidenced in this repo ({"error":{"reason":"..."}} — see
+// isResultWindowError / resultWindowErrorBody), since a 2xx success:false body
+// can carry the same nested error object. Returns "" when none is present —
 // the success:false flag itself is the failure signal. data is the raw decoded
 // body the caller already read.
 func extractSuccessFalseMessage(data []byte) string {
@@ -56,48 +41,71 @@ func extractSuccessFalseMessage(data []byte) string {
 	if v, ok := m["message"].(string); ok {
 		return v
 	}
+	// "error" may be a string (newAPIError shape) or an object carrying a
+	// "reason" string (the ES result-window shape evidenced in
+	// posts_search_test.go:1830 / errors.go:144-146).
 	if v, ok := m["error"].(string); ok {
 		return v
+	}
+	if obj, ok := m["error"].(map[string]interface{}); ok {
+		if r, ok := obj["reason"].(string); ok {
+			return r
+		}
 	}
 	return ""
 }
 
+// successKey is the literal byte sequence the pre-filter scans for. Scanning
+// for the quoted key (not the bare word) avoids matching the value or a
+// substring of another key, and is the cheapest possible gate: a single
+// bytes.Contains over the raw body, no allocation.
+var successKey = []byte(`"success"`)
+
 // checkSuccess is the shared gate consulted by client.do and doWithRetry
-// after a successful decode. When out implements successReporter (i.e. the
-// response type carries a "success" field) and the RAW BODY carries an
-// EXPLICIT {"success":false}, it returns a *SuccessFalseError carrying the
-// endpoint and any server message extracted from data.
+// after a successful decode. It is TYPE-INDEPENDENT: the explicit-
+// {"success":false} check applies to EVERY response, decided by the raw body
+// alone, regardless of the response type's Go fields. A type cannot opt out
+// of a check that does not consult the type.
+//
+// This closes the round-1 hole: PostIDResponse / CreatePostResponse carry no
+// Success field, so under the old opt-in successReporter shape they fell out
+// of the gate entirely — a 2xx {"success":false} on a create was swallowed,
+// and the worst variant {"id":123,"success":false} passed both checkSuccess
+// (no Success field) and checkCreateID (id non-zero) and was reported as a
+// clean success carrying a real handle. The universal gate catches both.
 //
 // ABSENT vs EXPLICIT-false: a Go bool decodes both an absent "success" key and
 // an explicit false to false — the decoded field alone cannot tell them apart.
 // The defect is the EXPLICIT false being ignored (the server said "no"); an
-// ABSENT field is no failure signal at all (the operation's success is simply
-// unknown, the status quo before this gate). So the gate fires ONLY on an
-// explicit success:false in the raw body, never on an absent field. This makes
-// the gate robust to endpoints whose success response omits the flag without
-// falsely erroring on a real success.
+// ABSENT field is no failure signal at all. So the gate fires ONLY on an
+// explicit success:false in the raw body, never on an absent field.
 //
-// Returns nil when out does not implement successReporter (list-only response
-// types with no success flag are reads, not mutation outcomes).
+// Cost: a large list response (search posts --all returns ~23 MB, 10000 rows)
+// carries no "success" key at all. The byte pre-filter (bytes.Contains) finds
+// no match and returns nil WITHOUT allocating a map — the common read path
+// pays only a single linear scan. Only a body that contains the literal
+// "success" (a small mutation response, or a constructed edge case) proceeds
+// to the map parse. See BenchmarkCheckSuccess_LargeListBody for the measured
+// cost on a ~23 MB body with no success key.
 func checkSuccess(out interface{}, data []byte, endpoint string) error {
-	sr, ok := out.(successReporter)
-	if !ok {
+	_ = out // the gate is type-independent; out is kept for call-site symmetry
+	// Pre-filter: a cheap byte scan for the literal "success" key. A body
+	// without it cannot carry an explicit success:false, so short-circuit
+	// without allocating a map. This is the fast path for large list reads.
+	if !bytes.Contains(data, successKey) {
 		return nil
 	}
-	// Fast path: the decoded field is true → an explicit success:true (or a
-	// present true). Success, no need to re-parse.
-	if sr.successState() {
-		return nil
-	}
-	// The decoded field is false. Distinguish explicit-false from absent by
-	// consulting the raw body — the one place the distinction is visible.
+	// The body contains "success" somewhere (as a key, or inside a nested
+	// string value). The map parse is the authority: only an explicit
+	// top-level "success":false fires.
 	var m map[string]interface{}
 	if json.Unmarshal(data, &m) != nil {
 		return nil // unparseable body — no signal, let the decoded value stand
 	}
 	v, present := m["success"]
 	if !present {
-		return nil // absent — no failure signal (not the defect this gate closes)
+		return nil // absent at top level — no failure signal (the byte hit was
+		// inside a nested string value, not a top-level key)
 	}
 	if b, ok := v.(bool); ok && !b {
 		return &SuccessFalseError{
@@ -145,16 +153,3 @@ func checkCreateID(endpoint string, id int, ids []int, slotLookupError string) e
 	}
 	return nil
 }
-
-// successState implementations for every response type carrying a Success
-// field. TestSuccessGate_AllSuccessFieldTypesImplementInterface asserts this
-// set stays complete — adding a Success field to a response type without a
-// method here fails the build, not the operator's account.
-func (r *ScheduleResponse) successState() bool     { return r.Success }
-func (r *DeleteResponse) successState() bool       { return r.Success }
-func (r *WatermarkResponse) successState() bool    { return r.Success }
-func (r *ProxyResponse) successState() bool        { return r.Success }
-func (r *DeletePostResponse) successState() bool   { return r.Success }
-func (r *ParsingStartResponse) successState() bool { return r.Success }
-func (r *PostMoveResult) successState() bool       { return r.Success }
-func (r *BatchMovePostsResult) successState() bool { return r.Success }

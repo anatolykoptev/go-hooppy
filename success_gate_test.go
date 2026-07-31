@@ -1,13 +1,10 @@
 package hooppy
 
 import (
+	"bytes"
 	"context"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -498,116 +495,23 @@ func TestSuccessGate_F2_CreateIDGuard_SlotLookupErrorSuppresses(t *testing.T) {
 	}
 }
 
-// --- F3: reflection test — every Success-field type implements the gate ---
-
-// TestSuccessGate_F3_AllSuccessFieldTypesImplementInterface parses the
-// package source (non-test files) and asserts that EVERY struct with a field
-// named "Success" has a successState() bool method (i.e. implements
-// successReporter). This is the test that keeps the gate honest: adding a
-// response type with a Success field but no method fails the BUILD, not the
-// operator's account. A hand-maintained list of type names is NOT used — the
-// set is discovered by walking the AST, so it cannot drift.
+// --- F3: OBSOLETE under the universal gate (round 2) -----------------------
 //
-// RED-on-revert: add a struct with a Success field and no successState method
-// — this test goes RED naming the ungated type.
-func TestSuccessGate_F3_AllSuccessFieldTypesImplementInterface(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		// skip _test.go files — test-only types are not production response
-		// types and must not be forced through the gate.
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parse package: %v", err)
-	}
-	if len(pkgs) == 0 {
-		t.Fatal("no packages parsed in .")
-	}
-
-	successFieldTypes := map[string]bool{}     // struct type name → has a Success field
-	successStateReceivers := map[string]bool{} // receiver type name → has successState() bool
-
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			// Structs with a Success field.
-			for _, decl := range file.Decls {
-				gd, ok := decl.(*ast.GenDecl)
-				if !ok || gd.Tok != token.TYPE {
-					continue
-				}
-				for _, spec := range gd.Specs {
-					ts, ok := spec.(*ast.TypeSpec)
-					if !ok {
-						continue
-					}
-					st, ok := ts.Type.(*ast.StructType)
-					if !ok {
-						continue
-					}
-					for _, f := range st.Fields.List {
-						for _, n := range f.Names {
-							if n.Name == "Success" {
-								successFieldTypes[ts.Name.Name] = true
-							}
-						}
-					}
-				}
-			}
-			// successState method declarations.
-			for _, decl := range file.Decls {
-				fd, ok := decl.(*ast.FuncDecl)
-				if !ok || fd.Name == nil || fd.Name.Name != "successState" {
-					continue
-				}
-				if fd.Recv == nil || len(fd.Recv.List) == 0 {
-					continue
-				}
-				// Receiver type: unwrap pointer/star.
-				recvType := ""
-				switch rt := fd.Recv.List[0].Type.(type) {
-				case *ast.StarExpr:
-					if id, ok := rt.X.(*ast.Ident); ok {
-						recvType = id.Name
-					}
-				case *ast.Ident:
-					recvType = rt.Name
-				}
-				if recvType == "" {
-					continue
-				}
-				// Verify the signature: no params, one bool result.
-				if fd.Type.Params != nil && len(fd.Type.Params.List) > 0 {
-					continue
-				}
-				if fd.Type.Results == nil || len(fd.Type.Results.List) != 1 {
-					continue
-				}
-				if id, ok := fd.Type.Results.List[0].Type.(*ast.Ident); ok && id.Name == "bool" {
-					successStateReceivers[recvType] = true
-				}
-			}
-		}
-	}
-
-	if len(successFieldTypes) == 0 {
-		t.Fatal("found no struct types with a Success field — the AST scan is broken (the package has several); fix the test before trusting it")
-	}
-
-	// Forward: every Success-field type MUST have a successState method.
-	for typ := range successFieldTypes {
-		if !successStateReceivers[typ] {
-			t.Errorf("type %s has a Success field but NO successState() bool method — it is UNGATED: a 2xx {\"success\":false} decoding into it exits 0 silently. Add `func (r *%s) successState() bool { return r.Success }` to success_gate.go. (TestSuccessGate_F3 keeps the gate honest; this failure means a response type was added without wiring it to the shared gate.)", typ, typ)
-		}
-	}
-	// Reverse: every successState receiver MUST have a Success field —
-	// catches a stale method left on a type that lost its field (a drifted
-	// gate that gates nothing).
-	for typ := range successStateReceivers {
-		if !successFieldTypes[typ] {
-			t.Errorf("type %s has a successState() bool method but NO Success field — a stale gate method that gates nothing; remove it or restore the Success field", typ)
-		}
-	}
-}
+// Round 1's F3 (TestSuccessGate_F3_AllSuccessFieldTypesImplementInterface)
+// parsed the package AST and asserted every struct with a Go field named
+// "Success" had a successState() bool method (i.e. implemented the opt-in
+// successReporter interface). That test kept the OPT-IN gate honest: a
+// response type with a Success field but no method was silently ungated.
+//
+// Round 2 made the gate TYPE-INDEPENDENT (checkSuccess decides by the raw
+// body alone, see success_gate.go). There is no per-type wiring to keep
+// honest — every response is gated regardless of its Go fields — so the
+// meta-guard has nothing to assert. It is removed, not repurposed: a guard
+// that keys on the Go field name "Success" would itself be the round-1 trap
+// (it misses `Ok bool \`json:"success"\``), and a guard keyed on the JSON tag
+// would assert a property the gate no longer consults. The universal gate's
+// falsification is F1 (every list-A method) + F5 (every create-shaped method)
+// + F7 (the byte pre-filter does not fire on a nested string value).
 
 // --- F4: success:true still passes for the right reason -------------------
 
@@ -686,5 +590,214 @@ func TestSuccessGate_F4_CreateWithRealIDPasses(t *testing.T) {
 	}
 	if resp.ID != 12345 {
 		t.Errorf("ID = %d, want 12345", resp.ID)
+	}
+}
+
+// --- F5: success:false on EVERY create-shaped method (the round-1 hole) -----
+//
+// Round 1 gated the 18 list-A mutation methods but NOT the five create-shaped
+// methods, because PostIDResponse/CreatePostResponse carry no Success field
+// and so do not implement successReporter — checkSuccess returned nil BEFORE
+// re-parsing the raw body. A 2xx {"success":false} on a create was swallowed:
+// the server's rejection and its message both lost, and the worst variant
+// {"id":123,"success":false} passed checkCreateID (id non-zero) AND checkSuccess
+// (no Success field) and was reported as a clean success carrying a real handle.
+//
+// The universal gate (round 2) decides by the RAW BODY alone, independent of
+// the response type, so creates are covered for the first time. This test
+// drives each of the five create-shaped methods against BOTH shapes:
+//
+//   - {"success":false}            — no id; round 1 returned *CreateNoIDError
+//     (the missing-id guard fired on the zero id), NOT the server's decided
+//     false. Round 2 must return *SuccessFalseError — the explicit false is
+//     the real signal, the missing id is a consequence.
+//   - {"id":123,"success":false}   — a real id; round 1 returned nil (clean
+//     success with a real handle). Round 2 must return *SuccessFalseError.
+//
+// RED-on-revert: disable the universal check (restore the opt-in
+// successReporter shape) and every subtest goes RED — the create-shaped
+// methods fall out of the gate again.
+func TestSuccessGate_F5_SuccessFalseEveryCreateMethod(t *testing.T) {
+	type Case struct {
+		name string
+		call func(c *Client) error
+	}
+	// All create-shaped methods use when_type=1 so fillScheduleSlots is a
+	// no-op (no extra requests); the gate runs in client.do/doWithRetry
+	// before the method's checkCreateID ever sees the response.
+	cases := []Case{
+		{
+			name: "CreatePost",
+			call: func(c *Client) error {
+				_, err := c.CreatePost(context.Background(), PostPublishNowPayload{
+					PublicationWhenType: 1, PublicationHowType: 1,
+					SelectedPagesIDs: []int{1}, Texts: []PostText{{Text: "x"}},
+				})
+				return err
+			},
+		},
+		{
+			name: "createPostWithMode_SearchPosts",
+			call: func(c *Client) error {
+				_, err := c.SearchPosts(context.Background(), PostPublishNowPayload{
+					PublicationWhenType: 1, PublicationHowType: 1,
+					SelectedPagesIDs: []int{1}, Texts: []PostText{{Text: "x"}},
+				})
+				return err
+			},
+		},
+		{
+			name: "CopySearchPost",
+			call: func(c *Client) error {
+				_, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
+					SearchPostID: 1001, PublicationWhenType: 1, PublicationHowType: 1,
+					SelectedPagesIDs: []int{1},
+				})
+				return err
+			},
+		},
+		{
+			name: "RewriteSearchPost",
+			call: func(c *Client) error {
+				_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+					SearchPostID: 1001, PublicationWhenType: 1, PublicationHowType: 1,
+					SelectedPagesIDs: []int{1}, Texts: []PostText{{Text: "x"}},
+				})
+				return err
+			},
+		},
+		{
+			name: "ImportSearchPost",
+			call: func(c *Client) error {
+				_, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+					SearchPostID: 2003, PublicationWhenType: 1, PublicationHowType: 1,
+					SelectedPagesIDs: []int{1},
+				})
+				return err
+			},
+		},
+	}
+
+	// Two body shapes: no id, and a real id. Both carry an explicit
+	// success:false — the signal the universal gate must catch regardless of
+	// the response type's fields.
+	bodies := []struct {
+		name string
+		body string
+	}{
+		{"success_false_no_id", `{"success":false,"message":"operation rejected by server"}`},
+		{"success_false_with_id", `{"id":123,"success":false,"message":"operation rejected by server"}`},
+	}
+
+	for _, tc := range cases {
+		for _, b := range bodies {
+			t.Run(tc.name+"/"+b.name, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method != http.MethodGet {
+						w.Write([]byte(b.body))
+						return
+					}
+					w.WriteHeader(http.StatusMethodNotAllowed)
+				}))
+				defer srv.Close()
+				c := newTestClient(t, srv)
+				err := tc.call(c)
+				if err == nil {
+					t.Fatalf("%s with %s: expected an error, got nil — a 2xx {\"success\":false} on a create is a decided failure, not a silent success (the universal gate must catch it regardless of the response type's fields)", tc.name, b.name)
+				}
+				// The error MUST be *SuccessFalseError — the server's explicit
+				// false is the real signal. Round 1 returned *CreateNoIDError
+				// (no-id shape) or nil (with-id shape); both are wrong.
+				var sfe *SuccessFalseError
+				if !errorsAs(err, &sfe) {
+					t.Fatalf("%s with %s: error is not *SuccessFalseError (got %T): %v — the universal gate must surface the server's decided false, not the missing-id consequence or a silent nil", tc.name, b.name, err, err)
+				}
+				if !strings.Contains(sfe.Message, "operation rejected by server") {
+					t.Errorf("%s with %s: SuccessFalseError.Message = %q — must carry the server's message", tc.name, b.name, sfe.Message)
+				}
+			})
+		}
+	}
+}
+
+// --- F7: the byte pre-filter must not fire on a nested string value --------
+//
+// The universal gate pre-filters with a cheap byte scan for the literal
+// `"success"` before allocating a map. The scan is a PRE-FILTER, not the
+// decision: a body where the bytes `"success"` appear but NOT as a top-level
+// key must NOT fire the gate. The map parse is the authority — only an
+// explicit top-level "success":false fires.
+//
+// This constructs that input deliberately: the "state" field's VALUE is the
+// string "success", so the raw body contains the bytes `"success"` (the JSON
+// encoding of the string value), but there is no top-level "success" KEY. The
+// byte scan finds the literal; the map parse must find no top-level "success"
+// key and return nil. (A string value cannot carry an UNescaped `"success"`
+// inside it in valid JSON — the quotes would be `\"` — so the value-IS-
+// "success" form is the construction that puts the literal bytes in the body
+// without a top-level key.)
+//
+// RED-on-revert: if the byte scan is made the DECISION (return an error on any
+// `"success"` match without the map parse), this test goes RED — the string
+// value would be mistaken for a top-level key.
+func TestSuccessGate_F7_BytePreFilterNestedStringNoFire(t *testing.T) {
+	// The "state" field's value is the string "success" — the raw body
+	// contains the bytes `"success"` (from `"state":"success"`), but there
+	// is no top-level "success" key.
+	body := `{"id":123,"state":"success","title":"ok"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	// CreatePost decodes into CreatePostResponse (no Success field). The
+	// byte scan finds "success" in the string value; the map parse must
+	// find NO top-level "success" key and return nil. The id is non-zero so
+	// checkCreateID passes too — the method returns a clean response.
+	resp, err := c.CreatePost(context.Background(), PostPublishNowPayload{
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{1}, Texts: []PostText{{Text: "x"}},
+	})
+	if err != nil {
+		t.Fatalf("string-value body: expected nil error (no top-level success key), got %v — the byte pre-filter is a PRE-FILTER, not the decision; the map parse is the authority and must not fire on a string value", err)
+	}
+	if resp.ID != 123 {
+		t.Errorf("ID = %d, want 123 (the response decoded normally; the gate did not fire)", resp.ID)
+	}
+}
+
+// BenchmarkCheckSuccess_LargeListBody measures the pre-filter cost on a body
+// the size of `search posts --all` (~23 MB, 10000 rows) that carries NO
+// "success" key — the common case for list reads. The byte scan must
+// short-circuit without allocating a map. The body is synthetic (the repo has
+// no 23 MB fixture) but shape-matches a real list response: a JSON object
+// with a "list" array of 10000 row objects, none carrying "success".
+func BenchmarkCheckSuccess_LargeListBody(b *testing.B) {
+	// Build a ~23 MB list body with no "success" key, shape-matching a real
+	// `search posts --all` response: 10000 rows, each ~2.3 KB (a real Post
+	// row carries 24 fields). None carries a "success" key — the common read
+	// path. The byte pre-filter must short-circuit without allocating a map.
+	row := `{"id":1,"title":"post title that is reasonably long to match real row sizes","text":"body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text body text","status":"published","source_id":7,"page_id":3,"created_at":"2026-07-30T12:00:00Z","updated_at":"2026-07-30T12:00:00Z","publication_date":"2026-07-30T12:00:00Z","author":"author name","attachments":[{"type":"photo","data":{"id":10,"url":"https://example.invalid/photo.jpg"}}],"metrics":{"views":123,"likes":45,"comments":6,"shares":2}}`
+	rowJSON := []byte(row)
+	b.StopTimer()
+	var buf bytes.Buffer
+	buf.WriteString(`{"list":[`)
+	const rows = 10000
+	for i := 0; i < rows; i++ {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(rowJSON)
+	}
+	buf.WriteString(`],"total_rows":10000,"is_has_more":false,"rows_limit":20}`)
+	data := buf.Bytes()
+	b.Logf("body size: %d bytes (%.1f MB)", len(data), float64(len(data))/(1<<20))
+	b.StartTimer()
+	b.ReportAllocs()
+	var resp PostIDResponse
+	for i := 0; i < b.N; i++ {
+		if err := checkSuccess(&resp, data, "/posts"); err != nil {
+			b.Fatalf("checkSuccess: %v", err)
+		}
 	}
 }

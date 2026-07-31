@@ -1175,3 +1175,93 @@ func TestRunImport_StripBatch_ZeroIDCreateIsVisible(t *testing.T) {
 		t.Errorf("per_post[0] post_id = %v, want 0 (present, not omitted); stdout=%s", got, out.String())
 	}
 }
+
+// --- F6: the three import paths agree on *CreateNoIDError -------------------
+//
+// Review finding 2: *CreateNoIDError was handled in 1 of 3 import paths. The
+// strip-batch per-post loop mapped it to "created_no_id" exit 0; the single
+// path and the batch-flag-off path did NOT type-assert, so the same server
+// behaviour exited 1 there and 0 here. The single path is the one that
+// invites the duplicate re-run the strip path exists to prevent.
+//
+// Fix: pick the strip-batch behaviour (CreateNoIDError → exit 0 with a
+// created_no_id signal) and apply it to all three. This test drives all three
+// paths against a server that returns {"id":0} (a create with no handle) and
+// asserts the SAME outcome: exit 0, and a stdout record that signals
+// created_no_id so a re-run can tell a published-but-unidentified post from a
+// real failure.
+//
+// RED-on-revert: break one path's handling (drop the type-assert so it falls
+// through to exit 1) and that path's subtest goes RED — exit 1 instead of 0.
+func TestRunImport_F6_ThreePathsAgreeOnCreateNoID(t *testing.T) {
+	editBodies := map[int]string{8001: editBodyFor("post one")}
+
+	// pathOutcome runs one import path and returns (exitCode, stdoutParsed).
+	pathOutcome := func(t *testing.T, args importArgs) (int, map[string]interface{}) {
+		srv := importStubServerZeroID(t, editBodies)
+		c := newImportTestClient(t, srv)
+		var out, errOut strings.Builder
+		code := runImport(context.Background(), c, &out, &errOut, args)
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(out.String()), &parsed); err != nil {
+			t.Fatalf("stdout not valid JSON: %v\nstdout=%s", err, out.String())
+		}
+		return code, parsed
+	}
+
+	// --- strip-batch path (the reference behaviour) ---
+	t.Run("strip_batch", func(t *testing.T) {
+		code, parsed := pathOutcome(t, importArgs{
+			postIDs:  "8001",
+			whenType: 1,
+			howType:  1,
+			stripVK:  true,
+		})
+		if code != 0 {
+			t.Fatalf("strip_batch: exit %d, want 0 (CreateNoIDError → created_no_id, not a failure)", code)
+		}
+		perPost, _ := parsed["per_post"].([]interface{})
+		if len(perPost) != 1 {
+			t.Fatalf("strip_batch: per_post len = %d, want 1", len(perPost))
+		}
+		rec, _ := perPost[0].(map[string]interface{})
+		if got, want := rec["status"], "created_no_id"; got != want {
+			t.Errorf("strip_batch: status = %v, want %q", got, want)
+		}
+	})
+
+	// --- single-post path (round 1 exited 1 here) ---
+	t.Run("single", func(t *testing.T) {
+		code, parsed := pathOutcome(t, importArgs{
+			postID:   8001,
+			whenType: 1,
+			howType:  1,
+			stripVK:  false,
+		})
+		if code != 0 {
+			t.Fatalf("single: exit %d, want 0 (CreateNoIDError → created_no_id, same as strip-batch; round 1 exited 1 here — the duplicate-re-run hazard)", code)
+		}
+		// The single path emits a bare object (not the per_post array). It
+		// MUST signal created_no_id so a re-run can tell a
+		// published-but-unidentified post from a real failure.
+		if got, want := parsed["status"], "created_no_id"; got != want {
+			t.Errorf("single: status = %v, want %q (must agree with strip-batch)", got, want)
+		}
+	})
+
+	// --- batch-flag-off path (round 1 exited 1 here) ---
+	t.Run("batch_off", func(t *testing.T) {
+		code, parsed := pathOutcome(t, importArgs{
+			postIDs:  "8001",
+			whenType: 1,
+			howType:  1,
+			stripVK:  false,
+		})
+		if code != 0 {
+			t.Fatalf("batch_off: exit %d, want 0 (CreateNoIDError → created_no_id, same as strip-batch; round 1 exited 1 here)", code)
+		}
+		if got, want := parsed["status"], "created_no_id"; got != want {
+			t.Errorf("batch_off: status = %v, want %q (must agree with strip-batch)", got, want)
+		}
+	})
+}
