@@ -1771,7 +1771,7 @@ type CopySearchPostPayload struct {
 	PublicationDate     *PublicationDate `json:"publication_date,omitempty"` // for when_type=2
 	Texts               []PostText       `json:"texts"`                      // custom text to override original (Rewrite only; ignored by Import)
 	Attachments         []Attachment     `json:"attachments"`                // ignored by Rewrite/Import (resolve step fills attachments); kept for direct PublishPost callers
-	NoAttachments       bool             `json:"no_attachments,omitempty"`   // when true, Rewrite/Import strip ALL attachments from the resolved content before publishing (text-only post); the resolve step still runs (attachments are fetched then dropped), so the cost is unchanged
+	NoAttachments       bool             `json:"-"`                          // control flag, NOT a wire field: when true, Rewrite/Import/Copy strip ALL attachments from the resolved content before publishing (text-only post). PublishPost builds its own anonymous request body and never marshals CopySearchPostPayload, so the prior `json:"no_attachments,omitempty"` tag was vestigial — it serialized only if a caller hand-marshalled the payload, which the library never does. `json:"-"` makes that explicit. The resolve step still runs (attachments are fetched then dropped), so the cost is unchanged.
 }
 
 // SearchPostEditResponse is returned by GET /posts-search/{id}/edit?as_copy=1.

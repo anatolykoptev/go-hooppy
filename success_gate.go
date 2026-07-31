@@ -172,15 +172,26 @@ type PostFailure struct {
 }
 
 func (e *PartialPostError) Error() string {
-	ids := make([]string, 0, len(e.Result.IDs))
-	for _, id := range e.Result.IDs {
-		ids = append(ids, strconv.Itoa(id))
+	// e.Result is an exported field on an exported type, so the zero value
+	// (*PartialPostError)(nil-result) is reachable from a caller that
+	// constructs the value by hand. Guard the dereference — the typed error
+	// only ever carries a non-nil Result from resolvePublishBatch, but
+	// Error() must not panic on the zero value.
+	succeeded := 0
+	idsStr := ""
+	if e.Result != nil {
+		ids := make([]string, 0, len(e.Result.IDs))
+		for _, id := range e.Result.IDs {
+			ids = append(ids, strconv.Itoa(id))
+		}
+		succeeded = len(e.Result.IDs)
+		idsStr = strings.Join(ids, ", ")
 	}
 	failed := make([]string, 0, len(e.Failed))
 	for _, f := range e.Failed {
 		failed = append(failed, fmt.Sprintf("%d: %v", f.SearchPostID, f.Err))
 	}
-	return fmt.Sprintf("hooppy: partial batch: %d succeeded (ids: [%s]), %d failed ([%s])", len(e.Result.IDs), strings.Join(ids, ", "), len(e.Failed), strings.Join(failed, ", "))
+	return fmt.Sprintf("hooppy: partial batch: %d succeeded (ids: [%s]), %d failed ([%s])", succeeded, idsStr, len(e.Failed), strings.Join(failed, ", "))
 }
 
 // checkCreateID errors when a create-shaped response carries no usable id AND

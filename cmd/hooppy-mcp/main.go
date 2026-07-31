@@ -1777,7 +1777,16 @@ func registerImportSearchPost(server *mcp.Server) {
 			if err != nil {
 				var ppe *hooppy.PartialPostError
 				if errors.As(err, &ppe) {
-					return jsonResult(map[string]interface{}{"result": resp, "partial_error": ppe.Error()})
+					// Partial: some posts landed, some failed. Return a
+					// status-discriminated non-error result so an agent can
+					// tell partial from clean success WITHOUT parsing the
+					// error string. A total failure (every post failed) does
+					// NOT reach here — resolvePublishBatch returns a plain
+					// error for it, which falls through to errResult below
+					// (IsError=true), so an agent re-running on ambiguity
+					// does not treat an empty all-failed batch as success and
+					// duplicate it (MAJOR 5).
+					return jsonResult(map[string]interface{}{"status": "partial", "result": resp, "partial_error": ppe.Error()})
 				}
 				return errResult(err.Error())
 			}
@@ -1888,7 +1897,12 @@ func registerRewriteSearchPost(server *mcp.Server) {
 			if err != nil {
 				var ppe *hooppy.PartialPostError
 				if errors.As(err, &ppe) {
-					return jsonResult(map[string]interface{}{"result": resp, "partial_error": ppe.Error()})
+					// Partial: see registerImportSearchPost for the
+					// status-discriminator rationale. A total failure returns
+					// a plain error → errResult (IsError=true), not this
+					// branch, so an all-failed batch is never reported as a
+					// successful tool call (MAJOR 5).
+					return jsonResult(map[string]interface{}{"status": "partial", "result": resp, "partial_error": ppe.Error()})
 				}
 				return errResult(err.Error())
 			}

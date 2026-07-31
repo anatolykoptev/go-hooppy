@@ -1314,3 +1314,76 @@ func TestRunImport_F6_ThreePathsAgreeOnCreateNoID(t *testing.T) {
 		}
 	})
 }
+
+// TestRunImport_BatchAllFailed_Exits1 is the CLI half of F15: a batch where
+// EVERY post fails to publish exits 1 (error), NOT 2 (partial). runImport's
+// own loop already distinguishes all-failed (exit 1) from partial (exit 2);
+// this test pins that distinction so a future change cannot collapse them.
+// The library half (resolvePublishBatch returns a plain error, not
+// *PartialPostError, on all-failed) is pinned in TestF15_AllFailedBatchReturnsPlainErrorNotPartial.
+//
+// RED-on-revert: change runImport's `if anyFailed && !anySucceeded { return 1 }`
+// to return 2 (or remove it so all-failed falls through to the partial return 2)
+// → exit 2 → this test fails.
+func TestRunImport_BatchAllFailed_Exits1(t *testing.T) {
+	editBodies := map[int]string{
+		6101: editBodyFor("post one"),
+		6102: editBodyFor("post two"),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/posts-search/"), "/edit")
+			id := 0
+			for _, ch := range idStr {
+				id = id*10 + int(ch-'0')
+			}
+			body, ok := editBodies[id]
+			if !ok {
+				t.Errorf("stub: no edit body for id %d", id)
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(body))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			// Every publish fails — a total batch failure.
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"boom"}`))
+		default:
+			t.Errorf("stub: unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := newImportTestClient(t, srv)
+
+	var out, errOut strings.Builder
+	code := runImport(context.Background(), c, &out, &errOut, importArgs{
+		postIDs:  "6101,6102",
+		whenType: 1,
+		howType:  1,
+	})
+	if code != 1 {
+		t.Fatalf("exit %d; want 1 (every post failed = error, NOT partial/exit 2); stderr=%s", code, errOut.String())
+	}
+	// stdout still carries a per_post record (the operator's record of what
+	// landed — here, nothing), so a re-run can dedup. Both entries failed.
+	var parsed struct {
+		PerPost []struct {
+			SearchPostID int    `json:"search_post_id"`
+			Status       string `json:"status"`
+		} `json:"per_post"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &parsed); err != nil {
+		t.Fatalf("stdout not valid JSON: %v\nstdout=%s", err, out.String())
+	}
+	if len(parsed.PerPost) != 2 {
+		t.Fatalf("per_post len = %d, want 2 (every post attempted)", len(parsed.PerPost))
+	}
+	for _, r := range parsed.PerPost {
+		if r.Status != "failed" {
+			t.Errorf("per_post[id=%d].status = %q, want \"failed\" (every post failed)", r.SearchPostID, r.Status)
+		}
+	}
+}

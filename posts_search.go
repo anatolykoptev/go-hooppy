@@ -872,14 +872,21 @@ func resolveSearchPostIDs(payload CopySearchPostPayload) ([]int, error) {
 //
 // PARTIAL-RESULT CONTRACT (the reason this helper exists as one place):
 // a per-post failure does NOT discard the posts already created. The helper
-// accumulates every successful id into the returned *PostIDResponse and every
-// failure into a *PartialPostError, then returns BOTH (non-nil result, non-nil
-// error) when some succeeded and some failed. A caller that ignores the error
-// and reads only the result still sees what landed; a caller that type-asserts
-// the error gets the failures too. This mirrors runImport's per_post array
-// (CLI) and ListAllSearchPostsWithFirstAndLastTotal's Capped partial-result
-// convention (library) — a partial result is returned populated alongside a
-// typed error, never discarded.
+// implements the three documented outcomes (see PartialPostError):
+//   - every post succeeded → (non-nil resp, nil err)
+//   - some succeeded, some failed → (non-nil resp, *PartialPostError) — the
+//     result carries every id that landed, the error carries every failure
+//   - every post failed (batch) → (nil resp, plain error) — NOT
+//     *PartialPostError, so a caller type-asserting *PartialPostError reads
+//     "total failure" not "some succeeded"; the CLI paths exit 1 (error), not
+//     2 (partial)
+//
+// A caller that ignores the error and reads only the result still sees what
+// landed on the partial path; a caller that type-asserts the error gets the
+// failures too. This mirrors runImport's per_post array (CLI) and
+// ListAllSearchPostsWithFirstAndLastTotal's Capped partial-result convention
+// (library) — a partial result is returned populated alongside a typed error,
+// never discarded.
 //
 // The single-post path (len(ids) == 1) does NOT use PartialPostError — a
 // single-post failure returns a plain wrapped error with a nil result,
@@ -906,7 +913,15 @@ func (c *Client) resolvePublishBatch(ctx context.Context, ids []int, target Publ
 			failed = append(failed, PostFailure{SearchPostID: id, Err: fmt.Errorf("hooppy: %s: resolve %d: %w", callerName, id, err)})
 			continue
 		}
-		if overrideTexts != nil {
+		// Apply the text override only when the caller actually provided
+		// text. The predicate mirrors the batch+Texts broadcast guard above
+		// (len(overrideTexts) > 0): an empty non-nil slice []PostText{} is
+		// the batch idiom (buildRewritePayload / buildRewriteSearchPostPayload
+		// emit it for a batch on main, and the v1.1.2 godoc describes it as
+		// the batch idiom) and MUST NOT wipe the resolved text — testing
+		// `overrideTexts != nil` here would replace the resolved text with an
+		// empty array, silently publishing a text-less post (MAJOR 2).
+		if len(overrideTexts) > 0 {
 			content.Texts = overrideTexts
 		}
 		if noAttachments {
@@ -947,10 +962,24 @@ func (c *Client) resolvePublishBatch(ctx context.Context, ids []int, target Publ
 	if len(failed) == 0 {
 		return &resp, nil
 	}
-	// Batch partial: return the populated result alongside the typed error.
-	// If every post failed, resp is empty (IDs nil) — still return it as the
-	// PartialPostError.Result so the shape is consistent, but callers checking
-	// len(resp.IDs) == 0 see "nothing landed".
+	// All-failed batch (len(ids) > 1, every post failed): return a PLAIN
+	// error with a nil result — NOT a *PartialPostError. The documented
+	// three-outcome contract (see PartialPostError) is:
+	//   - err == nil                  → every post succeeded
+	//   - err is *PartialPostError     → SOME succeeded, some failed (resp non-nil)
+	//   - err is non-nil, not *PartialPostError → EVERY post failed (resp is nil)
+	// Returning *PartialPostError with an empty Result.IDs here would collapse
+	// outcomes 2 and 3: a caller type-asserting *PartialPostError would read
+	// "some succeeded" when nothing did, and the CLI `search rewrite` path
+	// (which maps *PartialPostError to exit 2/partial) would exit 2 on a total
+	// failure — diverging from runImport, which exits 1 on all-failed. A plain
+	// error makes both CLI paths exit 1 (runImport via its own loop, rewrite
+	// via die(err)) and lets a caller distinguish total from partial by type.
+	if len(resp.IDs) == 0 {
+		return nil, fmt.Errorf("hooppy: %s: every post in the batch failed (%d/%d); no posts were published — first failure: %w", callerName, len(failed), len(ids), failed[0].Err)
+	}
+	// Batch partial: some succeeded, some failed. Return the populated result
+	// alongside the typed error so a caller never loses already-published ids.
 	return &resp, &PartialPostError{Result: &resp, Failed: failed}
 }
 
@@ -1039,6 +1068,79 @@ func SearchPostEditAttachments(editAttachments []Attachment) []Attachment {
 	return result
 }
 
+// ScrapedPhotoAttachment builds a {type: "photos"} attachment from a list of
+// scraped VK photo descriptors (SearchPostPhoto: id + owner_id). It is kept as
+// a Deprecated shim so existing consumers compile; it delegates to
+// SearchPostEditAttachments (the maintained grouping helper) by promoting each
+// SearchPostPhoto to a singular {type: "photo"} read-shape attachment and
+// letting the grouper fold them into one photos group — the same mapping the
+// resolve step applies.
+//
+// Deprecated: use ResolveSearchPost + PublishPost instead. The resolve step
+// (GET /posts-search/{id}/edit?as_copy=1) returns attachments already in the
+// read shape, and mapEditAttachmentsToWriteShape maps them to the write shape;
+// building a photos group by hand from VK photo ids is no longer needed.
+func ScrapedPhotoAttachment(photos []SearchPostPhoto) Attachment {
+	atts := make([]Attachment, 0, len(photos))
+	for _, ph := range photos {
+		atts = append(atts, Attachment{Type: "photo", Data: map[string]interface{}{
+			"id":       strconv.Itoa(ph.ID),
+			"owner_id": ph.OwnerID,
+			"type":     "photo",
+		}})
+	}
+	grouped := SearchPostEditAttachments(atts)
+	if len(grouped) == 0 {
+		return Attachment{}
+	}
+	return grouped[0] // the photos group (SearchPostEditAttachments emits it first)
+}
+
+// SearchPostPhotos extracts the photo/video group from a scraped post's edit
+// response as a single *Attachment (the {type: "photos"} group the write
+// endpoint expects), or nil when the post has no photos or videos. It is kept
+// as a Deprecated shim so existing consumers compile; it delegates to
+// SearchPostEditAttachments (the maintained grouping helper).
+//
+// Deprecated: use ResolveSearchPost, which returns SourceContent.Attachments
+// already mapped to the write shape (the photos group plus any non-photo
+// attachments). This helper returns only the photos group and drops the rest;
+// ResolveSearchPost preserves every attachment.
+func SearchPostPhotos(edit *SearchPostEditResponse) *Attachment {
+	if edit == nil {
+		return nil
+	}
+	for _, att := range SearchPostEditAttachments(edit.Attachments) {
+		if att.Type == "photos" {
+			a := att
+			return &a
+		}
+	}
+	return nil
+}
+
+// SearchPostNonPhotoAttachments extracts every non-photo/video attachment from
+// a scraped post's edit response, passing them through as individual
+// {type, data} entries. It is kept as a Deprecated shim so existing consumers
+// compile; it delegates to SearchPostEditAttachments (the maintained grouping
+// helper) and filters out the photos group.
+//
+// Deprecated: use ResolveSearchPost, which returns SourceContent.Attachments
+// carrying both the photos group and the non-photo attachments in one slice,
+// already in the write shape.
+func SearchPostNonPhotoAttachments(edit *SearchPostEditResponse) []Attachment {
+	if edit == nil {
+		return nil
+	}
+	var others []Attachment
+	for _, att := range SearchPostEditAttachments(edit.Attachments) {
+		if att.Type != "photos" {
+			others = append(others, att)
+		}
+	}
+	return others
+}
+
 // ImportSearchPost imports one or more scraped posts. Unlike
 // RewriteSearchPost (which overrides text), ImportSearchPost keeps each
 // post's original text — the resolve step fetches it via
@@ -1099,6 +1201,17 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 // before any request — the historical PUT /posts/copy endpoint took a
 // singular search_post_id and silently ignored the batch slice. Use
 // ImportSearchPost or RewriteSearchPost for a batch.
+//
+// Argument change vs the historical CopySearchPost: payload.Texts and
+// payload.Attachments are IGNORED. The historical PUT /posts/copy marshalled
+// both into its request body; this shim delegates to resolvePublishBatch,
+// which resolves the source post's text and attachments via
+// GET /posts-search/{id}/edit?as_copy=1 and carries THOSE into POST /posts.
+// A consumer passing payload.Texts now gets the resolved original text (not
+// the override) with no error — to override text, use RewriteSearchPost; to
+// control attachments, use ResolveSearchPost + PublishPost directly. This
+// matches ImportSearchPost (import = keep original) and is the behaviour the
+// historical endpoint's name always claimed but never delivered.
 //
 // UNDOCUMENTED: POST /posts with as_copy=1 + ids is not in the public OpenAPI spec.
 func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {

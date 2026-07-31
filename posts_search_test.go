@@ -1443,8 +1443,18 @@ func TestImportSearchPost_BothSet(t *testing.T) {
 
 // TestRewriteSearchPost_BatchScheduleGuard verifies the fail-closed schedule
 // guard fires for the BATCH form too: when_type=3 + an empty schedule list
-// with a multi-id batch must error before any POST. The resolve GET /edit
-// happens first for the first id; the guard in PublishPost prevents the POST.
+// with a multi-id batch must error before any POST. The guard lives in
+// resolvePublishBatch (the single choke point) and PublishPost; the resolve
+// GET /edit happens first for the first id, then PublishPost's when_type=3
+// guard prevents the POST.
+//
+// This case MUST NOT pass Texts: a batch (SearchPostIDs) + non-empty Texts
+// trips the batch+Texts broadcast guard in resolvePublishBatch FIRST, which
+// would satisfy both assertions below before the when_type=3/empty-schedules
+// guard this test is named for is ever reached — the test would survive
+// deletion of the guard it exists to protect (round-2 mutation M7 dropped from
+// 4 REDs to 3 because Texts fired the broadcast guard first). Dropping Texts
+// makes this test exercise the schedule guard and ONLY the schedule guard.
 func TestRewriteSearchPost_BatchScheduleGuard(t *testing.T) {
 	var postRequestMade bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1475,10 +1485,15 @@ func TestRewriteSearchPost_BatchScheduleGuard(t *testing.T) {
 		PublicationWhenType: 3,
 		PublicationHowType:  1,
 		SchedulesIDs:        nil, // empty — the trap
-		Texts:               []PostText{{Text: "x", SourceID: 0}},
+		// Texts deliberately OMITTED: see the comment above — passing Texts
+		// here would trip the batch+Texts broadcast guard first and mask the
+		// schedule guard this test exists to protect.
 	})
 	if err == nil {
 		t.Fatal("expected fail-closed error for batch when_type=3 with empty schedules, got nil")
+	}
+	if !strings.Contains(err.Error(), "schedules_ids") {
+		t.Fatalf("error %q does not name the empty-schedules cause — the when_type=3 guard must fire, not the batch+Texts broadcast guard (which would mention \"broadcast\")", err.Error())
 	}
 	if postRequestMade {
 		t.Fatal("RewriteSearchPost issued a POST /posts despite batch when_type=3 + empty schedules — the guard must fail before the publish")
@@ -1982,23 +1997,22 @@ func TestF11_BatchPartialFailureReturnsPopulatedResult(t *testing.T) {
 
 // F12 — a direct library call with SearchPostIDs set and Texts non-empty
 // errors before any request (assert request count zero). The guard lives in
-// PublishPost (the single choke point), so a direct RewriteSearchPost caller
-// passing both is refused before any POST /posts.
+// resolvePublishBatch (the single choke point every Rewrite/Import path
+// passes through), so a direct RewriteSearchPost caller passing both is
+// refused before any resolve GET /edit and before any POST /posts.
 //
-// RED-on-revert: remove the batch+Texts guard from PublishPost → the POST is
-// sent → postCount > 0 → this test fails.
+// RED-on-revert: remove the batch+Texts guard from resolvePublishBatch → the
+// resolve loop runs → POST is sent → postCount > 0 → this test fails.
 func TestF12_BatchWithTextsErrorsBeforeAnyRequest(t *testing.T) {
 	var postCount int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
-			// The resolve step runs before the guard in PublishPost — but the
-			// guard fires on the FIRST PublishPost call, so the edit fetch for
-			// post 1 MAY happen. The assertion is on POST count (the publish),
-			// not GET count (the resolve). However, the guard should fire
-			// BEFORE any resolve too — the batch+Texts broadcast is a payload
-			// invariant, checkable before any request. Assert GET count is
-			// also zero to prove the guard is pre-request.
+			// The guard fires at the TOP of resolvePublishBatch, BEFORE the
+			// resolve loop starts — so no GET /edit should happen either.
+			// The assertion is on ANY request count (GET or POST): the
+			// batch+Texts broadcast is a payload invariant, checkable before
+			// any request, so the guard must be pre-request.
 			atomic.AddInt32(&postCount, 1) // reuse counter for ANY request
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"id":"x","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
@@ -2099,34 +2113,36 @@ func TestF13_CopySearchPostShimProducesTextAndAttachments(t *testing.T) {
 	}
 }
 
-// F14 — an unrecognised read-side attachment kind still fails closed after
-// the vocabulary fix. The fix changes the allowlist to speak the read
-// vocabulary (singular: photo, video, audio, document, ...) but must NOT
-// turn fail-open — an unknown kind must still error.
+// F14 — a KNOWN read-side attachment kind (copyright, the VK source link)
+// passes THROUGH the allowlist after the vocabulary fix, mapped to the write
+// shape and carried onto the wire. This is the POSITIVE complement to F2
+// (which asserts an UNKNOWN kind fails closed): the vocabulary fix changed
+// the allowlist to speak the read vocabulary (singular: photo, video, audio,
+// document, link, copyright, ...), and a known kind MUST be accepted — not
+// errored, not silently dropped. F2 alone cannot catch a regression where the
+// allowlist is emptied or the check is made a no-op THAT ALSO accepts
+// everything (fail-open); this test catches the other half, where a known
+// kind is wrongly rejected or dropped.
 //
-// RED-on-revert: if the vocabulary fix accidentally removes the fail-closed
-// guard (e.g. by making the map empty or the check a no-op), ResolveSearchPost
-// succeeds → no error → this test fails.
-func TestF14_UnknownAttachmentKindStillFailsClosedAfterVocabFix(t *testing.T) {
-	var postCount int32
+// RED-on-revert: remove "copyright" from knownReadAttachmentKinds (or make
+// the allowlist check reject it) → ResolveSearchPost errors (or drops the
+// copyright attachment from content.Attachments) → the assertions fail.
+func TestF14_KnownReadSideKindPassesThroughAfterVocabFix(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{
-				"id": "9999",
+				"id": "8881",
 				"publication_when_type": 1,
 				"publication_how_type": 1,
 				"publication_where_type": 1,
 				"created_by": 7,
-				"texts": [{"text": "has mystery attachment", "source_id": 0}],
+				"texts": [{"text": "post with copyright", "source_id": 0}],
 				"attachments": [
-					{"type": "mystery_kind", "data": {"foo": "bar"}}
+					{"type": "copyright", "data": "https://vk.ru/wall-100_1"}
 				]
 			}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/posts":
-			atomic.AddInt32(&postCount, 1)
-			w.Write([]byte(`{"id":12345}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -2135,14 +2151,284 @@ func TestF14_UnknownAttachmentKindStillFailsClosedAfterVocabFix(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	_, err := c.ResolveSearchPost(context.Background(), 9999)
+	content, err := c.ResolveSearchPost(context.Background(), 8881)
+	if err != nil {
+		t.Fatalf("ResolveSearchPost with a known read-side kind (copyright): expected success, got %v — the allowlist must ACCEPT known kinds, not reject them (the vocabulary fix's positive half)", err)
+	}
+	// The copyright attachment must survive in content.Attachments, passed
+	// through as-is (singular type, not folded into the photos group).
+	var copyright *Attachment
+	for i := range content.Attachments {
+		if content.Attachments[i].Type == "copyright" {
+			copyright = &content.Attachments[i]
+			break
+		}
+	}
+	if copyright == nil {
+		t.Fatalf("content.Attachments = %+v, want a copyright entry present — a known read-side kind must be passed through, not dropped (the allowlist must not silently drop known kinds)", content.Attachments)
+	}
+	if got, ok := copyright.Data.(string); !ok || got != "https://vk.ru/wall-100_1" {
+		t.Errorf("copyright data = %v, want the original URL string passed through verbatim", copyright.Data)
+	}
+}
+
+// =========================================================================
+// F15-F19: round-3 falsification tests (MAJOR 1/2/4 + restored shims)
+// =========================================================================
+
+// F15 — an all-failed BATCH returns a PLAIN error (NOT *PartialPostError) and
+// a nil result. Assert the error TYPE, not just that an error came back: a
+// *PartialPostError with an empty Result.IDs would collapse the "some
+// succeeded" and "every post failed" outcomes the documented three-outcome
+// contract keeps distinct (see PartialPostError). The CLI `search rewrite`
+// path maps *PartialPostError → exit 2 (partial) and plain error → die →
+// exit 1; runImport exits 1 on all-failed via its own loop. A plain error
+// here makes BOTH CLI paths exit 1 (MAJOR 1).
+//
+// RED-on-revert: revert resolvePublishBatch to return &resp, &PartialPostError
+// on all-failed → errors.As(*PartialPostError) becomes true → the type
+// assertion below fails (the error IS *PartialPostError, which the test says
+// it must NOT be).
+func TestF15_AllFailedBatchReturnsPlainErrorNotPartial(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"x","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"boom"}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{11, 22},
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{1},
+	})
 	if err == nil {
-		t.Fatal("ResolveSearchPost with unknown attachment kind: expected an error, got nil — the vocabulary fix must NOT turn the fail-closed guard fail-open (an unknown kind must still error)")
+		t.Fatal("ImportSearchPost all-failed batch: expected a non-nil error, got nil")
 	}
-	if !strings.Contains(err.Error(), "mystery_kind") {
-		t.Errorf("error %q does not name the unknown kind \"mystery_kind\" — the operator must be told WHAT was rejected", err.Error())
+	// The critical assertion: the error must NOT be *PartialPostError.
+	var ppe *PartialPostError
+	if errors.As(err, &ppe) {
+		t.Fatalf("error is *PartialPostError (got %T) — an all-failed batch must return a PLAIN error so the three-outcome contract (nil=complete, *PartialPostError=partial, other=total) stays distinct; a caller type-asserting *PartialPostError would read \"some succeeded\" when nothing did: %v", err, err)
 	}
-	if got := atomic.LoadInt32(&postCount); got != 0 {
-		t.Fatalf("POST /posts count = %d, want 0 — an unknown attachment kind must error at RESOLVE time, before any publish request (the vocabulary fix must preserve fail-closed)", got)
+	// resp MUST be nil — the documented third outcome is "every post failed (resp is nil)".
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil — an all-failed batch must return a nil result (the documented total-failure outcome), not a *PostIDResponse carrying an empty IDs slice", resp)
+	}
+}
+
+// F16 — a single-id rewrite with Texts: []PostText{} (empty non-nil) preserves
+// the RESOLVED text on the wire. The batch+Texts broadcast guard tests
+// `len(overrideTexts) > 0`; the apply site MUST use the SAME predicate. Testing
+// `overrideTexts != nil` here would replace the resolved text with an empty
+// array, silently publishing a text-less post (MAJOR 2). Assert the text ON
+// THE WIRE, not the absence of an error.
+//
+// RED-on-revert: change the apply site back to `if overrideTexts != nil` →
+// content.Texts is overwritten with []PostText{} → the POST body texts is an
+// empty array → the assertion below fails.
+func TestF16_EmptyNonNilTextsPreservesResolvedText(t *testing.T) {
+	var postBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"42","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"ORIGINAL TEXT","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &postBody)
+			w.Write([]byte(`{"id":77001}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        42,
+		Texts:               []PostText{}, // empty non-nil — the batch idiom; MUST NOT wipe the resolved text
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{1},
+	})
+	if err != nil {
+		t.Fatalf("RewriteSearchPost: %v", err)
+	}
+	if resp == nil || resp.ID != 77001 {
+		t.Fatalf("resp = %+v, want ID 77001", resp)
+	}
+	// Assert the resolved text reached the wire (not an empty array).
+	texts, ok := postBody["texts"].([]interface{})
+	if !ok || len(texts) != 1 {
+		t.Fatalf("POST body texts = %v, want array of 1 — an empty non-nil Texts MUST NOT wipe the resolved text (MAJOR 2); the resolved \"ORIGINAL TEXT\" must reach the wire", postBody["texts"])
+	}
+	textMap, _ := texts[0].(map[string]interface{})
+	if textMap["text"] != "ORIGINAL TEXT" {
+		t.Fatalf("POST body texts[0].text = %v, want \"ORIGINAL TEXT\" — the resolved text must survive an empty non-nil Texts override (MAJOR 2)", textMap["text"])
+	}
+}
+
+// F17 — NoAttachments=true strips ALL attachments from the resolved content
+// before publishing. Deleting the two lines that honour it leaves the entire
+// suite green (MAJOR 4); this test goes RED on that deletion.
+//
+// RED-on-revert: remove `if noAttachments { content.Attachments = nil }` from
+// resolvePublishBatch → the resolved photo group is carried into POST /posts →
+// the POST body attachments is non-empty → the assertion below fails.
+func TestF17_NoAttachmentsStripsAttachmentsOnWire(t *testing.T) {
+	var postBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"55","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"text-only","source_id":0}],"attachments":[{"type":"photo","data":{"id":9,"url":"https://example.com/p.jpg"}}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &postBody)
+			w.Write([]byte(`{"id":88002}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        55,
+		Texts:               []PostText{{Text: "text-only", SourceID: 0}},
+		NoAttachments:       true,
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{1},
+	})
+	if err != nil {
+		t.Fatalf("RewriteSearchPost with NoAttachments: %v", err)
+	}
+	atts, ok := postBody["attachments"].([]interface{})
+	if !ok {
+		t.Fatalf("POST body attachments = %v, want a JSON array (empty)", postBody["attachments"])
+	}
+	if len(atts) != 0 {
+		t.Fatalf("POST body attachments = %v, want empty array — NoAttachments=true MUST strip ALL attachments from the resolved content before publishing (MAJOR 4); the resolved photo group reached the wire", atts)
+	}
+}
+
+// F18 — the three restored helper functions exist and DELEGATE: call each and
+// assert the MAPPED OUTPUT, not merely that it compiles. A shim that compiles
+// but returns a zero value (or does not delegate to the maintained grouper)
+// would pass a compile-only check and fail this test.
+//
+// RED-on-revert: make any shim return a zero value / not call
+// SearchPostEditAttachments → the mapped-output assertions fail.
+func TestF18_RestoredAttachmentHelpersDelegate(t *testing.T) {
+	edit := &SearchPostEditResponse{
+		Attachments: []Attachment{
+			{Type: "photo", Data: map[string]interface{}{"id": 101, "owner_id": -1}},
+			{Type: "video", Data: map[string]interface{}{"id": 202, "type": "video"}},
+			{Type: "copyright", Data: "https://vk.ru/wall-1_9"},
+		},
+	}
+
+	// SearchPostPhotos: the photos group (photo+video folded together), *Attachment.
+	photos := SearchPostPhotos(edit)
+	if photos == nil {
+		t.Fatal("SearchPostPhotos = nil, want a *Attachment (the photos group) — the post has a photo and a video")
+	}
+	if photos.Type != "photos" {
+		t.Fatalf("SearchPostPhotos.Type = %q, want \"photos\" (the grouper folds photo+video into one photos group)", photos.Type)
+	}
+	arr, ok := photos.Data.([]interface{})
+	if !ok || len(arr) != 2 {
+		t.Fatalf("SearchPostPhotos data = %v, want array of 2 (the photo + the video folded into the photos group)", photos.Data)
+	}
+
+	// SearchPostNonPhotoAttachments: the non-photo/video entries (copyright), []Attachment.
+	others := SearchPostNonPhotoAttachments(edit)
+	if len(others) != 1 {
+		t.Fatalf("SearchPostNonPhotoAttachments = %d entries, want 1 (the copyright; photo+video are in the photos group)", len(others))
+	}
+	if others[0].Type != "copyright" {
+		t.Errorf("SearchPostNonPhotoAttachments[0].Type = %q, want \"copyright\"", others[0].Type)
+	}
+
+	// SearchPostPhotos on a nil edit must not panic and must return nil.
+	if got := SearchPostPhotos(nil); got != nil {
+		t.Errorf("SearchPostPhotos(nil) = %v, want nil", got)
+	}
+	if got := SearchPostNonPhotoAttachments(nil); got != nil {
+		t.Errorf("SearchPostNonPhotoAttachments(nil) = %v, want nil", got)
+	}
+
+	// ScrapedPhotoAttachment: builds a photos group from SearchPostPhoto structs,
+	// delegating to SearchPostEditAttachments. The result is one {type:"photos"}
+	// attachment whose data is the array of promoted photo maps.
+	att := ScrapedPhotoAttachment([]SearchPostPhoto{
+		{ID: 303, OwnerID: -7},
+		{ID: 404, OwnerID: -8},
+	})
+	if att.Type != "photos" {
+		t.Fatalf("ScrapedPhotoAttachment.Type = %q, want \"photos\" (the grouper folds the singular photo entries into one photos group)", att.Type)
+	}
+	items, ok := att.Data.([]interface{})
+	if !ok || len(items) != 2 {
+		t.Fatalf("ScrapedPhotoAttachment data = %v, want array of 2 (one promoted map per SearchPostPhoto)", att.Data)
+	}
+	first, _ := items[0].(map[string]interface{})
+	if first["id"] != "303" || first["owner_id"] != -7 || first["type"] != "photo" {
+		t.Errorf("ScrapedPhotoAttachment data[0] = %v, want {id:\"303\", owner_id:-7, type:\"photo\"}", first)
+	}
+	// An empty input must produce a zero Attachment (no photos group), not panic.
+	if got := ScrapedPhotoAttachment(nil); got.Type != "" {
+		t.Errorf("ScrapedPhotoAttachment(nil).Type = %q, want \"\" (no photos → no group)", got.Type)
+	}
+}
+
+// TestIdsWireField_ZeroGuard pins the idsWireField zero guard: a
+// SearchPostID of 0 (a hand-built SourceContent not derived from a resolve
+// step) MUST send an EMPTY ids field, not "0". Sending "0" would reference a
+// non-existent scraped post id 0, which the server may reject or silently
+// mis-attribute. Deleting the `if searchPostID == 0 { return "" }` guard
+// survives the rest of the suite; this test goes RED on that deletion.
+//
+// RED-on-revert: remove the zero guard → idsWireField(0) returns "0" → the
+// unit assertion fails; and PublishPost with SearchPostID=0 sends ids:"0" on
+// the wire → the wire assertion fails.
+func TestIdsWireField_ZeroGuard(t *testing.T) {
+	if got := idsWireField(0); got != "" {
+		t.Fatalf("idsWireField(0) = %q, want \"\" — a zero SearchPostID must send an empty ids field, not \"0\" (which references a non-existent scraped post)", got)
+	}
+	if got := idsWireField(123); got != "123" {
+		t.Fatalf("idsWireField(123) = %q, want \"123\"", got)
+	}
+
+	// Wire-level: PublishPost with content.SearchPostID=0 sends ids:"".
+	var postBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/posts" {
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &postBody)
+			w.Write([]byte(`{"id":99001}`))
+			return
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.PublishPost(context.Background(), SourceContent{
+		SearchPostID: 0, // hand-built, not derived from a resolve step
+		Texts:        []PostText{{Text: "hand-built", SourceID: 0}},
+	}, PublishTarget{PublicationWhenType: 1, PublicationHowType: 1, SelectedPagesIDs: []int{1}})
+	if err != nil {
+		t.Fatalf("PublishPost: %v", err)
+	}
+	if got, ok := postBody["ids"].(string); !ok || got != "" {
+		t.Fatalf("POST body ids = %v, want \"\" — a zero SearchPostID must produce an empty ids field on the wire (the zero guard is load-bearing)", postBody["ids"])
 	}
 }
