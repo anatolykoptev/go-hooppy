@@ -31,3 +31,35 @@ So:
 
 The parsing logic lives in `scripts/issue_open_tasks.py` and is covered by
 `scripts/test_issue_open_tasks.py` (`python3 scripts/test_issue_open_tasks.py`).
+
+## Recording `testdata/live/` fixtures
+
+Fixtures in `testdata/live/` are the oracle for the unknown-field diagnostic
+(`unknown_field_diagnostic_test.go`) and the decode gate (`TestLiveFixtureDecodes`).
+They are **recorded from live authenticated GETs and then mechanically reduced**,
+never hand-authored from a field-name list. A hand-authored fixture encodes the
+same guess the struct encodes, so it agrees with a wrong struct and the gate
+stays green while the live call fails — that is how the cross-posting decode
+defect shipped (the fixture guessed `last_check_date` as a string; the API sends
+a number; the gate was green; `hooppy crossposting list` failed).
+
+The required way to add or refresh a fixture is `scripts/record_fixture.py`:
+
+```sh
+# Live: record from the API (requires HOOPPY_API_TOKEN)
+HOOPPY_API_TOKEN=... python3 scripts/record_fixture.py /cross-posting cross_postings.json
+
+# Offline: reduce a saved raw response (no API call, for reproduction)
+python3 scripts/record_fixture.py --from-file raw_response.json cross_postings.json
+```
+
+The reduction replaces every scalar with a type placeholder (`"str"`, `0`, `0.0`,
+`true`, `null`) while preserving key names, nesting, and JSON types. Arrays keep
+only their first element (recursed). Zero non-placeholder values are present, so
+no account data or credentials ship in the repo. The output has sorted keys and
+2-space indentation, matching the existing fixtures.
+
+After recording, update the struct to decode the fixture, update the
+`unmodelledBaselines` in `unknown_field_diagnostic_test.go` if the key set
+changed, and run `make preflight`. **Never edit a fixture to make a test pass** —
+the fixture is the oracle; fix the struct.

@@ -2109,10 +2109,24 @@ type CrossPosting struct {
 	SearchComments int `json:"search_comments"`
 	SearchReposts  int `json:"search_reposts"`
 	TakeAmount     int `json:"take_amount"`
-	// Check schedule timestamps. next_check_date/last_check_date arrive as
-	// strings ("09.01.2022, 04:10"); typed string, not int.
+	// Check schedule timestamps. next_check_date arrives as a string
+	// ("09.01.2022, 04:10"); last_check_date arrives as a number (unix epoch).
+	// Measured 2026-07-31 from a live authenticated GET: last_check_date was
+	// 0 (number), next_check_date was "str" (string). The prior hand-authored
+	// fixture guessed both as string — that guess caused the decode failure
+	// (cannot unmarshal number into string).
+	//
+	// UNMEASURED: search_start_date and search_stop_date are null on this
+	// account, so their type when the feature is configured is not verified.
+	// They are typed string (matching next_check_date's format) but a null
+	// in the fixture does NOT confirm that — do not read null as "verified
+	// string". Many other list-row fields are also null on this account
+	// (message_to_channel, message_to_community, posts_rewrite, posts_photo,
+	// etc.); their types are recorded in the diagnostic baseline from the
+	// recording, but a null baseline entry means "the server sent null on
+	// this account", not "the server always sends null".
 	NextCheckDate       string `json:"next_check_date,omitempty"`
-	LastCheckDate       string `json:"last_check_date,omitempty"`
+	LastCheckDate       int    `json:"last_check_date,omitempty"`
 	SearchStartDate     string `json:"search_start_date,omitempty"`
 	SearchStopDate      string `json:"search_stop_date,omitempty"`
 	SourceResourcesMode int    `json:"source_resources_mode,omitempty"`
@@ -2178,12 +2192,38 @@ type CrossPostingEditResponse struct {
 	SearchComments int `json:"search_comments"`
 	SearchReposts  int `json:"search_reposts"`
 	TakeAmount     int `json:"take_amount"`
-	// Check schedule timestamps (strings).
+	// Check schedule timestamps. next_check_date is a string (absent from the
+	// edit fixture on this account); last_check_date is a number (unix epoch,
+	// measured 2026-07-31). search_start_date/search_stop_date are strings.
 	NextCheckDate       string `json:"next_check_date,omitempty"`
-	LastCheckDate       string `json:"last_check_date,omitempty"`
+	LastCheckDate       int    `json:"last_check_date,omitempty"`
 	SearchStartDate     string `json:"search_start_date,omitempty"`
 	SearchStopDate      string `json:"search_stop_date,omitempty"`
 	SourceResourcesMode int    `json:"source_resources_mode,omitempty"`
+	// Newly-revealed keys (2026-07-31 recording): absent from the prior
+	// hand-authored fixture entirely, so nothing modelled them and the
+	// diagnostic could not see them.
+	//
+	// IsSearchStarted is a boolean — measured true on this account.
+	// ProjectID is a number — measured 0 on this account.
+	//
+	// PostsHashtags, PostsLinks, PostsTextModification are objects. They are
+	// modelled as json.RawMessage (opaque) because their sub-field shapes,
+	// while visible in the recording, may differ when the feature is fully
+	// configured — the recording is from one account and the sub-field types
+	// are not confirmed across accounts. RawMessage preserves the bytes for
+	// the round-trip without guessing the interior.
+	//
+	// UNMEASURED: posts_photo is null on this account, so its type when
+	// configured is not verified. Other fields that are 0 or "str" in the
+	// recording are measured for THIS account but may carry different
+	// values (not types) when configured — the types are stable, the values
+	// are not.
+	IsSearchStarted       bool            `json:"is_search_started"`
+	ProjectID             int             `json:"project_id"`
+	PostsHashtags         json.RawMessage `json:"posts_hashtags"`
+	PostsLinks            json.RawMessage `json:"posts_links"`
+	PostsTextModification json.RawMessage `json:"posts_text_modification"`
 }
 
 // UnmarshalJSON stashes the raw /edit body (lossless round-trip) then decodes

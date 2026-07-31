@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -370,8 +371,8 @@ func TestCrossPostingStatistics_AllZeroIsRealData_F4(t *testing.T) {
 	if !resp.HasData() {
 		t.Fatal("HasData = false for a non-empty statistics array with all-zero counters — zero found is a REAL measurement, not absent data (the live state today is all-zero counters; mistaking it for no data hides a configured-but-not-producing connection)")
 	}
-	if len(resp.Statistics) != 2 {
-		t.Errorf("Statistics len = %d, want 2", len(resp.Statistics))
+	if len(resp.Statistics) != 1 {
+		t.Errorf("Statistics len = %d, want 1 (the 2026-07-31 recorded fixture carries 1 row)", len(resp.Statistics))
 	}
 	for i, d := range resp.Statistics {
 		if d.PostsFoundAmount != 0 || d.PostsFilteredAmount != 0 || d.PostsDuplicatesAmount != 0 || d.PostsTakenAmount != 0 || d.Errors != 0 {
@@ -644,3 +645,193 @@ func TestCrossPostingEdit_MarshalJSON_RawVerbatim(t *testing.T) {
 // Ensure io import is used (some build configs warn on unused imports; the
 // 405 test path and others keep it live, but guard against a future trim).
 var _ = io.Discard
+
+// --- F1-F4: falsification tests for the cross-posting fixture/struct fix ---
+//
+// These tests pin the four properties the fix introduced. Each is structured
+// so that reverting the relevant change makes it go RED — a green test that
+// survives the revert it claims to pin is not a falsification test, it is
+// decoration.
+//
+// F1: reverting LastCheckDate to string makes the fixture-decode test RED.
+// F2: removing is_search_started from the struct makes the diagnostic report
+//     it as unmodelled (RED).
+// F3: a FlexInt field errors on non-{null, number, numeric string} input.
+// F4: the recorder script reproduces an existing recorded fixture byte-for-byte.
+
+// TestCrossPostingFix_F1_LastCheckDateIsNumber pins the type of last_check_date
+// as a number, not a string. The prior hand-authored fixture guessed string;
+// the live API sends a number (0, unix epoch); the decode failed with
+// "cannot unmarshal number into Go struct Field .last_check_date of type string".
+//
+// RED-on-revert: change LastCheckDate back to string in CrossPosting and this
+// test fails — the fixture sends a JSON number, a string field cannot receive
+// it, and json.Unmarshal returns *json.UnmarshalTypeError.
+func TestCrossPostingFix_F1_LastCheckDateIsNumber(t *testing.T) {
+	fixture := liveFixture(t, "cross_postings.json")
+	var resp CrossPostingsResponse
+	if err := json.Unmarshal(fixture, &resp); err != nil {
+		t.Fatalf("decode cross_postings.json: %v\n\nIf LastCheckDate was reverted to string, this is the exact defect: the fixture sends a number, the struct declares a string, encoding/json aborts the whole decode.", err)
+	}
+	if len(resp.List) == 0 {
+		t.Fatal("List is empty — fixture has no rows to test")
+	}
+	// The fixture's last_check_date is 0 (a JSON number). A string field would
+	// have failed above; an int field receives it. This assertion is redundant
+	// with the decode above but makes the intent explicit for a reader.
+	if resp.List[0].LastCheckDate != 0 {
+		t.Errorf("LastCheckDate = %d, want 0 (the fixture's placeholder value)", resp.List[0].LastCheckDate)
+	}
+}
+
+// TestCrossPostingFix_F1_EditLastCheckDateIsNumber pins the same property for
+// the /edit response, which has its own LastCheckDate field.
+func TestCrossPostingFix_F1_EditLastCheckDateIsNumber(t *testing.T) {
+	fixture := liveFixture(t, "cross_posting_edit.json")
+	var resp CrossPostingEditResponse
+	if err := json.Unmarshal(fixture, &resp); err != nil {
+		t.Fatalf("decode cross_posting_edit.json: %v\n\nIf LastCheckDate was reverted to string, this is the exact defect.", err)
+	}
+	if resp.LastCheckDate != 0 {
+		t.Errorf("LastCheckDate = %d, want 0 (the fixture's placeholder value)", resp.LastCheckDate)
+	}
+}
+
+// TestCrossPostingFix_F2_IsSearchStartedModelled pins that is_search_started
+// is modelled by the struct. The diagnostic walker (crossPostingEditWalker)
+// walks the /edit fixture against the struct; if is_search_started is removed
+// from the struct, the walker reports it as unmodelled and the diagnostic gate
+// (TestUnknownFieldDiagnostic) goes RED.
+//
+// This test is the direct, local assertion of that property: it decodes the
+// fixture and checks the field is populated. The diagnostic gate is the
+// indirect, structural assertion (it would catch ANY removed field, not just
+// this one).
+func TestCrossPostingFix_F2_IsSearchStartedModelled(t *testing.T) {
+	fixture := liveFixture(t, "cross_posting_edit.json")
+	var resp CrossPostingEditResponse
+	if err := json.Unmarshal(fixture, &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The fixture's is_search_started is true. If the field is removed from
+	// the struct, this line does not compile — which is a different signal
+	// (compile error) from the diagnostic gate (RED test). Both are valid;
+	// the compile error is the first line of defense, the diagnostic gate
+	// catches a field that compiles but is not in the struct's json tags.
+	if !resp.IsSearchStarted {
+		t.Error("IsSearchStarted = false, want true (the fixture's placeholder value)")
+	}
+}
+
+// TestCrossPostingFix_F2_ProjectIDModelled pins that project_id is modelled.
+func TestCrossPostingFix_F2_ProjectIDModelled(t *testing.T) {
+	fixture := liveFixture(t, "cross_posting_edit.json")
+	var resp CrossPostingEditResponse
+	if err := json.Unmarshal(fixture, &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The fixture's project_id is 0. We cannot distinguish "0 because modelled
+	// and the fixture sends 0" from "0 because not modelled and the zero value
+	// is 0" by value alone — the diagnostic gate does that (it walks the JSON
+	// key set against the struct's json tags). This test pins the compile-time
+	// presence of the field; the diagnostic gate pins the runtime coverage.
+	_ = resp.ProjectID
+}
+
+// TestCrossPostingFix_F3_FlexIntRejectsBadInput pins that FlexInt errors on
+// input that is not null, a JSON number, or a JSON numeric string. This is
+// the property that makes FlexInt safe to use for polymorphic fields: a shape
+// change (the API starts sending an object where it sent a number) is loud,
+// not a silent coerce to 0.
+//
+// RED-on-revert: if FlexInt.UnmarshalJSON is changed to silently accept any
+// input (e.g. storing the raw bytes without validation), these cases pass
+// where they should error — but the existing TestFlexInt_RoundTrip would
+// also catch the "abc" case. This test is the explicit pin for the contract.
+func TestCrossPostingFix_F3_FlexIntRejectsBadInput(t *testing.T) {
+	bad := []string{
+		`{"a":1}`, // object
+		`[1,2]`,   // array
+		`"abc"`,   // non-numeric string
+		`"1.5"`,   // non-integer string
+		`true`,    // boolean
+		`1.5`,     // non-integer number
+	}
+	for _, body := range bad {
+		var f FlexInt
+		if err := json.Unmarshal([]byte(body), &f); err == nil {
+			t.Errorf("FlexInt accepted %s with nil error — a non-{null, number, numeric string} input must error, not silently coerce", body)
+		}
+	}
+	// The legitimate inputs MUST still decode.
+	good := []string{`null`, `0`, `21`, `"21"`, `"0"`}
+	for _, body := range good {
+		var f FlexInt
+		if err := json.Unmarshal([]byte(body), &f); err != nil {
+			t.Errorf("FlexInt rejected legitimate input %s: %v", body, err)
+		}
+	}
+}
+
+// TestCrossPostingFix_F4_RecorderReproducesFixture pins that the fixture
+// recorder script (scripts/record_fixture.py) reproduces an existing recorded
+// fixture byte-for-byte from an un-reduced raw response. This is the property
+// that makes the recorder trustworthy: if the reducer changes, an existing
+// fixture would no longer reproduce, and this test catches that.
+//
+// The test synthesizes an un-reduced raw response (real values + a second
+// array element the reducer drops), runs the recorder in --from-file mode, and
+// compares the output to the committed fixture. RED-on-revert: if the reducer
+// changes its placeholder scheme (e.g. "str" → "string"), the output diverges.
+func TestCrossPostingFix_F4_RecorderReproducesFixture(t *testing.T) {
+	// Synthesize an un-reduced raw response for cross_posting_statistics.json.
+	// The reducer replaces scalars with placeholders and keeps only the first
+	// array element, so a two-element array with real values reduces to the
+	// committed one-element fixture.
+	raw := `{
+		"statistics": [
+			{
+				"date": "2026-07-31",
+				"errors": 3,
+				"posts_duplicates_amount": 5,
+				"posts_filtered_amount": 10,
+				"posts_found_amount": 20,
+				"posts_taken_amount": 2
+			},
+			{
+				"date": "2026-07-30",
+				"errors": 1,
+				"posts_duplicates_amount": 2,
+				"posts_filtered_amount": 3,
+				"posts_found_amount": 8,
+				"posts_taken_amount": 1
+			}
+		]
+	}`
+	tmpDir := t.TempDir()
+	rawPath := filepath.Join(tmpDir, "raw.json")
+	if err := os.WriteFile(rawPath, []byte(raw), 0644); err != nil {
+		t.Fatalf("write raw: %v", err)
+	}
+	// record_fixture.py writes to FIXTURE_DIR/<name> (constant "testdata/live")
+	// relative to CWD, so run from tmpDir and read from tmpDir/testdata/live/.
+	// The script path is resolved from the test's CWD (the repo root), not
+	// from tmpDir.
+	scriptPath, err := filepath.Abs(filepath.Join("scripts", "record_fixture.py"))
+	if err != nil {
+		t.Fatalf("resolve script path: %v", err)
+	}
+	cmd := exec.Command("python3", scriptPath, "--from-file", rawPath, "reduced.json", "--force")
+	cmd.Dir = tmpDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("record_fixture.py: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Join(tmpDir, "testdata", "live", "reduced.json"))
+	if err != nil {
+		t.Fatalf("read reduced output: %v", err)
+	}
+	want := liveFixture(t, "cross_posting_statistics.json")
+	if string(got) != string(want) {
+		t.Errorf("recorder output does not match committed fixture:\n--- got\n%s\n--- want\n%s", got, want)
+	}
+}

@@ -7,14 +7,6 @@
       "posts_filtered_amount": 0,
       "posts_found_amount": 0,
       "posts_taken_amount": 0
-    },
-    {
-      "date": "str",
-      "errors": 0,
-      "posts_duplicates_amount": 0,
-      "posts_filtered_amount": 0,
-      "posts_found_amount": 0,
-      "posts_taken_amount": 0
     }
   ]
 }
