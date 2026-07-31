@@ -122,6 +122,7 @@ var retryPolicies = map[string]struct {
 	"GetParsingForm":                          {retryAllowed, false},
 	"StartParsing":                            {retryNever, true},
 	"StopParsing":                             {retryAllowed, false},
+	"StopParsingAndConfirm":                   {retryComposite, false}, // DELETE (StopParsing, retryAllowed) + GET oracle (GetParsingForm, retryAllowed)
 	"GetSearchPostEdit":                       {retryAllowed, false},
 	"ResolveSearchPost":                       {retryComposite, false}, // delegates to GetSearchPostEdit (retryAllowed) + local mapping
 	"PublishPost":                             {retryNever, true},      // POST /posts creates — doPOST never retries

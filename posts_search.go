@@ -490,8 +490,110 @@ func (c *Client) StartParsing(ctx context.Context, payload ParsingStartPayload) 
 //
 // UNDOCUMENTED: DELETE /posts-search/parsing/stop is not in the public
 // OpenAPI spec.
+//
+// The response body IS read (decoded into a stopResponse) so the universal
+// success gate (checkSuccess, success_gate.go) fires on a 2xx carrying an
+// explicit {"success":false} — the same family as PR #134. The prior form
+// passed out=nil, so client.do returned after the status check without
+// reading the body, and a 2xx success:false was swallowed as a nil error.
+// stopResponse is unexported: it exists only to make client.do read the body
+// so the gate runs; callers who need the OBSERVED state (did the parse
+// actually stop?) use StopParsingAndConfirm, which re-reads the oracle below.
 func (c *Client) StopParsing(ctx context.Context) error {
-	return c.doDELETE(ctx, pathPostsSearchParseStop, nil, true)
+	var resp stopResponse
+	return c.doDELETE(ctx, pathPostsSearchParseStop, &resp, true)
+}
+
+// stopResponse is the decode target for DELETE /posts-search/parsing/stop.
+// It exists so client.do reads the body and the universal success gate
+// (checkSuccess) runs — a 2xx {"success":false} becomes a *SuccessFalseError
+// instead of a swallowed nil. The decoded Success field itself is NOT the
+// evidence the operation happened: the server answers {"success":true} for
+// both the working /stop path and the suffix-less sibling that cancels
+// nothing (measured, issue #94), and a stop is asynchronous server-side
+// (measured ~5s between stop-sent and is_parsing_in_progress going false —
+// see StopParsing's doc comment). So Success:true means only "the server
+// accepted the request", not "the parse is idle". The OBSERVED state comes
+// from GetParsingForm's is_parsing_in_progress via StopParsingAndConfirm.
+type stopResponse struct {
+	Success bool `json:"success"`
+}
+
+// StopParsingResult is the OBSERVED parsing state after a stop request, read
+// from the working oracle (GetParsingForm's is_parsing_in_progress), NOT from
+// the DELETE's own success body. See StopParsingAndConfirm for why the DELETE
+// body is not the evidence.
+//
+// IsParsingInProgress is the oracle's value after the DELETE. Stopped (the
+// convenience the CLI/MCP report) is its negation.
+//
+// ConfirmErr is non-empty when the DELETE itself succeeded (the stop request
+// was accepted) but the oracle re-read failed — the stop MAY have taken
+// effect, only the confirmation read failed. A caller MUST NOT report success
+// when ConfirmErr is non-empty: claiming the parse stopped without having
+// observed it is exactly the defect StopParsingAndConfirm exists to close
+// (issue #114 — the command announced success without ever reading what the
+// server said). Report "stop accepted, status unconfirmed" instead.
+type StopParsingResult struct {
+	IsParsingInProgress bool   `json:"is_parsing_in_progress"`
+	ConfirmErr          string `json:"confirm_error,omitempty"`
+}
+
+// Stopped reports whether the oracle observed the parse as idle after the
+// stop request. It is false when the parse is still running OR when the
+// confirmation re-read failed (ConfirmErr non-empty) — in both cases the
+// command must not claim the parse stopped.
+func (r *StopParsingResult) Stopped() bool {
+	return !r.IsParsingInProgress && r.ConfirmErr == ""
+}
+
+// StopParsingAndConfirm issues the cancel (DELETE /posts-search/parsing/stop)
+// and then re-reads the working oracle (GetParsingForm) to report the
+// OBSERVED parsing state — not the DELETE's own {"success":true} body.
+//
+// WHY THE ORACLE, NOT THE DELETE BODY (issue #114). StopParsing's doc comment
+// measures that the server answers {"success":true} for a DELETE that cancels
+// nothing (the suffix-less sibling) and that a real stop is asynchronous
+// (~5s between stop-sent and is_parsing_in_progress going false). So a 2xx
+// success:true is "the server accepted the request", not "the parse is idle".
+// The prior CLI/MCP code printed {"success":true} after a nil error from
+// StopParsing(out=nil) — the body was never read, and even when it is read a
+// success:true does not mean the parse stopped. The oracle
+// (is_parsing_in_progress) is the thing that was supposed to change; observing
+// it is the only report that cannot claim more than it knows.
+//
+// THE ASYNC GAP. Because the stop is asynchronous, an immediate re-read after
+// a stop that WILL succeed can still report is_parsing_in_progress=true. This
+// is HONEST, not a false failure: at the moment of the read the parse IS
+// still running. The command reports "stop accepted, still in progress" and
+// the operator re-runs 'search status' to confirm the transition. This is
+// preferred over claiming success on the DELETE body alone, which would
+// announce a stop that never happened when the server's success:true was a
+// lie (the measured suffix-less-sibling case). A polling loop that waited for
+// idle would claim to know the stop will eventually take effect — more than
+// the single read knows — so a single immediate re-read is the chosen shape.
+//
+// ERROR CONTRACT. A non-nil error means the DELETE itself failed (transport
+// error, non-2xx, or a 2xx {"success":false} caught by the universal gate);
+// the stop request did not reach a decided-success state. A nil error with
+// ConfirmErr non-empty means the DELETE succeeded but the oracle re-read
+// failed — the stop may have worked, only confirmation failed; report it as
+// "unconfirmed", never as success. A nil error with ConfirmErr empty means
+// the oracle was read; IsParsingInProgress is the observed state.
+func (c *Client) StopParsingAndConfirm(ctx context.Context) (*StopParsingResult, error) {
+	if err := c.StopParsing(ctx); err != nil {
+		return nil, err
+	}
+	form, err := c.GetParsingForm(ctx)
+	if err != nil {
+		// The DELETE succeeded (StopParsing returned nil above); only the
+		// confirmation re-read failed. Surface this distinctly so the caller
+		// can report "stop accepted, status unconfirmed" instead of either
+		// claiming success or reporting a generic error that implies the
+		// stop itself failed.
+		return &StopParsingResult{ConfirmErr: err.Error()}, nil
+	}
+	return &StopParsingResult{IsParsingInProgress: form.IsParsingInProgress}, nil
 }
 
 // GetSearchPostEdit returns a scraped post's data in a format suitable for
@@ -1016,6 +1118,16 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	if err != nil {
 		return nil, err
 	}
+	// Converse guard (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it. RewriteSearchPost carries
+	// payload.SchedulesIDs into the PublishTarget below and PublishPost
+	// marshals it onto POST /posts, so without this guard SchedulesIDs +
+	// when_type!=3 reaches the wire under a publish-now/at-time intent. The
+	// CLI builder guard does not protect an external consumer of this public
+	// module; this is the layer below it.
+	if len(payload.SchedulesIDs) > 0 && payload.PublicationWhenType != 3 {
+		return nil, fmt.Errorf("hooppy: RewriteSearchPost: schedules_ids is set but publication_when_type=%d (not 3) — schedules target the by-schedule queue and are silently dropped or contradicted under other when-types; pass publication_when_type=3 to queue by schedule, or clear schedules_ids to publish as when-type %d intends", payload.PublicationWhenType, payload.PublicationWhenType)
+	}
 	target := PublishTarget{
 		PublicationWhenType: payload.PublicationWhenType,
 		PublicationHowType:  payload.PublicationHowType,
@@ -1169,6 +1281,16 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 	if err != nil {
 		return nil, err
 	}
+	// Converse guard (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it. Import carries
+	// payload.SchedulesIDs into the PublishTarget below unconditionally, so
+	// without this guard a library consumer calling ImportSearchPost directly
+	// with SchedulesIDs + when_type=1 sends both intents onto the wire and the
+	// server picks one. The CLI builder guard does not protect an external
+	// consumer of this public module; this is the layer below it.
+	if len(payload.SchedulesIDs) > 0 && payload.PublicationWhenType != 3 {
+		return nil, fmt.Errorf("hooppy: ImportSearchPost: schedules_ids is set but publication_when_type=%d (not 3) — schedules target the by-schedule queue and are sent alongside a publish-now/at-time intent, which the server resolves on its own; pass publication_when_type=3 to queue by schedule, or clear schedules_ids to publish as when-type %d intends", payload.PublicationWhenType, payload.PublicationWhenType)
+	}
 	target := PublishTarget{
 		PublicationWhenType: payload.PublicationWhenType,
 		PublicationHowType:  payload.PublicationHowType,
@@ -1220,6 +1342,16 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 	}
 	if payload.SearchPostID == 0 {
 		return nil, fmt.Errorf("hooppy: CopySearchPost: SearchPostID is required (the scalar scraped post id to copy); use ImportSearchPost for the same behaviour under a non-deprecated name")
+	}
+	// Converse guard (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it. The shim carries
+	// payload.SchedulesIDs into the PublishTarget below, so without this guard
+	// SchedulesIDs + when_type!=3 reaches POST /posts under a publish-now/
+	// at-time intent — the historical PUT /posts/copy guard, preserved across
+	// the collapse onto resolve+publish. The CLI guard does not protect an
+	// external consumer of this public module; this is the layer below it.
+	if len(payload.SchedulesIDs) > 0 && payload.PublicationWhenType != 3 {
+		return nil, fmt.Errorf("hooppy: CopySearchPost: schedules_ids is set but publication_when_type=%d (not 3) — schedules target the by-schedule queue and are silently dropped or contradicted under other when-types; pass publication_when_type=3 to queue by schedule, or clear schedules_ids to publish as when-type %d intends", payload.PublicationWhenType, payload.PublicationWhenType)
 	}
 	// Delegate to the same resolve+publish path ImportSearchPost uses. This
 	// is a single-post path (SearchPostID scalar), so resolvePublishBatch

@@ -1,8 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/anatolykoptev/go-hooppy"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // TestParseOrderedIDListStr_Strict verifies the MCP strict parser for
@@ -209,4 +214,254 @@ func TestBuildRewriteSearchPostPayload_BatchTextRefusal(t *testing.T) {
 			t.Errorf("Texts = %v, want [{hello 0}]", p.Texts)
 		}
 	})
+}
+
+// TestBuildCopySearchPostPayload_SchedulesWhenTypeGuard and
+// TestBuildRewriteSearchPostPayload_SchedulesWhenTypeGuard are the table tests
+// that close finding 2: all four MCP contradiction guards (copy + rewrite,
+// each the when_type=3+empty and the schedules+non-3 pair) were ungated —
+// deleting both contradiction guards left `go build ./...` clean and
+// `go test ./cmd/hooppy-mcp/` green (proven by mutation). The copy handler's
+// validation was inline and unreachable from a test; it is now extracted into
+// buildCopySearchPostPayload so it can be tested at all.
+//
+// Each table covers BOTH directions so neither guard can be satisfied by
+// breaking its pair:
+//   - when_type 1 + schedules → error (the contradiction guard)
+//   - when_type 3 + schedules → SchedulesIDs populated (the _OK pair)
+//
+// F8 RED-on-revert: delete the contradiction guards from both builders and the
+// "when_type 1 + schedules → error" cases return a payload with err == nil →
+// these assertions fail. (This exact mutation is green today.)
+
+func TestBuildCopySearchPostPayload_SchedulesWhenTypeGuard(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        copySearchPostInput
+		wantErr   bool
+		errSub    string
+		wantSched []int
+	}{
+		{
+			"when_type 1 + schedules → error (contradiction guard)",
+			copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SchedulesIDs: "10,11"},
+			true, "publication_when_type=3", nil,
+		},
+		{
+			"when_type 3 + schedules → SchedulesIDs populated (_OK pair)",
+			copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: "10,11"},
+			false, "", []int{10, 11},
+		},
+		{
+			"when_type 3 + no schedules → error (existing converse guard)",
+			copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: ""},
+			true, "publication_when_type=3", nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := buildCopySearchPostPayload(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("buildCopySearchPostPayload(%+v) = %+v, nil — want an error (the contradiction guard must refuse schedules with a non-schedule when-type; F8 mutation is green without this)", tc.in, p)
+				}
+				if !strings.Contains(err.Error(), "schedules") {
+					t.Errorf("error must name schedules, got: %v", err)
+				}
+				if tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
+					t.Errorf("error must contain %q, got: %v", tc.errSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildCopySearchPostPayload(%+v): %v", tc.in, err)
+			}
+			if !sliceEq(p.SchedulesIDs, tc.wantSched) {
+				t.Errorf("SchedulesIDs = %v, want %v — schedules must reach the payload under when-type 3 (the _OK pair stops the contradiction guard from refusing ALL schedules)", p.SchedulesIDs, tc.wantSched)
+			}
+		})
+	}
+}
+
+func TestBuildRewriteSearchPostPayload_SchedulesWhenTypeGuard(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        rewriteSearchPostInput
+		wantErr   bool
+		errSub    string
+		wantSched []int
+	}{
+		{
+			"when_type 1 + schedules → error (contradiction guard)",
+			rewriteSearchPostInput{SearchPostID: 2001, Text: "hello", PublicationWhenType: 1, SchedulesIDs: "10,11"},
+			true, "publication_when_type=3", nil,
+		},
+		{
+			"when_type 3 + schedules → SchedulesIDs populated (_OK pair)",
+			rewriteSearchPostInput{SearchPostID: 2001, Text: "hello", PublicationWhenType: 3, SchedulesIDs: "10,11"},
+			false, "", []int{10, 11},
+		},
+		{
+			"when_type 3 + no schedules → error (existing converse guard)",
+			rewriteSearchPostInput{SearchPostID: 2001, Text: "hello", PublicationWhenType: 3, SchedulesIDs: ""},
+			true, "publication_when_type=3", nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := buildRewriteSearchPostPayload(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("buildRewriteSearchPostPayload(%+v) = %+v, nil — want an error (the contradiction guard must refuse schedules with a non-schedule when-type; F8 mutation is green without this)", tc.in, p)
+				}
+				if !strings.Contains(err.Error(), "schedules") {
+					t.Errorf("error must name schedules, got: %v", err)
+				}
+				if tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
+					t.Errorf("error must contain %q, got: %v", tc.errSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildRewriteSearchPostPayload(%+v): %v", tc.in, err)
+			}
+			if !sliceEq(p.SchedulesIDs, tc.wantSched) {
+				t.Errorf("SchedulesIDs = %v, want %v — schedules must reach the payload under when-type 3", p.SchedulesIDs, tc.wantSched)
+			}
+		})
+	}
+}
+
+// F11 — the MCP stop path's three arms. Round 2 of the PR #138 review found
+// this was the one change in the branch that nothing gated: reverting the
+// in-progress arm to errResult left all three packages green, and a grep for
+// StopParsing across the MCP tests returned nothing at all.
+//
+// The in-progress arm is the load-bearing one. An LLM agent reads IsError as
+// "retry", and a retried stop cancels a job started in the interim
+// (posts_search.go:485-489), so reporting a still-settling stop as a failure
+// is how the tool destroys work it was not asked to touch.
+func TestStopParsingResult_ThreeArms_F11(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		res         hooppy.StopParsingResult
+		wantIsError bool
+		wantSuccess bool
+		wantInProg  bool
+	}{
+		{
+			name:        "idle after stop — success",
+			res:         hooppy.StopParsingResult{IsParsingInProgress: false},
+			wantIsError: false,
+			wantSuccess: true,
+			wantInProg:  false,
+		},
+		{
+			name:        "still in progress — a STATE, never an error",
+			res:         hooppy.StopParsingResult{IsParsingInProgress: true},
+			wantIsError: false,
+			wantSuccess: false,
+			wantInProg:  true,
+		},
+		{
+			name:        "confirmation failed — a real error",
+			res:         hooppy.StopParsingResult{ConfirmErr: "status read failed"},
+			wantIsError: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := stopParsingResult(&tc.res)
+			if err != nil {
+				t.Fatalf("stopParsingResult returned a transport error: %v", err)
+			}
+			if got.IsError != tc.wantIsError {
+				t.Fatalf("IsError = %v, want %v — an agent reads IsError as 'retry the stop', and a retried stop cancels a job started in the interim (posts_search.go:485-489)", got.IsError, tc.wantIsError)
+			}
+			if tc.wantIsError {
+				return
+			}
+			var payload map[string]interface{}
+			if len(got.Content) == 0 {
+				t.Fatalf("no content in result")
+			}
+			tc2, ok := got.Content[0].(*mcp.TextContent)
+			if !ok {
+				t.Fatalf("content[0] is %T, want *mcp.TextContent", got.Content[0])
+			}
+			if err := json.Unmarshal([]byte(tc2.Text), &payload); err != nil {
+				t.Fatalf("result body is not JSON: %v\n%s", err, tc2.Text)
+			}
+			if payload["success"] != tc.wantSuccess {
+				t.Errorf("success = %v, want %v", payload["success"], tc.wantSuccess)
+			}
+			if payload["is_parsing_in_progress"] != tc.wantInProg {
+				t.Errorf("is_parsing_in_progress = %v, want %v — the agent needs the STATE to decide between polling parsing_status and re-stopping", payload["is_parsing_in_progress"], tc.wantInProg)
+			}
+		})
+	}
+}
+
+// F12 — publication_when_type outside {1,2,3} is refused, and 0 in particular.
+//
+// 0 is not an exotic input on this surface: it is the Go zero value an agent
+// produces by OMITTING the field, and the payload switch routes the default
+// case into publish-to-pages-NOW. So the omitted-field path on an
+// irreversible publishing tool was the irreversible path. The CLI closed the
+// same hole by moving its flag default from 1 to 3; MCP has no default to
+// move, so it refuses instead.
+//
+// Sharper while #143 is open: these two tools register with an OPEN schema,
+// so the SDK never tells the agent the field is required.
+func TestBuildPayloads_RejectInvalidWhenType_F12(t *testing.T) {
+	for _, wt := range []int{0, 4, -1} {
+		t.Run(fmt.Sprintf("copy_when_type_%d", wt), func(t *testing.T) {
+			_, err := buildCopySearchPostPayload(copySearchPostInput{
+				SearchPostID:        2001,
+				PublicationWhenType: wt,
+				SelectedPagesIDs:    "123",
+			})
+			if err == nil {
+				t.Fatalf("publication_when_type=%d was accepted — an out-of-range when-type must not fall through to the publish-now branch", wt)
+			}
+			if !strings.Contains(err.Error(), "publication_when_type") {
+				t.Errorf("error should name publication_when_type so an agent can correct it, got: %v", err)
+			}
+		})
+		t.Run(fmt.Sprintf("rewrite_when_type_%d", wt), func(t *testing.T) {
+			_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{
+				SearchPostID:        2001,
+				Text:                "x",
+				PublicationWhenType: wt,
+				SelectedPagesIDs:    "123",
+			})
+			if err == nil {
+				t.Fatalf("publication_when_type=%d was accepted — an out-of-range when-type must not fall through to the publish-now branch", wt)
+			}
+		})
+	}
+}
+
+// TestBuildPayloads_AcceptValidWhenType is the pair to F12: 1, 2 and 3 still
+// build. Without it, F12 is satisfied by a check that refuses everything.
+func TestBuildPayloads_AcceptValidWhenType(t *testing.T) {
+	cases := []struct {
+		wt  int
+		in  copySearchPostInput
+		rin rewriteSearchPostInput
+	}{
+		{1, copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SelectedPagesIDs: "123"},
+			rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 1, SelectedPagesIDs: "123"}},
+		{2, copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 2, SelectedPagesIDs: "123", PublishDate: "01.01.2027", PublishHours: "10", PublishMinutes: "00"},
+			rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 2, SelectedPagesIDs: "123", PublishDate: "01.01.2027", PublishHours: "10", PublishMinutes: "00"}},
+		{3, copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: "55"},
+			rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 3, SchedulesIDs: "55"}},
+	}
+	for _, tc := range cases {
+		if _, err := buildCopySearchPostPayload(tc.in); err != nil {
+			t.Errorf("copy when_type=%d rejected: %v", tc.wt, err)
+		}
+		if _, err := buildRewriteSearchPostPayload(tc.rin); err != nil {
+			t.Errorf("rewrite when_type=%d rejected: %v", tc.wt, err)
+		}
+	}
 }
