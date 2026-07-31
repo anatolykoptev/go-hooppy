@@ -214,3 +214,119 @@ func TestBuildRewriteSearchPostPayload_BatchTextRefusal(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildCopySearchPostPayload_SchedulesWhenTypeGuard and
+// TestBuildRewriteSearchPostPayload_SchedulesWhenTypeGuard are the table tests
+// that close finding 2: all four MCP contradiction guards (copy + rewrite,
+// each the when_type=3+empty and the schedules+non-3 pair) were ungated —
+// deleting both contradiction guards left `go build ./...` clean and
+// `go test ./cmd/hooppy-mcp/` green (proven by mutation). The copy handler's
+// validation was inline and unreachable from a test; it is now extracted into
+// buildCopySearchPostPayload so it can be tested at all.
+//
+// Each table covers BOTH directions so neither guard can be satisfied by
+// breaking its pair:
+//   - when_type 1 + schedules → error (the contradiction guard)
+//   - when_type 3 + schedules → SchedulesIDs populated (the _OK pair)
+//
+// F8 RED-on-revert: delete the contradiction guards from both builders and the
+// "when_type 1 + schedules → error" cases return a payload with err == nil →
+// these assertions fail. (This exact mutation is green today.)
+
+func TestBuildCopySearchPostPayload_SchedulesWhenTypeGuard(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        copySearchPostInput
+		wantErr   bool
+		errSub    string
+		wantSched []int
+	}{
+		{
+			"when_type 1 + schedules → error (contradiction guard)",
+			copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SchedulesIDs: "10,11"},
+			true, "when-type 3", nil,
+		},
+		{
+			"when_type 3 + schedules → SchedulesIDs populated (_OK pair)",
+			copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: "10,11"},
+			false, "", []int{10, 11},
+		},
+		{
+			"when_type 3 + no schedules → error (existing converse guard)",
+			copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: ""},
+			true, "publication_when_type=3", nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := buildCopySearchPostPayload(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("buildCopySearchPostPayload(%+v) = %+v, nil — want an error (the contradiction guard must refuse schedules with a non-schedule when-type; F8 mutation is green without this)", tc.in, p)
+				}
+				if !strings.Contains(err.Error(), "schedules") {
+					t.Errorf("error must name schedules, got: %v", err)
+				}
+				if tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
+					t.Errorf("error must contain %q, got: %v", tc.errSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildCopySearchPostPayload(%+v): %v", tc.in, err)
+			}
+			if !sliceEq(p.SchedulesIDs, tc.wantSched) {
+				t.Errorf("SchedulesIDs = %v, want %v — schedules must reach the payload under when-type 3 (the _OK pair stops the contradiction guard from refusing ALL schedules)", p.SchedulesIDs, tc.wantSched)
+			}
+		})
+	}
+}
+
+func TestBuildRewriteSearchPostPayload_SchedulesWhenTypeGuard(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        rewriteSearchPostInput
+		wantErr   bool
+		errSub    string
+		wantSched []int
+	}{
+		{
+			"when_type 1 + schedules → error (contradiction guard)",
+			rewriteSearchPostInput{SearchPostID: 2001, Text: "hello", PublicationWhenType: 1, SchedulesIDs: "10,11"},
+			true, "when-type 3", nil,
+		},
+		{
+			"when_type 3 + schedules → SchedulesIDs populated (_OK pair)",
+			rewriteSearchPostInput{SearchPostID: 2001, Text: "hello", PublicationWhenType: 3, SchedulesIDs: "10,11"},
+			false, "", []int{10, 11},
+		},
+		{
+			"when_type 3 + no schedules → error (existing converse guard)",
+			rewriteSearchPostInput{SearchPostID: 2001, Text: "hello", PublicationWhenType: 3, SchedulesIDs: ""},
+			true, "publication_when_type=3", nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := buildRewriteSearchPostPayload(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("buildRewriteSearchPostPayload(%+v) = %+v, nil — want an error (the contradiction guard must refuse schedules with a non-schedule when-type; F8 mutation is green without this)", tc.in, p)
+				}
+				if !strings.Contains(err.Error(), "schedules") {
+					t.Errorf("error must name schedules, got: %v", err)
+				}
+				if tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
+					t.Errorf("error must contain %q, got: %v", tc.errSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildRewriteSearchPostPayload(%+v): %v", tc.in, err)
+			}
+			if !sliceEq(p.SchedulesIDs, tc.wantSched) {
+				t.Errorf("SchedulesIDs = %v, want %v — schedules must reach the payload under when-type 3", p.SchedulesIDs, tc.wantSched)
+			}
+		})
+	}
+}

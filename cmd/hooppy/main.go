@@ -1183,6 +1183,16 @@ func parseIntList(s string) []int {
 	return ids
 }
 
+// errSchedulesWithoutWhenType3 is the shared "schedules given with a
+// non-schedule when-type" refusal for the CLI builders. flagName is the
+// surface's flag name ("--schedules") so the wording cannot drift between the
+// copy, rewrite, and import builders. The MCP carries an identical helper
+// parameterised with "schedules_ids"; the two surfaces share the same wording
+// via the same flagName contract.
+func errSchedulesWithoutWhenType3(whenType int, flagName string) error {
+	return fmt.Errorf("%s is only meaningful with when-type 3 (by schedule); with when-type %d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass when-type 3 to queue by schedule, or drop %s to publish as when-type %d intends", flagName, whenType, flagName, whenType)
+}
+
 // buildCopyPayload validates search copy flags and builds the payload. copy
 // does NOT support --post-ids: PUT /posts/copy takes a singular
 // search_post_id int, and the batch slice is silently dropped on that
@@ -1212,7 +1222,7 @@ func buildCopyPayload(postID, whenType, howType int, pages, schedules, date, hou
 	// before any request so the operator cannot reach the live publishing
 	// queue with a payload whose meaning differs from their intent.
 	if len(schedIDs) > 0 && whenType != 3 {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("--schedules is only meaningful with --when-type 3 (by schedule); with --when-type %d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass --when-type 3 to queue by schedule, or drop --schedules to publish as --when-type %d intends", whenType, whenType)
+		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(whenType, "--schedules")
 	}
 	pageIDs, err := parseIntListErr(pages)
 	if err != nil {
@@ -1288,7 +1298,7 @@ func buildRewritePayload(postID int, postIDs, text string, whenType, howType int
 	// an explicit --when-type 1/2) silently drops the schedules and publishes
 	// to pages NOW — an irreversible publish the caller did not ask for.
 	if len(schedIDs) > 0 && whenType != 3 {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("--schedules is only meaningful with --when-type 3 (by schedule); with --when-type %d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass --when-type 3 to queue by schedule, or drop --schedules to publish as --when-type %d intends", whenType, whenType)
+		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(whenType, "--schedules")
 	}
 	pageIDs, err := parseIntListErr(pages)
 	if err != nil {
@@ -1355,7 +1365,7 @@ func buildImportPayload(postID int, postIDs string, whenType, howType int, sched
 	// a payload naming two contradictory intents and picks one. Refuse before
 	// the request rather than let it publish under a meaning nobody chose.
 	if len(schedIDs) > 0 && whenType != 3 {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("--schedules is only meaningful with --when-type 3 (by schedule); with --when-type %d the schedules are sent alongside a publish-now/at-time intent and the server resolves the contradiction on its own (issue #111) — pass --when-type 3 to queue by schedule, or drop --schedules to publish as --when-type %d intends", whenType, whenType)
+		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(whenType, "--schedules")
 	}
 	idList, err := parseIntListErr(postIDs)
 	if err != nil {
@@ -1409,7 +1419,7 @@ func registerDoctor(root *cobra.Command) {
 	var sinceDays int
 	var exitCode bool
 	cmd.Flags().IntVar(&sinceDays, "since", 7, "only report errors whose operation_date falls within the last N days. 0 = no window (all dated rows included); negative values are rejected. Unparseable-date rows are reported REGARDLESS of --since (they cannot be dated, so the window check does not apply). NOTE: the window is computed in the HOST's local timezone (time.Now), but the vendor renders operation_date in the ACCOUNT's timezone (a user setting on hooppy.ru, not exposed by the API). If the two differ, the window boundary can be off by the offset between them — a row the account considers inside the window may be excluded, or vice versa, by up to that offset.")
-	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error signal is present: grouped errors inside the --since window, unparseable-date rows (reported regardless of --since because they cannot be dated), or a truncated walk (walk_incomplete). Exit 0 otherwise (for cron / pre-flight). NOTE: doctor uses exit 1 for ALL its error signals (including walk_incomplete); exit 2 is queue-scoped (`schedules queue` — partial/truncated or page overrun), NOT used by doctor.")
+	cmd.Flags().BoolVar(&exitCode, "exit-code", true, "exit 1 if any error signal is present: grouped errors inside the --since window, unparseable-date rows (reported regardless of --since because they cannot be dated), or a truncated walk (walk_incomplete). Exit 0 otherwise (for cron / pre-flight). NOTE: doctor uses exit 1 for ALL its error signals (including walk_incomplete); exit 2 is the partial-outcome code — used by `schedules queue` (partial/truncated or page overrun) and `search stop` (DELETE accepted but parse still in progress, or accepted but confirmation re-read failed) — NOT used by doctor.")
 	cmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
 		os.Exit(runDoctor(context.Background(), c, os.Stdout, os.Stderr, sinceDays, exitCode))

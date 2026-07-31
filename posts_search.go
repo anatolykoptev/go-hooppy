@@ -638,6 +638,18 @@ func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPaylo
 	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
 		return nil, fmt.Errorf("hooppy: CopySearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
 	}
+	// Converse guard (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it (the payload switch in the
+	// CLI sets SchedulesIDs only in case 3, but a library consumer sets it
+	// directly). This method marshals the payload wholesale, so without
+	// this guard SchedulesIDs + when_type!=3 reaches the wire under a
+	// publish-now/at-time intent — the server is handed a payload naming
+	// two contradictory intents and picks one. Refuse before any request.
+	// The CLI guard does not protect an external consumer of this public
+	// module; this is the layer below it.
+	if len(payload.SchedulesIDs) > 0 && payload.PublicationWhenType != 3 {
+		return nil, fmt.Errorf("hooppy: CopySearchPost: schedules_ids is set but publication_when_type=%d (not 3) — schedules target the by-schedule queue and are silently dropped or contradicted under other when-types; pass publication_when_type=3 to queue by schedule, or clear schedules_ids to publish as when-type %d intends", payload.PublicationWhenType, payload.PublicationWhenType)
+	}
 	// Before snapshot for slot recovery: when when_type=3, snapshot the
 	// schedule's posts BEFORE the create so fillScheduleSlots can diff
 	// after. CopySearchPost is always single (SearchPostIDs is refused
@@ -880,6 +892,15 @@ func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPa
 	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
 		return nil, fmt.Errorf("hooppy: RewriteSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
 	}
+	// Converse guard (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it. RewriteSearchPost marshals
+	// the payload wholesale onto POST /posts, so without this guard
+	// SchedulesIDs + when_type!=3 reaches the wire under a publish-now/
+	// at-time intent. The CLI builder guard does not protect an external
+	// consumer of this public module; this is the layer below it.
+	if len(payload.SchedulesIDs) > 0 && payload.PublicationWhenType != 3 {
+		return nil, fmt.Errorf("hooppy: RewriteSearchPost: schedules_ids is set but publication_when_type=%d (not 3) — schedules target the by-schedule queue and are silently dropped or contradicted under other when-types; pass publication_when_type=3 to queue by schedule, or clear schedules_ids to publish as when-type %d intends", payload.PublicationWhenType, payload.PublicationWhenType)
+	}
 	// Before snapshot for slot recovery: when when_type=3, snapshot the
 	// schedule's posts BEFORE the create so fillScheduleSlots can diff
 	// after. This fires for BOTH single and batch — a single create is a
@@ -1060,6 +1081,18 @@ func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPay
 	// the damage of one.
 	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
 		return nil, fmt.Errorf("hooppy: ImportSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
+	}
+	// Converse guard (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it. ImportSearchPost is the
+	// worst of the three — it assigns SchedulesIDs in the body literal with
+	// no switch, so the schedules reach the wire UNCONDITIONALLY under
+	// whatever when_type the caller set. Without this guard a library
+	// consumer calling ImportSearchPost directly with SchedulesIDs +
+	// when_type=1 sends both intents onto the wire and the server picks
+	// one. The CLI builder guard does not protect an external consumer of
+	// this public module; this is the layer below it.
+	if len(payload.SchedulesIDs) > 0 && payload.PublicationWhenType != 3 {
+		return nil, fmt.Errorf("hooppy: ImportSearchPost: schedules_ids is set but publication_when_type=%d (not 3) — schedules target the by-schedule queue and are sent alongside a publish-now/at-time intent, which the server resolves on its own; pass publication_when_type=3 to queue by schedule, or clear schedules_ids to publish as when-type %d intends", payload.PublicationWhenType, payload.PublicationWhenType)
 	}
 	// Before snapshot for slot recovery: when when_type=3, snapshot the
 	// schedule's posts BEFORE the create so fillScheduleSlots can diff

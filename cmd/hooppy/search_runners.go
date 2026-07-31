@@ -19,13 +19,25 @@ import (
 // reports the OBSERVED state:
 //
 //   - oracle idle          → {"success":true,"is_parsing_in_progress":false}, exit 0
-//   - oracle still running → {"success":false,"is_parsing_in_progress":true}, exit 1
-//     (honest: at read time the parse IS still running; the operator re-runs
-//     'search status' to confirm the transition — a polling loop would claim
-//     to know the stop will eventually take effect, more than one read knows)
+//   - oracle still running → {"success":false,"is_parsing_in_progress":true}, exit 2
+//     (the stop was ACCEPTED but the parse is still in progress at read time —
+//     a partial outcome, not an error; the operator re-runs 'search status' to
+//     confirm the transition. Exit 2, not 1, so a script can tell "the DELETE
+//     failed" from "the stop was accepted but not yet observed idle". A polling
+//     loop was rejected: it would claim to know the stop will eventually take
+//     effect, more than one read knows.)
 //   - DELETE failed        → stderr error, exit 1 (no stdout success)
 //   - DELETE ok, oracle re-read failed → {"success":false,"unconfirmed":true},
-//     exit 1 (the stop MAY have worked; never claim success unconfirmed)
+//     exit 2 (the stop MAY have worked; never claim success unconfirmed. Exit 2:
+//     the DELETE was accepted, only confirmation failed — a partial outcome,
+//     not a DELETE error.)
+//
+// Exit-code convention (matches runScheduleQueue and the doctor --exit-code
+// doc at main.go): 0 = complete, 1 = error (the DELETE itself failed), 2 =
+// partial (accepted but not yet idle / unconfirmed). The prior code returned 1
+// for all three non-idle conditions, so `search stop` on a genuinely running
+// parse normally exited 1 and exited 0 mainly when it cancelled nothing — it
+// reported failure exactly when it worked.
 //
 // This closes issue #114: the prior code printed {"success":true} after a nil
 // error from StopParsing(out=nil) — the body was never read, and even read, a
@@ -38,18 +50,36 @@ func runStopParsing(ctx context.Context, c *hooppy.Client, out, errOut io.Writer
 		return 1
 	}
 	if res.ConfirmErr != "" {
-		fmt.Fprintf(out, "{\"success\":false,\"unconfirmed\":true}\n")
+		enc := json.NewEncoder(out)
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(stopParsingOutput{Success: false, Unconfirmed: true})
 		fmt.Fprintf(errOut, "stop request accepted, but parsing status could not be confirmed: %s\n", res.ConfirmErr)
 		fmt.Fprintf(errOut, "re-run 'hooppy search status' to check is_parsing_in_progress\n")
-		return 1
+		return 2
 	}
 	if res.IsParsingInProgress {
-		fmt.Fprintf(out, "{\"success\":false,\"is_parsing_in_progress\":true}\n")
+		enc := json.NewEncoder(out)
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(stopParsingOutput{Success: false, IsParsingInProgress: true})
 		fmt.Fprintf(errOut, "stop request accepted, but parsing is still in progress — re-run 'hooppy search status' to confirm the transition (a stop is asynchronous server-side)\n")
-		return 1
+		return 2
 	}
-	fmt.Fprintf(out, "{\"success\":true,\"is_parsing_in_progress\":false}\n")
+	enc := json.NewEncoder(out)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(stopParsingOutput{Success: true, IsParsingInProgress: false})
 	return 0
+}
+
+// stopParsingOutput is the JSON shape `search stop` emits on stdout. Every
+// sibling runner in this file uses json.NewEncoder over a struct; the prior
+// hand-built Fprintf string literals had already drifted from the MCP stop
+// shape (the MCP carries is_parsing_in_progress on the in-progress branch,
+// the CLI did not). A struct keeps the two surfaces aligned and lets the
+// field set evolve without a per-branch string rewrite.
+type stopParsingOutput struct {
+	Success             bool `json:"success"`
+	IsParsingInProgress bool `json:"is_parsing_in_progress"`
+	Unconfirmed         bool `json:"unconfirmed,omitempty"`
 }
 
 // runCopySearchPost implements `search copy`. Extracted from the inline Run

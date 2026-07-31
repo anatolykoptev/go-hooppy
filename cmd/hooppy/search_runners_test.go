@@ -30,8 +30,14 @@ func newStubClient(t *testing.T, srv *httptest.Server) *hooppy.Client {
 // F1 — `search stop` against a stub whose DELETE returns 2xx but where the
 // parse is still running: the command must NOT report success. The oracle
 // (GET /posts-search/parsing/form) reports is_parsing_in_progress=true after
-// the DELETE, so runStopParsing must exit 1 and stdout must not contain
-// "success":true.
+// the DELETE, so runStopParsing must exit 2 (accepted but not yet idle — a
+// partial outcome, NOT an error) and stdout must not contain "success":true.
+//
+// Exit 2 (not 1) is the fix for finding 3: the prior code returned 1 for all
+// three non-idle conditions, so `search stop` on a genuinely running parse
+// normally exited 1 and exited 0 mainly when it cancelled nothing — it
+// reported failure exactly when it worked. Exit 1 is now reserved for a
+// failed DELETE; exit 2 = accepted-but-not-yet-idle / unconfirmed.
 //
 // RED-on-revert: revert runStopParsing to print {"success":true} after a nil
 // StopParsing error (the pre-fix shape — ignore the oracle), and stdout
@@ -55,14 +61,80 @@ func TestRunStopParsing_StillRunning_NotSuccess_F1(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := runStopParsing(context.Background(), newStubClient(t, srv), &out, &errOut)
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1 — a stop whose oracle still shows in_progress must NOT report success (issue #114)", code)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 — a stop whose oracle still shows in_progress is ACCEPTED-but-not-yet-idle (a partial outcome, not an error); exit 1 is reserved for a failed DELETE (finding 3)", code)
 	}
 	if strings.Contains(out.String(), `"success":true`) {
 		t.Errorf("stdout reported success, but the parse is still running:\n%s\n— the command must not claim a stop it did not observe (issue #114)", out.String())
 	}
 	if !strings.Contains(out.String(), `"is_parsing_in_progress":true`) {
 		t.Errorf("stdout should report the observed state (is_parsing_in_progress=true), got:\n%s", out.String())
+	}
+}
+
+// F9a — `search stop` against a stub whose DELETE FAILS (5xx): the command
+// must exit 1 (the DELETE itself failed — an error, not a partial outcome).
+// This is the other direction of finding 3: exit 1 is reserved for a failed
+// DELETE, exit 2 for accepted-but-not-yet-idle. Both directions must hold
+// independently so a script can tell "the stop request failed" from "the stop
+// was accepted but the parse is still winding down".
+//
+// RED-on-revert: revert runStopParsing to return 1 for the still-running case
+// AND this case (the prior shape — all non-idle → 1), and this test still
+// passes BUT F1 goes RED (F1 wants 2). The pair (F1=2, F9a=1) is what proves
+// the exit-code split is real, not a blanket non-zero.
+func TestRunStopParsing_DeleteFails_Exit1_F9a(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "DELETE /posts-search/parsing/stop":
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"success":false}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	code := runStopParsing(context.Background(), newStubClient(t, srv), &out, &errOut)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 — a FAILED DELETE is an error (exit 1), not a partial outcome (exit 2); finding 3 reserves 1 for the DELETE failure and 2 for accepted-but-not-yet-idle", code)
+	}
+	if strings.Contains(out.String(), `"success":true`) {
+		t.Errorf("stdout reported success after a failed DELETE:\n%s", out.String())
+	}
+}
+
+// F9b — `search stop` against a stub whose DELETE succeeds and the oracle
+// re-read FAILS (ConfirmErr set): the command must exit 2 (accepted but
+// unconfirmed — a partial outcome, not a DELETE error). The stop MAY have
+// worked; never claim success unconfirmed, but do not report it as a DELETE
+// failure either.
+func TestRunStopParsing_Unconfirmed_Exit2_F9b(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "DELETE /posts-search/parsing/stop":
+			w.Write([]byte(`{"success":true}`))
+		case "GET /posts-search/parsing/form":
+			// The oracle re-read fails — the stop was accepted but
+			// confirmation failed.
+			w.WriteHeader(http.StatusBadGateway)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	code := runStopParsing(context.Background(), newStubClient(t, srv), &out, &errOut)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 — a stop whose DELETE was accepted but whose confirmation re-read failed is a PARTIAL outcome (exit 2), not a DELETE error (exit 1); finding 3", code)
+	}
+	if strings.Contains(out.String(), `"success":true`) {
+		t.Errorf("stdout reported success for an unconfirmed stop:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), `"unconfirmed":true`) {
+		t.Errorf("stdout should report unconfirmed=true, got:\n%s", out.String())
 	}
 }
 
@@ -128,6 +200,47 @@ func TestRunRewriteSearchPost_SchedulesDropped_NoRequest_F3(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "when-type 3") {
 		t.Errorf("stderr should name the schedules/when-type-3 cause, got:\n%s", errOut.String())
+	}
+}
+
+// TestRunRewriteSearchPost_SchedulesQueued_OK is the pair to F3: when
+// --schedules is given with when-type 3, the schedules ARE sent on the POST
+// /posts body and the request reaches the server. Without this, F3 is
+// satisfied by a guard that refuses every schedule (the exact mutation F7
+// proves is green today: mutating buildRewritePayload's guard to refuse ALL
+// --schedules left the entire cmd/hooppy package green).
+//
+// RED-on-revert (F7): mutate buildRewritePayload's guard to
+// `if len(schedIDs) > 0 {` (refuse every --schedules regardless of when-type)
+// and this test goes RED — the guard fires on when-type 3 too, no POST
+// reaches the server, exit code becomes 1.
+func TestRunRewriteSearchPost_SchedulesQueued_OK(t *testing.T) {
+	var postBody map[string]interface{}
+	var sawPost atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/posts" {
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &postBody)
+			sawPost.Store(true)
+		}
+		w.Write([]byte(`{"id":5001}`))
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	// Batch (--post-ids) so the only request is the single RewriteSearchPost
+	// call (no per-post attachment download path). when-type 3 + schedules.
+	code := runRewriteSearchPost(context.Background(), newStubClient(t, srv), &out, &errOut,
+		0, "2001", "" /*text*/, 3, 1, "", "10,11", "", "", "", false)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 — schedules with when-type 3 should queue and succeed:\nstderr: %s", code, errOut.String())
+	}
+	if !sawPost.Load() {
+		t.Fatalf("no POST /posts reached the server — the request must be issued when schedules pair with when-type 3")
+	}
+	sched, _ := postBody["schedules_ids"].([]interface{})
+	if len(sched) != 2 {
+		t.Errorf("schedules_ids on the POST wire = %v, want [10 11] — the schedules must be sent when when-type is 3", postBody["schedules_ids"])
 	}
 }
 

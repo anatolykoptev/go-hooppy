@@ -123,6 +123,16 @@ func parseIntListStr(s string) []int {
 	return ids
 }
 
+// errSchedulesWithoutWhenType3 is the shared "schedules given with a
+// non-schedule when-type" refusal for the MCP builders. flagName is the
+// surface's flag name ("schedules_ids") so the wording cannot drift between
+// the copy and rewrite builders. The CLI carries an identical helper
+// parameterised with "--schedules"; the two surfaces share the same wording
+// via the same flagName contract.
+func errSchedulesWithoutWhenType3(whenType int, flagName string) error {
+	return fmt.Errorf("%s is only meaningful with when-type 3 (by schedule); with when-type %d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass when-type 3 to queue by schedule, or drop %s to publish as when-type %d intends", flagName, whenType, flagName, whenType)
+}
+
 // parseOrderedIDListStr parses a comma-separated id list STRICTLY: any
 // unparseable or empty element returns an error naming the offending token.
 // Use this for ORDER-SIGNIFICANT id lists (search_post_ids on rewrite/import)
@@ -1652,7 +1662,19 @@ func registerStopParsing(server *mcp.Server) {
 				return errResult("stop request accepted, but parsing status could not be confirmed: " + res.ConfirmErr + " — re-run parsing_status to check is_parsing_in_progress")
 			}
 			if res.IsParsingInProgress {
-				return errResult("stop request accepted, but parsing is still in progress (is_parsing_in_progress=true) — a stop is asynchronous server-side; re-run parsing_status to confirm the transition")
+				// A stop is asynchronous server-side (~5s between stop-sent
+				// and is_parsing_in_progress going false, measured
+				// posts_search.go:469-471). An immediate re-read after a stop
+				// that WILL succeed can still show in_progress — true at read
+				// time. Return a STATE, not a failure: an LLM agent reading
+				// errResult retries the stop, and a retried stop cancels a job
+				// started in the interim (posts_search.go:485-489). Carrying
+				// is_parsing_in_progress:true lets the agent poll
+				// parsing_status instead of re-stopping.
+				return jsonResult(map[string]interface{}{
+					"success":                false,
+					"is_parsing_in_progress": true,
+				})
 			}
 			return jsonResult(map[string]interface{}{
 				"success":                true,
@@ -1675,6 +1697,53 @@ type copySearchPostInput struct {
 	PublishMinutes      string `json:"publish_minutes,omitempty" jsonschema:"Publication minutes MM (for when_type 2)."`
 }
 
+// buildCopySearchPostPayload validates a copySearchPostInput and builds the
+// payload — the testable analogue of the CLI buildCopyPayload. Extracted from
+// the inline handler so the schedules/when-type contradiction guard (issue
+// #111) is reachable from a test: the prior inline form was untestable, so
+// deleting both contradiction guards left the MCP suite green (proven by
+// mutation). Mirrors buildRewriteSearchPostPayload's shape.
+func buildCopySearchPostPayload(in copySearchPostInput) (hooppy.CopySearchPostPayload, error) {
+	if in.SearchPostID == 0 {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id is required (use list_search_posts to find IDs)")
+	}
+	if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
+	}
+	if in.PublicationWhenType == 3 && in.SchedulesIDs == "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("schedules_ids is required for publication_when_type=3 (by schedule) — a schedule-driven copy targeted at no schedule publishes to nothing")
+	}
+	// A flag combination that cannot do what the caller asked must fail
+	// loudly before the request (issue #111): schedules_ids targets the
+	// by-schedule queue; every other when_type ignores it (the switch
+	// below sets SchedulesIDs only in case 3). Without this guard,
+	// schedules_ids with when_type 1/2 is silently dropped and the post
+	// is published to pages NOW — an irreversible publish the caller
+	// did not ask for.
+	if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
+		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids")
+	}
+	payload := hooppy.CopySearchPostPayload{
+		SearchPostID:        in.SearchPostID,
+		PublicationWhenType: in.PublicationWhenType,
+		PublicationHowType:  in.PublicationHowType,
+	}
+	switch in.PublicationWhenType {
+	case 3:
+		payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
+	case 2:
+		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
+		payload.PublicationDate = &hooppy.PublicationDate{
+			Date:    in.PublishDate,
+			Hours:   in.PublishHours,
+			Minutes: in.PublishMinutes,
+		}
+	default:
+		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
+	}
+	return payload, nil
+}
+
 func registerCopySearchPost(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
@@ -1682,46 +1751,13 @@ func registerCopySearchPost(server *mcp.Server) {
 			Description: "Copy a scraped post (from list_search_posts) to your own pages. The server auto-fills text and photos from the scraped post — just provide the scraped post ID and where to publish. UNDOCUMENTED endpoint.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in copySearchPostInput) (*mcp.CallToolResult, error) {
-			if in.SearchPostID == 0 {
-				return errResult("search_post_id is required (use list_search_posts to find IDs)")
-			}
-			if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
-				return errResult("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
-			}
-			if in.PublicationWhenType == 3 && in.SchedulesIDs == "" {
-				return errResult("schedules_ids is required for publication_when_type=3 (by schedule) — a schedule-driven copy targeted at no schedule publishes to nothing")
-			}
-			// A flag combination that cannot do what the caller asked must fail
-			// loudly before the request (issue #111): schedules_ids targets the
-			// by-schedule queue; every other when_type ignores it (the switch
-			// below sets SchedulesIDs only in case 3). Without this guard,
-			// schedules_ids with when_type 1/2 is silently dropped and the post
-			// is published to pages NOW — an irreversible publish the caller
-			// did not ask for.
-			if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
-				return errResult(fmt.Sprintf("schedules_ids is only meaningful with publication_when_type=3 (by schedule); with publication_when_type=%d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass publication_when_type=3 to queue by schedule, or drop schedules_ids", in.PublicationWhenType))
+			payload, err := buildCopySearchPostPayload(in)
+			if err != nil {
+				return errResult(err.Error())
 			}
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
-			}
-			payload := hooppy.CopySearchPostPayload{
-				SearchPostID:        in.SearchPostID,
-				PublicationWhenType: in.PublicationWhenType,
-				PublicationHowType:  in.PublicationHowType,
-			}
-			switch in.PublicationWhenType {
-			case 3:
-				payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
-			case 2:
-				payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
-				payload.PublicationDate = &hooppy.PublicationDate{
-					Date:    in.PublishDate,
-					Hours:   in.PublishHours,
-					Minutes: in.PublishMinutes,
-				}
-			default:
-				payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
 			}
 			resp, err := c.CopySearchPost(ctx, payload)
 			if err != nil {
@@ -1787,7 +1823,7 @@ func buildRewriteSearchPostPayload(in rewriteSearchPostInput) (hooppy.CopySearch
 	// when_type 1/2 is silently dropped and the post is published to pages NOW
 	// — an irreversible publish the caller did not ask for.
 	if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("schedules_ids is only meaningful with publication_when_type=3 (by schedule); with publication_when_type=%d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass publication_when_type=3 to queue by schedule, or drop schedules_ids", in.PublicationWhenType)
+		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids")
 	}
 	// search_post_ids is ORDER-SIGNIFICANT (the server assigns schedule
 	// slots in the given order), so parse it STRICTLY: a lenient parse that

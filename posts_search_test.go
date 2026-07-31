@@ -1488,6 +1488,116 @@ func TestRewriteSearchPost_ScheduleDrivenNoSchedules(t *testing.T) {
 	}
 }
 
+// TestCopySearchPost_SchedulesWithoutWhenType3 is the CONVERSE of the
+// ScheduleDrivenNoSchedules guard: schedules_ids IS set but when_type is NOT 3.
+// The existing guard only refuses when_type=3 + empty schedules; without the
+// converse, a library consumer calling CopySearchPost directly with
+// SchedulesIDs + when_type=1 sends the schedules onto the wire under a
+// publish-now intent — the exact mechanism the CLI now guards against, one
+// layer down. This is a public Go module; the CLI guard does not protect an
+// external consumer.
+//
+// RED-on-revert: remove the converse guard from CopySearchPost and the stub is
+// reached (requestMade=true) with err == nil → both assertions fail.
+func TestCopySearchPost_SchedulesWithoutWhenType3(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":7010}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        2006,
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SchedulesIDs:        []int{10, 11},
+		SelectedPagesIDs:    []int{123456},
+	})
+	if err == nil {
+		t.Fatal("expected fail-closed error for schedules_ids with when_type!=3, got nil — a public library consumer would publish under a contradictory intent")
+	}
+	if requestMade {
+		t.Fatal("CopySearchPost issued a request despite schedules_ids + when_type!=3 — must fail before any request (the schedules would marshal onto the wire under a publish-now intent)")
+	}
+	if !strings.Contains(err.Error(), "schedules_ids") || !strings.Contains(err.Error(), "publication_when_type") {
+		t.Errorf("error must name schedules_ids and publication_when_type, got: %v", err)
+	}
+}
+
+// TestRewriteSearchPost_SchedulesWithoutWhenType3 mirrors the copy converse
+// guard for the rewrite endpoint. RewriteSearchPost marshals the payload
+// wholesale onto POST /posts, so SchedulesIDs + when_type!=3 reaches the wire.
+//
+// RED-on-revert: remove the converse guard from RewriteSearchPost and the stub
+// is reached (requestMade=true) with err == nil → both assertions fail.
+func TestRewriteSearchPost_SchedulesWithoutWhenType3(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":7011}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.RewriteSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        2007,
+		PublicationWhenType: 1,
+		PublicationHowType:  1,
+		SchedulesIDs:        []int{10, 11},
+		SelectedPagesIDs:    []int{123456},
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected fail-closed error for schedules_ids with when_type!=3, got nil")
+	}
+	if requestMade {
+		t.Fatal("RewriteSearchPost issued a request despite schedules_ids + when_type!=3 — must fail before any request")
+	}
+	if !strings.Contains(err.Error(), "schedules_ids") || !strings.Contains(err.Error(), "publication_when_type") {
+		t.Errorf("error must name schedules_ids and publication_when_type, got: %v", err)
+	}
+}
+
+// F10 — ImportSearchPost called DIRECTLY (not via the CLI) with SchedulesIDs
+// set and when_type=1 must error BEFORE any request. The assertion is on the
+// REQUEST COUNT (zero), not merely that an error came back — a guard that
+// errors after the request would still "return an error" while having
+// published. Import is the worst of the three: it assigns SchedulesIDs in the
+// payload literal with no switch, so the schedules reach the wire unconditionally
+// under whatever when_type the caller set.
+//
+// RED-on-revert: remove the converse guard from ImportSearchPost and the stub
+// is reached (requestMade=true) with err == nil → both assertions fail. This
+// exact mutation is green today (the converse guard does not exist yet).
+func TestImportSearchPost_SchedulesWithoutWhenType3_F10(t *testing.T) {
+	requestMade := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMade = true
+		w.Write([]byte(`{"id":7012}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostID:        2008,
+		PublicationWhenType: 1,
+		PublicationHowType:  2,
+		SchedulesIDs:        []int{10, 11},
+		Texts:               []PostText{{Text: "x", SourceID: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected fail-closed error for schedules_ids with when_type=1, got nil — ImportSearchPost marshals schedules onto the wire under a publish-now intent")
+	}
+	if requestMade {
+		t.Fatal("ImportSearchPost issued a request despite schedules_ids + when_type=1 — must fail BEFORE any request (F10: assert request count is zero, not merely that an error came back)")
+	}
+	if !strings.Contains(err.Error(), "schedules_ids") || !strings.Contains(err.Error(), "publication_when_type") {
+		t.Errorf("error must name schedules_ids and publication_when_type, got: %v", err)
+	}
+}
+
 // TestRewriteSearchPost_BatchIDsOrder verifies the batch form: a slice of
 // SearchPostIDs reaches the wire as a comma-joined ids string in the
 // CALLER's order. The server assigns schedule slots in the order it receives
