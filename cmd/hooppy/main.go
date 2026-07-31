@@ -1040,10 +1040,7 @@ func registerSearch(root *cobra.Command) {
 	})
 	stopCmd.Args = cobra.NoArgs
 	stopCmd.Run = func(_ *cobra.Command, _ []string) {
-		c := mustClient()
-		err := c.StopParsing(context.Background())
-		die(err)
-		fmt.Println(`{"success":true}`)
+		os.Exit(runStopParsing(context.Background(), mustClient(), os.Stdout, os.Stderr))
 	}
 
 	// search copy
@@ -1064,19 +1061,14 @@ func registerSearch(root *cobra.Command) {
 	// no error). Use `search rewrite` or `search import` for a batch.
 	copyCmd.Flags().IntVar(&copyPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED). copy is single-post only — for a batch use 'search rewrite --post-ids' or 'search import --post-ids' (PUT /posts/copy takes one search_post_id).")
 	copyCmd.Flags().StringVar(&copyPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
-	copyCmd.Flags().IntVar(&copyWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
+	copyCmd.Flags().IntVar(&copyWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule (default 3 — a published post cannot be un-published from the queue; pass --when-type 1 explicitly to publish now)")
 	copyCmd.Flags().IntVar(&copyHowType, "how-type", 1, "publication how type (1=default)")
 	copyCmd.Flags().StringVar(&copySchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
 	copyCmd.Flags().StringVar(&copyDate, "date", "", "publication date dd.mm.yyyy (for when-type 2)")
 	copyCmd.Flags().StringVar(&copyHours, "hours", "", "publication hours HH (for when-type 2)")
 	copyCmd.Flags().StringVar(&copyMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
 	copyCmd.Run = func(_ *cobra.Command, _ []string) {
-		payload, err := buildCopyPayload(copyPostID, copyWhenType, copyHowType, copyPages, copySchedules, copyDate, copyHours, copyMinutes)
-		die(err)
-		c := mustClient()
-		resp, err := c.CopySearchPost(context.Background(), payload)
-		die(err)
-		printJSON(resp)
+		os.Exit(runCopySearchPost(context.Background(), mustClient(), os.Stdout, os.Stderr, copyPostID, copyWhenType, copyHowType, copyPages, copySchedules, copyDate, copyHours, copyMinutes))
 	}
 
 	// search rewrite
@@ -1095,7 +1087,7 @@ func registerSearch(root *cobra.Command) {
 	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Schedule slots are reported in publication order (the queue's own order), not the order given on the command line. Per-post attachment download is skipped in batch mode — use --post-id for attachment preservation. Batch rewrite CANNOT override text (the payload shape cannot express per-post text), so --text is rejected with --post-ids; --post-ids alone keeps each post's original text (like 'search import --post-ids').")
 	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (required for --post-id; NOT allowed with --post-ids — batch rewrite cannot express per-post text; omit --text with --post-ids to keep each post's original text)")
 	rewriteCmd.Flags().StringVar(&rwPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
-	rewriteCmd.Flags().IntVar(&rwWhenType, "when-type", 1, "1=publish now, 2=at specific time, 3=by schedule")
+	rewriteCmd.Flags().IntVar(&rwWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule (default 3 — a published post cannot be un-published from the queue; pass --when-type 1 explicitly to publish now)")
 	rewriteCmd.Flags().IntVar(&rwHowType, "how-type", 1, "publication how type (1=default)")
 	rewriteCmd.Flags().StringVar(&rwSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
 	rewriteCmd.Flags().StringVar(&rwDate, "date", "", "publication date dd.mm.yyyy (for when-type 2)")
@@ -1103,60 +1095,7 @@ func registerSearch(root *cobra.Command) {
 	rewriteCmd.Flags().StringVar(&rwMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
 	rewriteCmd.Flags().BoolVar(&rwNoAttachments, "no-attachments", false, "strip all attachments (photos, links, etc.) from the scraped post")
 	rewriteCmd.Run = func(_ *cobra.Command, _ []string) {
-		payload, err := buildRewritePayload(rwPostID, rwPostIDs, rwText, rwWhenType, rwHowType, rwPages, rwSchedules, rwDate, rwHours, rwMinutes)
-		die(err)
-		c := mustClient()
-		batch := rwPostIDs != ""
-		// Per-post attachment download only applies to the single-post form:
-		// it fetches GetSearchPostEdit for --post-id and re-uploads photos.
-		// A batch (--post-ids) spans multiple scraped posts, so there is no
-		// single edit to fetch — skip the block (equivalent to --no-attachments).
-		if !rwNoAttachments && !batch {
-			// By default, preserve ALL attachments from the scraped post:
-			// - Photos: download from edit endpoint URLs → re-upload via UploadMedia
-			//   (server doesn't download automatically; MediaItem must have id/name/folder/file_path)
-			// - Other attachments (copyright, link, poll, etc.): pass through as-is
-			edit, err := c.GetSearchPostEdit(context.Background(), rwPostID)
-			die(err)
-			var mediaItems []interface{}
-			var attachments []hooppy.Attachment
-			for i, att := range edit.Attachments {
-				if att.Type != "photo" && att.Type != "video" {
-					// Non-photo attachment — pass through as-is
-					attachments = append(attachments, att)
-					continue
-				}
-				// Extract URL from the attachment data
-				data, ok := att.Data.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				photoURL, _ := data["url"].(string)
-				if photoURL == "" {
-					continue
-				}
-				// Download photo
-				tmpPath := fmt.Sprintf("/tmp/hooppy_photo_%d_%d.jpg", rwPostID, i)
-				if err := downloadPhoto(photoURL, tmpPath); err != nil {
-					fmt.Fprintf(os.Stderr, "error: download photo %d: %v\n", i, err)
-					os.Exit(1)
-				}
-				// Upload with generated file_id (server uses it as id + name)
-				media, err := c.UploadMedia(context.Background(), tmpPath, "")
-				die(err)
-				mediaItems = append(mediaItems, media.Photo)
-				os.Remove(tmpPath)
-			}
-			if len(mediaItems) > 0 {
-				attachments = append([]hooppy.Attachment{{Type: "photos", Data: mediaItems}}, attachments...)
-			}
-			if len(attachments) > 0 {
-				payload.Attachments = attachments
-			}
-		}
-		resp, err := c.RewriteSearchPost(context.Background(), payload)
-		die(err)
-		printJSON(resp)
+		os.Exit(runRewriteSearchPost(context.Background(), mustClient(), os.Stdout, os.Stderr, rwPostID, rwPostIDs, rwText, rwWhenType, rwHowType, rwPages, rwSchedules, rwDate, rwHours, rwMinutes, rwNoAttachments))
 	}
 
 	// search import — copy one or more scraped posts via PUT /posts/import with full text + attachments.
@@ -1263,6 +1202,18 @@ func buildCopyPayload(postID, whenType, howType int, pages, schedules, date, hou
 	if whenType == 3 && len(schedIDs) == 0 {
 		return hooppy.CopySearchPostPayload{}, errors.New("--schedules is required for --when-type 3 (by schedule) — a schedule-driven copy targeted at no schedule publishes to nothing")
 	}
+	// A flag combination that cannot do what the caller asked must fail loudly
+	// before the request, never proceed with a different meaning (issue #111).
+	// --schedules targets the by-schedule queue; every other when-type ignores
+	// it (the switch below sets SchedulesIDs only in case 3). Without this
+	// guard, `search copy --schedules 10,11` with the default when-type (or an
+	// explicit --when-type 1/2) silently drops the schedules and publishes to
+	// pages NOW — an irreversible publish the caller did not ask for. Refuse
+	// before any request so the operator cannot reach the live publishing
+	// queue with a payload whose meaning differs from their intent.
+	if len(schedIDs) > 0 && whenType != 3 {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("--schedules is only meaningful with --when-type 3 (by schedule); with --when-type %d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass --when-type 3 to queue by schedule, or drop --schedules to publish as --when-type %d intends", whenType, whenType)
+	}
 	pageIDs, err := parseIntListErr(pages)
 	if err != nil {
 		return hooppy.CopySearchPostPayload{}, err
@@ -1328,6 +1279,16 @@ func buildRewritePayload(postID int, postIDs, text string, whenType, howType int
 	}
 	if whenType == 3 && len(schedIDs) == 0 {
 		return hooppy.CopySearchPostPayload{}, errors.New("--schedules is required for --when-type 3 (by schedule) — a schedule-driven rewrite targeted at no schedule publishes to nothing")
+	}
+	// A flag combination that cannot do what the caller asked must fail loudly
+	// before the request, never proceed with a different meaning (issue #111).
+	// --schedules targets the by-schedule queue; every other when-type ignores
+	// it (the switch below sets SchedulesIDs only in case 3). Without this
+	// guard, `search rewrite --schedules 10,11` with the default when-type (or
+	// an explicit --when-type 1/2) silently drops the schedules and publishes
+	// to pages NOW — an irreversible publish the caller did not ask for.
+	if len(schedIDs) > 0 && whenType != 3 {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("--schedules is only meaningful with --when-type 3 (by schedule); with --when-type %d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass --when-type 3 to queue by schedule, or drop --schedules to publish as --when-type %d intends", whenType, whenType)
 	}
 	pageIDs, err := parseIntListErr(pages)
 	if err != nil {

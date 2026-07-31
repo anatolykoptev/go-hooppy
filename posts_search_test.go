@@ -760,7 +760,7 @@ func TestStopParsing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqCount.Add(1)
 		gotMethod, gotPath = r.Method, r.URL.Path
-		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true}`))
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
@@ -806,7 +806,7 @@ func TestStopParsing_RetriedToTheSamePath(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true}`))
 	}))
 	defer srv.Close()
 
@@ -827,6 +827,91 @@ func TestStopParsing_RetriedToTheSamePath(t *testing.T) {
 			t.Errorf("attempt %d went to %q, want %q — a retry must not fall through to the sibling that answers success without cancelling", i+1, p, "DELETE /posts-search/parsing/stop")
 		}
 	}
+}
+
+// TestStopParsingAndConfirm_Oracle pins the OBSERVED-state contract of
+// StopParsingAndConfirm (issue #114): the result reflects
+// GetParsingForm.is_parsing_in_progress, NOT the DELETE's own success body.
+// Three arms: the parse is still running (Stopped=false, no ConfirmErr), the
+// parse is idle (Stopped=true), and the DELETE succeeded but the oracle
+// re-read failed (ConfirmErr set, Stopped=false — never claim success). A
+// fourth arm covers a 2xx {"success":false} on the DELETE caught by the
+// universal gate (the same family as PR #134): the method returns an error,
+// not a result with Stopped=true.
+func TestStopParsingAndConfirm_Oracle(t *testing.T) {
+	t.Run("still running → not stopped", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete {
+				w.Write([]byte(`{"success":true}`))
+				return
+			}
+			w.Write([]byte(`{"is_parsing_in_progress":true,"source_resources":[],"social_accounts":[]}`))
+		}))
+		defer srv.Close()
+		res, err := newTestClient(t, srv).StopParsingAndConfirm(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v — a 2xx success:true DELETE must not error", err)
+		}
+		if res.IsParsingInProgress != true {
+			t.Errorf("IsParsingInProgress = %v, want true (the oracle is the source of truth, not the DELETE body)", res.IsParsingInProgress)
+		}
+		if res.Stopped() {
+			t.Errorf("Stopped() = true, want false — the parse is still running; claiming stopped is the #114 defect")
+		}
+		if res.ConfirmErr != "" {
+			t.Errorf("ConfirmErr = %q, want empty — the oracle read succeeded", res.ConfirmErr)
+		}
+	})
+	t.Run("idle → stopped", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete {
+				w.Write([]byte(`{"success":true}`))
+				return
+			}
+			w.Write([]byte(`{"is_parsing_in_progress":false,"source_resources":[],"social_accounts":[]}`))
+		}))
+		defer srv.Close()
+		res, err := newTestClient(t, srv).StopParsingAndConfirm(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !res.Stopped() {
+			t.Errorf("Stopped() = false, want true — the oracle observed idle")
+		}
+	})
+	t.Run("DELETE success:false → gate error, not a result", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"success":false,"message":"no active parse"}`))
+		}))
+		defer srv.Close()
+		res, err := newTestClient(t, srv).StopParsingAndConfirm(context.Background())
+		if err == nil {
+			t.Fatalf("expected a *SuccessFalseError for a 2xx {\"success\":false} — the universal gate must fire now that StopParsing reads the body (PR #134 family)")
+		}
+		if res != nil {
+			t.Errorf("res = %+v, want nil — a DELETE failure must not return a result the caller could read as stopped", res)
+		}
+	})
+	t.Run("oracle re-read fails → ConfirmErr, not stopped", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete {
+				w.Write([]byte(`{"success":true}`))
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+		res, err := newTestClient(t, srv).StopParsingAndConfirm(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v — the DELETE succeeded; only the confirm read failed, so the method returns a result with ConfirmErr, not an error", err)
+		}
+		if res.ConfirmErr == "" {
+			t.Errorf("ConfirmErr empty, want the confirm-read failure — the DELETE succeeded but the oracle could not be read")
+		}
+		if res.Stopped() {
+			t.Errorf("Stopped() = true, want false — never claim stopped when the confirm read failed (issue #114)")
+		}
+	})
 }
 
 func TestCopySearchPost(t *testing.T) {

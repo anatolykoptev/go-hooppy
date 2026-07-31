@@ -119,7 +119,8 @@ var retryPolicies = map[string]struct {
 	"GetParsingForm":                          {retryAllowed, false},
 	"StartParsing":                            {retryNever, true},
 	"StopParsing":                             {retryAllowed, false},
-	"CopySearchPost":                          {retryNever, true}, // PUT /posts/copy creates a copy
+	"StopParsingAndConfirm":                   {retryComposite, false}, // DELETE (StopParsing, retryAllowed) + GET oracle (GetParsingForm, retryAllowed)
+	"CopySearchPost":                          {retryNever, true},      // PUT /posts/copy creates a copy
 	"GetSearchPostEdit":                       {retryAllowed, false},
 	"RewriteSearchPost":                       {retryNever, true}, // POST /posts with as_copy=1 creates
 	"ImportSearchPost":                        {retryNever, true}, // PUT /posts/import creates — the #87 case

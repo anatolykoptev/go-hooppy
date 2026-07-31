@@ -1637,17 +1637,27 @@ func registerStopParsing(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_stop_parsing",
-			Description: "Stop any in-progress scraping job. UNDOCUMENTED endpoint.",
+			Description: "Stop any in-progress scraping job. Reports the OBSERVED parsing state (is_parsing_in_progress) re-read from parsing_status after the cancel — NOT the DELETE's own success body, which the server answers {\"success\":true} for even when nothing was cancelled (issue #114). A stop is asynchronous server-side, so an immediate re-read may still show in_progress for a stop that will succeed; re-run parsing_status to confirm the transition. UNDOCUMENTED endpoint.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			if err := c.StopParsing(ctx); err != nil {
+			res, err := c.StopParsingAndConfirm(ctx)
+			if err != nil {
 				return errResult(err.Error())
 			}
-			return jsonResult(map[string]bool{"success": true})
+			if res.ConfirmErr != "" {
+				return errResult("stop request accepted, but parsing status could not be confirmed: " + res.ConfirmErr + " — re-run parsing_status to check is_parsing_in_progress")
+			}
+			if res.IsParsingInProgress {
+				return errResult("stop request accepted, but parsing is still in progress (is_parsing_in_progress=true) — a stop is asynchronous server-side; re-run parsing_status to confirm the transition")
+			}
+			return jsonResult(map[string]interface{}{
+				"success":                true,
+				"is_parsing_in_progress": false,
+			})
 		},
 	)
 }
@@ -1677,6 +1687,19 @@ func registerCopySearchPost(server *mcp.Server) {
 			}
 			if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
 				return errResult("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
+			}
+			if in.PublicationWhenType == 3 && in.SchedulesIDs == "" {
+				return errResult("schedules_ids is required for publication_when_type=3 (by schedule) — a schedule-driven copy targeted at no schedule publishes to nothing")
+			}
+			// A flag combination that cannot do what the caller asked must fail
+			// loudly before the request (issue #111): schedules_ids targets the
+			// by-schedule queue; every other when_type ignores it (the switch
+			// below sets SchedulesIDs only in case 3). Without this guard,
+			// schedules_ids with when_type 1/2 is silently dropped and the post
+			// is published to pages NOW — an irreversible publish the caller
+			// did not ask for.
+			if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
+				return errResult(fmt.Sprintf("schedules_ids is only meaningful with publication_when_type=3 (by schedule); with publication_when_type=%d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass publication_when_type=3 to queue by schedule, or drop schedules_ids", in.PublicationWhenType))
 			}
 			c, err := client()
 			if err != nil {
@@ -1753,6 +1776,18 @@ func buildRewriteSearchPostPayload(in rewriteSearchPostInput) (hooppy.CopySearch
 	}
 	if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
 		return hooppy.CopySearchPostPayload{}, fmt.Errorf("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
+	}
+	if in.PublicationWhenType == 3 && in.SchedulesIDs == "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("schedules_ids is required for publication_when_type=3 (by schedule) — a schedule-driven rewrite targeted at no schedule publishes to nothing")
+	}
+	// A flag combination that cannot do what the caller asked must fail loudly
+	// before the request (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it (the switch below sets
+	// SchedulesIDs only in case 3). Without this guard, schedules_ids with
+	// when_type 1/2 is silently dropped and the post is published to pages NOW
+	// — an irreversible publish the caller did not ask for.
+	if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("schedules_ids is only meaningful with publication_when_type=3 (by schedule); with publication_when_type=%d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass publication_when_type=3 to queue by schedule, or drop schedules_ids", in.PublicationWhenType)
 	}
 	// search_post_ids is ORDER-SIGNIFICANT (the server assigns schedule
 	// slots in the given order), so parse it STRICTLY: a lenient parse that
