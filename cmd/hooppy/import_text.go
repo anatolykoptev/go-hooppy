@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -408,18 +409,24 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 			}
 			resp, err := c.ImportSearchPost(ctx, perPostPayload)
 			if err != nil {
+				// A *hooppy.CreateNoIDError is a create that SUCCEEDED but
+				// whose id the server did not return — the post exists, its
+				// identity is unknown. The library guard returns this typed
+				// error so a zero id never flows into posts move/update/delete
+				// as a real-looking handle (issue #131). The CLI import path
+				// downgrades it to the "created_no_id" status (exit 0,
+				// post_id:0 present in stdout) instead of "failed", preserving
+				// the dedup-via-stdout design — a re-run can tell a
+				// published-but-unidentified post from a normally created one
+				// and from a real failure. See perPostResult's doc comment.
+				var cnid *hooppy.CreateNoIDError
+				if errors.As(err, &cnid) {
+					results = append(results, perPostResult{SearchPostID: id, Status: "created_no_id", PostID: 0})
+					continue
+				}
 				anyFailed = true
 				fmt.Fprintf(errOut, "error: ImportSearchPost(%d): %v\n", id, err)
 				results = append(results, perPostResult{SearchPostID: id, Status: "failed", Error: fmt.Sprintf("ImportSearchPost: %v", err)})
-				continue
-			}
-			// A zero id is a created post whose identity the server did not
-			// return. Report it as the distinct status "created_no_id" (still
-			// carrying post_id:0, never omitted) so a re-run can tell a
-			// published-but-unidentified post from a normally created one and
-			// from a failure — see perPostResult's doc comment.
-			if resp.ID == 0 {
-				results = append(results, perPostResult{SearchPostID: id, Status: "created_no_id", PostID: 0})
 				continue
 			}
 			results = append(results, perPostResult{SearchPostID: id, Status: "created", PostID: resp.ID})
@@ -463,6 +470,22 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 		}
 		resp, err := c.ImportSearchPost(ctx, payload)
 		if err != nil {
+			// A *hooppy.CreateNoIDError is a create that SUCCEEDED but whose id
+			// the server did not return — the post exists, its identity is
+			// unknown. Map to created_no_id exit 0 (same behaviour as the
+			// strip-batch per-post loop) so a re-run can tell a
+			// published-but-unidentified post from a real failure and does not
+			// blindly re-import it (the duplicate-spawning hazard the strip
+			// path exists to prevent). Round 1 exited 1 here — the single
+			// path is the one that invites the duplicate re-run. See
+			// perPostResult's doc comment.
+			var cnid *hooppy.CreateNoIDError
+			if errors.As(err, &cnid) {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(map[string]interface{}{"id": 0, "status": "created_no_id", "search_post_id": args.postID})
+				return 0
+			}
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
@@ -503,6 +526,20 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 	}
 	resp, err := c.ImportSearchPost(ctx, payload)
 	if err != nil {
+		// A *hooppy.CreateNoIDError is a create that SUCCEEDED but whose id
+		// the server did not return — the batch created, its identities are
+		// unknown. Map to created_no_id exit 0 (same behaviour as the
+		// strip-batch per-post loop and the single path) so a re-run can
+		// tell a published-but-unidentified batch from a real failure and
+		// does not blindly re-import it (the duplicate-spawning hazard).
+		// Round 1 exited 1 here. See perPostResult's doc comment.
+		var cnid *hooppy.CreateNoIDError
+		if errors.As(err, &cnid) {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]interface{}{"id": 0, "status": "created_no_id"})
+			return 0
+		}
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return 1
 	}

@@ -413,6 +413,13 @@ func (c *Client) do(req *http.Request, out interface{}) error {
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("hooppy: decode response: %w", err)
 	}
+	// A 2xx with {"success":false} is a DECIDED failure the transport layer
+	// does not surface — the operation did NOT happen. Gate it here so every
+	// mutation method that decodes a success-bearing response is covered by
+	// one check instead of N copies at the call sites. See success_gate.go.
+	if err := checkSuccess(out, data, req.URL.Path); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -464,6 +471,14 @@ func (c *Client) doWithRetry(ctx context.Context, buildReq func() (*http.Request
 		}
 		if err := json.Unmarshal(data, out); err != nil {
 			return struct{}{}, retry.Permanent(fmt.Errorf("hooppy: decode response: %w", err))
+		}
+		// A 2xx with {"success":false} is a DECIDED failure, not a transient
+		// one — it MUST NOT be retried (re-sending a decided-false mutation
+		// is pointless at best and a duplicate write at worst). Wrap with
+		// retry.Permanent so it stops immediately and never re-enters the
+		// retry ladder. See success_gate.go.
+		if err := checkSuccess(out, data, resp.Request.URL.Path); err != nil {
+			return struct{}{}, retry.Permanent(err)
 		}
 		return struct{}{}, nil
 	})

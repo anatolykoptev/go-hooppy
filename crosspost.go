@@ -31,6 +31,12 @@ func (c *Client) createPostWithMode(ctx context.Context, mode CrossPostMode, pay
 	if err := c.doPUT(ctx, fmt.Sprintf("/posts/%s", mode), payload, &resp, false); err != nil {
 		return nil, err
 	}
+	// A 2xx with no id (id:0 / absent) is a create that produced no handle —
+	// surface it instead of returning a zero that flows into posts
+	// move/update/delete as a real-looking handle (issue #131).
+	if err := checkCreateID(fmt.Sprintf("PUT /posts/%s", mode), resp.ID, resp.IDs, resp.SlotLookupError); err != nil {
+		return nil, err
+	}
 	return &resp, nil
 }
 
