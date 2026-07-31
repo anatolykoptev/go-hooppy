@@ -123,14 +123,46 @@ func parseIntListStr(s string) []int {
 	return ids
 }
 
-// errSchedulesWithoutWhenType3 is the shared "schedules given with a
-// non-schedule when-type" refusal for the MCP builders. flagName is the
-// surface's flag name ("schedules_ids") so the wording cannot drift between
-// the copy and rewrite builders. The CLI carries an identical helper
-// parameterised with "--schedules"; the two surfaces share the same wording
-// via the same flagName contract.
-func errSchedulesWithoutWhenType3(whenType int, flagName string) error {
-	return fmt.Errorf("%s is only meaningful with when-type 3 (by schedule); with when-type %d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass when-type 3 to queue by schedule, or drop %s to publish as when-type %d intends", flagName, whenType, flagName, whenType)
+// errSchedulesWithoutWhenType3 is the "schedules given with a non-schedule
+// when-type" refusal for the MCP builders. Both parameters name THIS
+// surface's fields: flagName is "schedules_ids" and whenTypeField is
+// "publication_when_type". An error handed to an agent is a corrective
+// instruction, so it has to name keys the agent can actually set — an earlier
+// dedup of this sentence collapsed both surfaces onto the literal "when-type
+// 3", which is neither surface's field name.
+//
+// The CLI carries its own copy parameterised with "--schedules" and
+// "--when-type". The two are deliberately separate functions: they live in
+// different packages and say different things, and a comment claiming they
+// cannot drift would be claiming an invariant nothing enforces.
+func errSchedulesWithoutWhenType3(whenType int, flagName, whenTypeField string) error {
+	return fmt.Errorf("%s is only meaningful with %s=3 (by schedule); with %s=%d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass %s=3 to queue by schedule, or drop %s to publish as %s=%d intends", flagName, whenTypeField, whenTypeField, whenType, whenTypeField, flagName, whenTypeField, whenType)
+}
+
+// checkPublicationWhenType rejects a when-type outside {1,2,3} before any
+// payload is built.
+//
+// The zero value is the reason this exists. On MCP the caller is an LLM, and
+// an omitted publication_when_type arrives as 0 — which the payload switch
+// below routes through `default:` into the publish-to-pages-NOW branch. So
+// the omitted-field path on an irreversible publishing tool was the
+// irreversible path. The CLI closed the same hole by moving its flag default
+// from 1 to 3; MCP has no default to move, so it must refuse instead.
+//
+// This is sharper while issue #143 is open: these two tools register with an
+// OPEN schema (a jsonschema tag description beginning "1=publish now" breaks
+// inference and AddTool falls back), so the SDK never tells the agent the
+// field is required. Until #143 restores the schema, this check is the only
+// thing standing between an omitted field and a live publish.
+func checkPublicationWhenType(whenType int) error {
+	switch whenType {
+	case 1, 2, 3:
+		return nil
+	case 0:
+		return fmt.Errorf("publication_when_type is required and must be 1 (publish now), 2 (at a specific time) or 3 (by schedule) — it was omitted, and an omitted value must not be read as 'publish now' on a tool that publishes irreversibly")
+	default:
+		return fmt.Errorf("publication_when_type=%d is not a valid value — use 1 (publish now), 2 (at a specific time) or 3 (by schedule)", whenType)
+	}
 }
 
 // parseOrderedIDListStr parses a comma-separated id list STRICTLY: any
@@ -1658,30 +1690,38 @@ func registerStopParsing(server *mcp.Server) {
 			if err != nil {
 				return errResult(err.Error())
 			}
-			if res.ConfirmErr != "" {
-				return errResult("stop request accepted, but parsing status could not be confirmed: " + res.ConfirmErr + " — re-run parsing_status to check is_parsing_in_progress")
-			}
-			if res.IsParsingInProgress {
-				// A stop is asynchronous server-side (~5s between stop-sent
-				// and is_parsing_in_progress going false, measured
-				// posts_search.go:469-471). An immediate re-read after a stop
-				// that WILL succeed can still show in_progress — true at read
-				// time. Return a STATE, not a failure: an LLM agent reading
-				// errResult retries the stop, and a retried stop cancels a job
-				// started in the interim (posts_search.go:485-489). Carrying
-				// is_parsing_in_progress:true lets the agent poll
-				// parsing_status instead of re-stopping.
-				return jsonResult(map[string]interface{}{
-					"success":                false,
-					"is_parsing_in_progress": true,
-				})
-			}
-			return jsonResult(map[string]interface{}{
-				"success":                true,
-				"is_parsing_in_progress": false,
-			})
+			return stopParsingResult(res)
 		},
 	)
+}
+
+// stopParsingResult maps an observed stop outcome to a tool result. It is a
+// function rather than an inline handler body so the three arms are reachable
+// from a test: the whole MCP stop path had zero coverage, and the
+// in-progress arm below could be reverted to errResult with the entire suite
+// still green.
+func stopParsingResult(res *hooppy.StopParsingResult) (*mcp.CallToolResult, error) {
+	if res.ConfirmErr != "" {
+		return errResult("stop request accepted, but parsing status could not be confirmed: " + res.ConfirmErr + " — re-run parsing_status to check is_parsing_in_progress")
+	}
+	if res.IsParsingInProgress {
+		// A stop is asynchronous server-side (~5s between stop-sent and
+		// is_parsing_in_progress going false, measured posts_search.go:
+		// 469-471). An immediate re-read after a stop that WILL succeed can
+		// still show in_progress — true at read time. Return a STATE, not a
+		// failure: an LLM agent reading errResult retries the stop, and a
+		// retried stop cancels a job started in the interim
+		// (posts_search.go:485-489). Carrying is_parsing_in_progress:true
+		// lets the agent poll parsing_status instead of re-stopping.
+		return jsonResult(map[string]interface{}{
+			"success":                false,
+			"is_parsing_in_progress": true,
+		})
+	}
+	return jsonResult(map[string]interface{}{
+		"success":                true,
+		"is_parsing_in_progress": false,
+	})
 }
 
 // --- copy_search_post ---
@@ -1707,6 +1747,9 @@ func buildCopySearchPostPayload(in copySearchPostInput) (hooppy.CopySearchPostPa
 	if in.SearchPostID == 0 {
 		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id is required (use list_search_posts to find IDs)")
 	}
+	if err := checkPublicationWhenType(in.PublicationWhenType); err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
 	if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
 		return hooppy.CopySearchPostPayload{}, fmt.Errorf("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
 	}
@@ -1721,7 +1764,7 @@ func buildCopySearchPostPayload(in copySearchPostInput) (hooppy.CopySearchPostPa
 	// is published to pages NOW — an irreversible publish the caller
 	// did not ask for.
 	if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
-		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids")
+		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids", "publication_when_type")
 	}
 	payload := hooppy.CopySearchPostPayload{
 		SearchPostID:        in.SearchPostID,
@@ -1810,6 +1853,9 @@ func buildRewriteSearchPostPayload(in rewriteSearchPostInput) (hooppy.CopySearch
 	if !batch && in.Text == "" {
 		return hooppy.CopySearchPostPayload{}, fmt.Errorf("text is required for search_post_id (rewrite overrides the single post's text)")
 	}
+	if err := checkPublicationWhenType(in.PublicationWhenType); err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
 	if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
 		return hooppy.CopySearchPostPayload{}, fmt.Errorf("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
 	}
@@ -1823,7 +1869,7 @@ func buildRewriteSearchPostPayload(in rewriteSearchPostInput) (hooppy.CopySearch
 	// when_type 1/2 is silently dropped and the post is published to pages NOW
 	// — an irreversible publish the caller did not ask for.
 	if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
-		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids")
+		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids", "publication_when_type")
 	}
 	// search_post_ids is ORDER-SIGNIFICANT (the server assigns schedule
 	// slots in the given order), so parse it STRICTLY: a lenient parse that

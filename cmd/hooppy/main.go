@@ -1183,14 +1183,18 @@ func parseIntList(s string) []int {
 	return ids
 }
 
-// errSchedulesWithoutWhenType3 is the shared "schedules given with a
-// non-schedule when-type" refusal for the CLI builders. flagName is the
-// surface's flag name ("--schedules") so the wording cannot drift between the
-// copy, rewrite, and import builders. The MCP carries an identical helper
-// parameterised with "schedules_ids"; the two surfaces share the same wording
-// via the same flagName contract.
+// errSchedulesWithoutWhenType3 is the "schedules given with a non-schedule
+// when-type" refusal shared by the CLI's copy, rewrite and import builders.
+// flagName is this surface's flag ("--schedules"), and the message names
+// "--when-type" for the same reason: an error is a corrective instruction, so
+// it must name flags the operator can actually type.
+//
+// MCP carries its own copy naming "schedules_ids" and "publication_when_type".
+// The two are deliberately separate functions in separate packages saying
+// different things; nothing enforces that they agree, and a comment claiming
+// they cannot drift would assert an invariant that does not exist.
 func errSchedulesWithoutWhenType3(whenType int, flagName string) error {
-	return fmt.Errorf("%s is only meaningful with when-type 3 (by schedule); with when-type %d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass when-type 3 to queue by schedule, or drop %s to publish as when-type %d intends", flagName, whenType, flagName, whenType)
+	return fmt.Errorf("%s is only meaningful with --when-type 3 (by schedule); with --when-type %d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass --when-type 3 to queue by schedule, or drop %s to publish as --when-type %d intends", flagName, whenType, flagName, whenType)
 }
 
 // buildCopyPayload validates search copy flags and builds the payload. copy
