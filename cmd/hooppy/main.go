@@ -39,6 +39,7 @@ func main() {
 	registerSearch(root)
 	registerMCPConfig(root)
 	registerDoctor(root)
+	registerCrossPostings(root)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -1481,4 +1482,73 @@ func runDoctor(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, sin
 		return 1
 	}
 	return 0
+}
+
+// --- crossposting (the /cross-posting rule engine, undocumented) ---
+//
+// `hooppy crossposting` exposes the server-side cross-posting rule engine
+// (#57): connections that collect from source publics on a timer, rank by
+// engagement, filter by thresholds, deduplicate, and publish into a
+// project/schedule. The read surface is list / show / stats; writes are a
+// separate task (this account is production).
+func registerCrossPostings(root *cobra.Command) {
+	cpCmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
+		Name:  "crossposting",
+		Short: "Manage cross-posting rule-engine connections (undocumented endpoints)",
+		Long: "Inspect the /cross-posting rule engine: connections that collect from source publics on a timer, " +
+			"rank by engagement, filter by thresholds, deduplicate, and publish into a project/schedule. " +
+			"Read-only surface (list / show / stats); writes are a separate task. UNDOCUMENTED endpoints — may change without notice.",
+	})
+	cpCmd.Args = cobra.NoArgs
+	cpCmd.RunE = groupHelpRun
+
+	// crossposting list
+	listCmd := cli.RegisterSubcommand(cpCmd, cli.SubcommandConfig{
+		Name:  "list",
+		Short: "List cross-posting connections (undocumented endpoint)",
+	})
+	listCmd.Args = cobra.NoArgs
+	var cpPage int
+	var cpAll bool
+	listCmd.Flags().IntVar(&cpPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
+	listCmd.Flags().BoolVar(&cpAll, "all", false, "fetch all pages (walks until is_has_more is false)")
+	listCmd.Run = func(_ *cobra.Command, _ []string) {
+		c := mustClient()
+		os.Exit(runListCrossPostings(context.Background(), c, os.Stdout, os.Stderr, cpPage, cpAll))
+	}
+
+	// crossposting show <id>
+	showCmd := cli.RegisterSubcommand(cpCmd, cli.SubcommandConfig{
+		Name:  "show <connection-id>",
+		Short: "Show a connection's full editable state with decoded enum names (undocumented endpoint)",
+		Long: "Fetch a cross-posting connection's full editable state (GET /cross-posting/{id}/edit, 95 keys) and " +
+			"print it with the integer enums DECODED to names alongside the raw integers (search_mode, " +
+			"search_mode_direction, determine_best_by, check_when_type, check_interval) and the engagement " +
+			"thresholds (search_likes/views/comments/reposts, 0 = unset). The full raw body is preserved — no " +
+			"field is dropped. UNDOCUMENTED endpoint — may change without notice.",
+	})
+	showCmd.Args = cobra.ExactArgs(1)
+	showCmd.Run = func(_ *cobra.Command, args []string) {
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		os.Exit(runShowCrossPosting(context.Background(), c, os.Stdout, os.Stderr, id))
+	}
+
+	// crossposting stats <id>
+	statsCmd := cli.RegisterSubcommand(cpCmd, cli.SubcommandConfig{
+		Name:  "stats <connection-id>",
+		Short: "Show a connection's per-day statistics (undocumented endpoint)",
+		Long: "Fetch a cross-posting connection's per-day statistics (GET /cross-posting/{id}/statistics): " +
+			"found, filtered, duplicates, taken, errors. A non-empty array with all-zero counters is a REAL " +
+			"measurement (the engine ran and found nothing — the live state today); an empty array is absent " +
+			"data (the engine has not run). UNDOCUMENTED endpoint — may change without notice.",
+	})
+	statsCmd.Args = cobra.ExactArgs(1)
+	statsCmd.Run = func(_ *cobra.Command, args []string) {
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		os.Exit(runCrossPostingStats(context.Background(), c, os.Stdout, os.Stderr, id))
+	}
 }

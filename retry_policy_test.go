@@ -108,6 +108,14 @@ var retryPolicies = map[string]struct {
 	"UpdateScheduleFromEdit": {retryNever, false},
 	"DeleteSchedule":         {retryAllowed, false},
 	"GetScheduleEdit":        {retryAllowed, false},
+	// --- cross-posting rule engine (the /cross-posting subsystem, #57) ---
+	// Read-only surface: list / show / stats. No writes in this task, so
+	// no create-shaped entries. ListAll* are composite (walk pages).
+	"ListCrossPostings":             {retryAllowed, false},
+	"ListAllCrossPostings":          {retryComposite, false},
+	"ListAllCrossPostingsWithTotal": {retryComposite, false},
+	"GetCrossPostingEdit":           {retryAllowed, false},
+	"GetCrossPostingStatistics":     {retryAllowed, false},
 	// --- posts search (scraping) ---
 	"ListSearchPosts":                         {retryAllowed, false},
 	"ListAllSearchPosts":                      {retryComposite, false},

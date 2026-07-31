@@ -77,6 +77,11 @@ func registerTools(server *mcp.Server) {
 	registerStopParsing(server)
 	registerCopySearchPost(server)
 	registerRewriteSearchPost(server)
+	// Cross-posting rule engine (the /cross-posting subsystem, NOT the
+	// /posts/{mode} cross-post dispatcher) — UNDOCUMENTED, read-only surface.
+	registerListCrossPostings(server)
+	registerGetCrossPostingEdit(server)
+	registerGetCrossPostingStatistics(server)
 }
 
 // --- helpers ---
@@ -1815,6 +1820,115 @@ func registerRewriteSearchPost(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			resp, err := c.RewriteSearchPost(ctx, payload)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- Cross-posting rule engine (the /cross-posting subsystem) ---
+//
+// Three read-only tools for the server-side cross-posting rule engine (#57):
+// connections that collect from source publics on a timer, rank by
+// engagement, filter by thresholds, deduplicate, and publish into a
+// project/schedule. The API speaks in integer enums; the tools expose the
+// decoded names alongside the raw integers (issue #51). UNDOCUMENTED
+// endpoints — may change without notice. Writes are a separate task.
+
+// --- list_cross_postings (undocumented endpoint) ---
+
+type listCrossPostingsInput struct {
+	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
+	All  bool `json:"all,omitempty" jsonschema:"If true, fetch ALL pages in one call (walks until is_has_more is false). Recommended for LLM clients that cannot paginate reliably; overrides page. Cross-posting connections are low-churn (rarely created/deleted), so the full walk is safe."`
+}
+
+func registerListCrossPostings(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_list_cross_postings",
+			Description: "List the operator's cross-posting rule-engine connections on Hooppy. A connection is a server-side rule that collects fresh posts from source publics on a timer, ranks them by engagement (search_mode: 1 new · 2 old · 3 best · 4 random; determine_best_by: 1 likes · 2 reposts · 3 comments · 4 views), filters by engagement thresholds (search_likes/views/comments/reposts, 0 = unset), deduplicates, and publishes into a project/schedule. Each row carries the five integer enums, the four thresholds, take_amount, state, and the check schedule (check_when_type: 1 by interval · 2 at fixed times; check_interval: 1 every 30 min · 2 hourly · ... · 12 three times weekly). The enum integers are decoded to names in the response. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows). UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in listCrossPostingsInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			if in.All {
+				all, total, err := c.ListAllCrossPostingsWithTotal(ctx)
+				if err != nil {
+					return errResult(err.Error())
+				}
+				env, err := hooppy.NewAllListEnvelope(all, total, func(cp hooppy.CrossPosting) int { return cp.ID })
+				if err != nil {
+					return errResult(err.Error())
+				}
+				return jsonResult(env)
+			}
+			resp, err := c.ListCrossPostings(ctx, in.Page)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- get_cross_posting_edit (undocumented endpoint) ---
+
+type getCrossPostingEditInput struct {
+	ID int `json:"id" jsonschema:"Cross-posting connection ID to fetch the full editable state for (use list_cross_postings to find IDs). REQUIRED."`
+}
+
+func registerGetCrossPostingEdit(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_get_cross_posting_edit",
+			Description: "Get a cross-posting connection's full editable state (GET /cross-posting/{id}/edit, 95 keys), with the five integer enums DECODED to names alongside the raw integers and the four engagement thresholds (search_likes/views/comments/reposts, 0 = unset). The full raw body is preserved — no field is dropped — so the future write path can read-modify-write without losing fields. This is the endpoint that models the connection's full state; there is no direct GET by id (405). The decoded enum names are injected as *_name keys (search_mode_name, search_mode_direction_name, determine_best_by_name, check_when_type_name, check_interval_name); the raw integers stay in the original keys for round-tripping. An enum value the bundle does not define is marked *_unknown=true. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in getCrossPostingEditInput) (*mcp.CallToolResult, error) {
+			if in.ID == 0 {
+				return errResult("id is required (use list_cross_postings to find IDs)")
+			}
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.GetCrossPostingEdit(ctx, in.ID)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			enriched, err := hooppy.EnrichedCrossPostingEditMap(resp)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(enriched)
+		},
+	)
+}
+
+// --- get_cross_posting_statistics (undocumented endpoint) ---
+
+type getCrossPostingStatisticsInput struct {
+	ID int `json:"id" jsonschema:"Cross-posting connection ID to fetch per-day statistics for (use list_cross_postings to find IDs). REQUIRED."`
+}
+
+func registerGetCrossPostingStatistics(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_get_cross_posting_statistics",
+			Description: "Get a cross-posting connection's per-day statistics (GET /cross-posting/{id}/statistics): for each day, posts_found_amount (checked), posts_filtered_amount (rejected by thresholds), posts_duplicates_amount (already seen), posts_taken_amount (published), and errors. A non-empty statistics array with all-zero counters is a REAL measurement — the engine ran and found/filtered/took nothing (the live state today on a configured-but-not-producing connection); an empty array is absent data (the engine has not run). Do not mistake zero counters for no data. UNDOCUMENTED endpoint — may change without notice.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in getCrossPostingStatisticsInput) (*mcp.CallToolResult, error) {
+			if in.ID == 0 {
+				return errResult("id is required (use list_cross_postings to find IDs)")
+			}
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.GetCrossPostingStatistics(ctx, in.ID)
 			if err != nil {
 				return errResult(err.Error())
 			}
