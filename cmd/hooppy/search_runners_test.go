@@ -198,7 +198,7 @@ func TestRunRewriteSearchPost_SchedulesDropped_NoRequest_F3(t *testing.T) {
 	if got := reqCount.Load(); got != 0 {
 		t.Fatalf("reqCount = %d, want 0 — the guard must fail BEFORE any request reaches the server; a request means the post was published with a different meaning than the caller asked (issue #111). stderr: %s", got, errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "when-type 3") {
+	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "--when-type 3") {
 		t.Errorf("stderr should name the schedules/when-type-3 cause, got:\n%s", errOut.String())
 	}
 }
@@ -269,7 +269,7 @@ func TestRunCopySearchPost_SchedulesDropped_NoRequest_F4(t *testing.T) {
 	if got := reqCount.Load(); got != 0 {
 		t.Fatalf("reqCount = %d, want 0 — the guard must fail BEFORE any request reaches the server; a request means the post was published with a different meaning than the caller asked (issue #111). stderr: %s", got, errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "when-type 3") {
+	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "--when-type 3") {
 		t.Errorf("stderr should name the schedules/when-type-3 cause, got:\n%s", errOut.String())
 	}
 }
@@ -339,7 +339,7 @@ func TestRunImport_SchedulesDropped_NoRequest_F6(t *testing.T) {
 	if got := reqCount.Load(); got != 0 {
 		t.Fatalf("reqCount = %d, want 0 — the guard must fail BEFORE any request reaches the server; a request means the post was published with a different meaning than the caller asked (issue #111). stderr: %s", got, errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "when-type 3") {
+	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "--when-type 3") {
 		t.Errorf("stderr should name the schedules/when-type-3 cause, got:\n%s", errOut.String())
 	}
 }
