@@ -1619,8 +1619,19 @@ type SourceResource struct {
 }
 
 // SourceResourcesResponse wraps GET /posts-search/source-resources.
+//
+// The server sends the same {list, total_rows, is_has_more, rows_limit}
+// envelope every other list endpoint sends (see testdata/live/
+// source_resources.json and issue #98). The three paging fields were
+// previously dropped at decode, so above 20 source resources the list
+// silently truncated and no caller could detect it — the signal the server
+// sent was discarded. They are modelled now so a truncation warning can be
+// computed and an --all walk can terminate on is_has_more.
 type SourceResourcesResponse struct {
-	List []SourceResource `json:"list"`
+	List      []SourceResource `json:"list"`
+	TotalRows int              `json:"total_rows"`
+	IsHasMore bool             `json:"is_has_more"`
+	RowsLimit int              `json:"rows_limit"`
 }
 
 // SocialAccount is an authenticated account that can be used as a parser.

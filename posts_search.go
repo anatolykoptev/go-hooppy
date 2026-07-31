@@ -197,16 +197,236 @@ func (c *Client) ListSearchPosts(ctx context.Context, f SearchPostsFilter) (*Sea
 	return &resp, nil
 }
 
-// ListSourceResources returns the configured source resources (groups of
-// external social media pages to scrape from).
+// SearchPostsAllResult is the result of an --all walk over /posts-search
+// (ListAllSearchPostsWithFirstAndLastTotal). It carries the accumulated list
+// and the first/last total_rows for the high-churn truncation check, plus a
+// Capped flag that is true when the walk stopped at the server's reachable
+// window (Elasticsearch max_result_window) instead of is_has_more going false.
 //
-// UNDOCUMENTED: GET /posts-search/source-resources is not in the public OpenAPI spec.
-func (c *Client) ListSourceResources(ctx context.Context) (*SourceResourcesResponse, error) {
+// When Capped is true the list is everything the server could serve via
+// offset paging — a bounded, complete-as-possible result, NOT a complete
+// list. Older rows exist but are unreachable by page number alone; the caller
+// MUST narrow with date_from/date_to to reach them. The truncation check
+// (NewAllListEnvelopeHighChurn) MUST be skipped in this case: a capped
+// total_rows is a ceiling, not a count (it does not decrease and is_has_more
+// never clears), and validating unique-count against it validates against a
+// constant. Use NewCappedAllListEnvelope to build the honest envelope
+// (is_has_more=true, no count check) and surface a warning to the operator.
+type SearchPostsAllResult struct {
+	List           []SearchPost
+	FirstTotalRows int
+	LastTotalRows  int
+	Capped         bool
+}
+
+// ListAllSearchPosts walks GET /posts-search from page 1 with the given
+// filter, accumulating scraped posts until is_has_more is false. The walk
+// starts at page 1 so the first page is not fetched twice (the Hooppy API is
+// 1-indexed and a request with no page param is byte-identical to ?page=1).
+// The filter's non-page fields are preserved across the walk; only Page is
+// incremented. See projects.ListAllSchedules for the 1-indexed rationale and
+// the sanity cap.
+//
+// Duplicates arising from a mid-walk collection shift are NOT removed: with
+// offset pagination, a row inserted or deleted mid-walk shifts the window
+// and the server re-serves a row already seen. This entry point drops the
+// server's total_rows, so it cannot detect such duplicates. /posts-search is
+// a high-churn collection (scraped posts accumulate), so passing (list,
+// totalRows) to NewAllListEnvelope is NOT suitable — its equality check
+// (unique == total) false-alarms on every active account, exactly as it does
+// for /posts and /notifications (see NewAllListEnvelope for the per call-site
+// table). Use ListAllSearchPostsWithTotal and the unique < firstTotal rule
+// (see RunDoctor) when a truncated-walk check is needed.
+//
+// The walk is bounded by maxListAllPages; if the server never clears
+// is_has_more within that bound, ListAllSearchPosts returns an error instead
+// of looping forever or silently truncating.
+//
+// If the walk hits the server's reachable window (Elasticsearch
+// max_result_window) this entry point returns an ERROR naming the cap — it
+// has no way to surface the Capped flag, and returning a silently-capped
+// list would repeat the silent-truncation defect. Callers that want the
+// bounded partial result (the rows already collected, marked honestly) MUST
+// use ListAllSearchPostsWithFirstAndLastTotal and check its Capped field.
+func (c *Client) ListAllSearchPosts(ctx context.Context, f SearchPostsFilter) ([]SearchPost, error) {
+	res, err := c.ListAllSearchPostsWithFirstAndLastTotal(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	if res.Capped {
+		return nil, fmt.Errorf("hooppy: ListAllSearchPosts: walk stopped at the server's reachable window (Elasticsearch max_result_window) after %d rows — older rows exist but are unreachable by offset paging; use ListAllSearchPostsWithFirstAndLastTotal to receive the capped partial result, or narrow with date_from/date_to", len(res.List))
+	}
+	return res.List, nil
+}
+
+// ListAllSearchPostsWithTotal is ListAllSearchPosts but also returns the
+// server's last-seen total_rows. It exists for symmetry with the other
+// ListAll*WithTotal entry points; for /posts-search specifically, passing
+// (list, totalRows) to NewAllListEnvelope is NOT suitable (see
+// ListAllSearchPosts). The right shape is the unique < firstTotal rule
+// doctor uses for /notifications; use ListAllSearchPostsWithFirstAndLastTotal
+// and NewAllListEnvelopeHighChurn. See NewAllListEnvelope for the per
+// call-site table.
+//
+// Like ListAllSearchPosts, this entry point returns an ERROR on a capped walk
+// rather than a silently-capped list — use ListAllSearchPostsWithFirstAndLastTotal
+// for the bounded partial result.
+func (c *Client) ListAllSearchPostsWithTotal(ctx context.Context, f SearchPostsFilter) ([]SearchPost, int, error) {
+	res, err := c.ListAllSearchPostsWithFirstAndLastTotal(ctx, f)
+	if err != nil {
+		return nil, 0, err
+	}
+	if res.Capped {
+		return nil, 0, fmt.Errorf("hooppy: ListAllSearchPostsWithTotal: walk stopped at the server's reachable window (Elasticsearch max_result_window) after %d rows — older rows exist but are unreachable by offset paging; use ListAllSearchPostsWithFirstAndLastTotal to receive the capped partial result, or narrow with date_from/date_to", len(res.List))
+	}
+	return res.List, res.LastTotalRows, nil
+}
+
+// ListAllSearchPostsWithFirstAndLastTotal is ListAllSearchPosts but also
+// returns the server's total_rows from the FIRST page and the LAST page, plus
+// a Capped flag, in a SearchPostsAllResult. The triple (list, firstTotalRows,
+// lastTotalRows) lets a caller distinguish a truncated walk (unique count <
+// firstTotalRows) from a benign mid-walk insert (lastTotalRows >
+// firstTotalRows) — the distinction NewAllListEnvelope cannot make because it
+// receives only one total. High-churn --all call sites (cmd/hooppy/list.go,
+// cmd/hooppy-mcp/main.go) use this with NewAllListEnvelopeHighChurn to apply
+// the first-total rule instead of the equality check. See
+// NewAllListEnvelopeHighChurn and RunDoctor for the rule and the gaps it does
+// not close.
+//
+// When Capped is true the walk stopped at the server's reachable window
+// (Elasticsearch max_result_window): the server returned HTTP 500 with
+// "Result window is too large" on the next page. The rows in List are
+// everything collected so far — a bounded, complete-as-possible result, NOT a
+// complete list. The caller MUST skip NewAllListEnvelopeHighChurn (a capped
+// total_rows is a ceiling, not a count) and build the envelope with
+// NewCappedAllListEnvelope (is_has_more=true) plus a warning naming the
+// date_from/date_to remedy. Any OTHER mid-walk error (a generic 500, an
+// exhausted 429, a network fault) is NOT the ceiling and still returns an
+// error — turning every server error into a partial success would mask real
+// failures.
+func (c *Client) ListAllSearchPostsWithFirstAndLastTotal(ctx context.Context, f SearchPostsFilter) (*SearchPostsAllResult, error) {
+	all := make([]SearchPost, 0)
+	var firstTotalRows, lastTotalRows int
+	for page := 1; ; page++ {
+		if page > maxListAllPages {
+			return nil, fmt.Errorf("hooppy: ListAllSearchPosts exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+		}
+		f.Page = page
+		resp, err := c.ListSearchPosts(ctx, f)
+		if err != nil {
+			// The Elasticsearch max_result_window rejection: the server
+			// refuses offset paging past its reachable window (from + size >
+			// max_result_window). This is a HARD CEILING, not a transient
+			// failure and not a truncation the walk can page past. Discarding
+			// every row collected so far (the prior behaviour) is the worst
+			// available outcome — it is the same shape as the bug this branch
+			// set out to fix: a command that cannot give the operator what it
+			// already has. Stop at the reachable window and return the rows
+			// already collected, marked Capped so the caller labels the result
+			// honestly instead of asserting completeness.
+			//
+			// Only treat a NON-empty walk this way: a result-window error on
+			// page 1 (nothing collected) is impossible in practice (the wall
+			// is at offset >= max_result_window, well past page 1) but
+			// defended against — return the error, there is nothing to return.
+			// Any OTHER error (a generic 500, an exhausted 429, a network
+			// fault) is NOT the ceiling and MUST fail loud: turning every
+			// server error into a partial success would mask real failures.
+			if isResultWindowError(err) && len(all) > 0 {
+				return &SearchPostsAllResult{
+					List:           all,
+					FirstTotalRows: firstTotalRows,
+					LastTotalRows:  lastTotalRows,
+					Capped:         true,
+				}, nil
+			}
+			return nil, err
+		}
+		if page == 1 {
+			firstTotalRows = resp.TotalRows
+		}
+		all = append(all, resp.List...)
+		lastTotalRows = resp.TotalRows
+		if !resp.IsHasMore {
+			return &SearchPostsAllResult{
+				List:           all,
+				FirstTotalRows: firstTotalRows,
+				LastTotalRows:  lastTotalRows,
+			}, nil
+		}
+	}
+}
+
+// ListSourceResources returns the configured source resources (groups of
+// external social media pages to scrape from). page is 1-indexed (0 or omit
+// = first page); a negative is rejected before any request so a paging loop
+// cannot silently re-read page 1. Same defect class as the search/posts/
+// accounts/pages page guards (see ListSearchPosts).
+//
+// UNDOCUMENTED: GET /posts-search/source-resources is not in the public
+// OpenAPI spec. The endpoint carries the standard {list, total_rows,
+// is_has_more, rows_limit} envelope (see testdata/live/source_resources.json
+// and issue #98), so it is paged like its siblings; the page parameter is
+// sent verbatim and the server answers.
+func (c *Client) ListSourceResources(ctx context.Context, page int) (*SourceResourcesResponse, error) {
+	params := url.Values{}
+	if page < 0 {
+		return nil, fmt.Errorf("hooppy: ListSourceResources: page must be non-negative (got %d); pass 0 to leave unset", page)
+	}
+	if page > 0 {
+		params.Set("page", strconv.Itoa(page))
+	}
 	var resp SourceResourcesResponse
-	if err := c.doGET(ctx, pathPostsSearchSources, nil, &resp, true); err != nil {
+	if err := c.doGET(ctx, pathPostsSearchSources, params, &resp, true); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// ListAllSourceResources walks GET /posts-search/source-resources from page
+// 1, accumulating source resources until is_has_more is false. The walk
+// starts at page 1 so the first page is not fetched twice (the Hooppy API is
+// 1-indexed and a request with no page param is byte-identical to ?page=1).
+// See projects.ListAllSchedules for the 1-indexed rationale and the sanity
+// cap.
+//
+// Duplicates arising from a mid-walk collection shift are NOT removed: with
+// offset pagination, a row inserted or deleted mid-walk shifts the window
+// and the server re-serves a row already seen. This entry point drops the
+// server's total_rows, so it cannot detect such duplicates. Use
+// ListAllSourceResourcesWithTotal with NewAllListEnvelope to detect them
+// (see NewAllListEnvelope for what it does and does not catch).
+//
+// The walk is bounded by maxListAllPages; if the server never clears
+// is_has_more within that bound, ListAllSourceResources returns an error
+// instead of looping forever or silently truncating.
+func (c *Client) ListAllSourceResources(ctx context.Context) ([]SourceResource, error) {
+	all, _, err := c.ListAllSourceResourcesWithTotal(ctx)
+	return all, err
+}
+
+// ListAllSourceResourcesWithTotal is ListAllSourceResources but also returns
+// the server's last-seen total_rows. The pair (list, totalRows) is meant to
+// be passed to NewAllListEnvelope. See projects.ListAllSchedulesWithTotal
+// and NewAllListEnvelope for what the envelope catches and what it does not.
+func (c *Client) ListAllSourceResourcesWithTotal(ctx context.Context) ([]SourceResource, int, error) {
+	all := make([]SourceResource, 0)
+	var totalRows int
+	for page := 1; ; page++ {
+		if page > maxListAllPages {
+			return nil, 0, fmt.Errorf("hooppy: ListAllSourceResources exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+		}
+		resp, err := c.ListSourceResources(ctx, page)
+		if err != nil {
+			return nil, 0, err
+		}
+		all = append(all, resp.List...)
+		totalRows = resp.TotalRows
+		if !resp.IsHasMore {
+			return all, totalRows, nil
+		}
+	}
 }
 
 // GetParsingForm returns the parsing form data (available source resources,

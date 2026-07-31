@@ -235,22 +235,40 @@ type AllListEnvelope struct {
 //
 // Call sites and whether the collection can change mid-walk (the equality
 // check above is only safe for low-churn collections):
-//   - cmd/hooppy-mcp/main.go:212 — posts (ListAllPostsWithTotal). HIGH-CHURN:
-//     posts are created and published continuously; a post created or
-//     published between page fetches shifts the offset window and makes
-//     unique != total on a healthy account — the equality check
-//     false-alarms here exactly as it did for /notifications before PR #64.
-//     NOT covered by the first-total rule; tracked in #70.
-//   - cmd/hooppy-mcp/main.go:445 — projects. Low-churn; a project created
-//     mid-walk is rare. Equality check is acceptable.
-//   - cmd/hooppy-mcp/main.go:483 — schedules. Low-churn; same reasoning.
-//   - cmd/hooppy/main.go:350 — projects (CLI). Same as the MCP projects site.
-//   - cmd/hooppy/main.go:440 — schedules (CLI). Same as the MCP schedules site.
 //
-// The posts site is the known gap: it walks the highest-churn collection in
-// the API with a check designed for low-churn ones. The fix is to apply the
-// first-total rule (unique < firstTotal) there too, as doctor does for
-// /notifications; see #70.
+// LOW-CHURN (equality check via NewAllListEnvelope — unique == lastTotal):
+//   - cmd/hooppy/list.go:55 — pages (ListAllPagesWithTotal). Low-churn.
+//   - cmd/hooppy/list.go:78 — accounts (ListAllAccountsWithTotal). Low-churn.
+//   - cmd/hooppy/list.go:124 — proxies (ListAllProxiesWithTotal). Low-churn.
+//   - cmd/hooppy/list.go:147 — watermarks (ListAllWatermarksWithTotal). Low-churn.
+//   - cmd/hooppy/list.go:216 — source resources (ListAllSourceResourcesWithTotal). Low-churn.
+//   - cmd/hooppy/list.go:239 — projects (ListAllProjectsWithTotal). Low-churn.
+//   - cmd/hooppy/list.go:262 — schedules (ListAllSchedulesWithTotal). Low-churn.
+//   - cmd/hooppy-mcp/main.go:185 — accounts (MCP). Low-churn.
+//   - cmd/hooppy-mcp/main.go:225 — pages (MCP). Low-churn.
+//   - cmd/hooppy-mcp/main.go:511 — projects (MCP). Low-churn.
+//   - cmd/hooppy-mcp/main.go:549 — schedules (MCP). Low-churn.
+//   - cmd/hooppy-mcp/main.go:745 — watermarks (MCP). Low-churn.
+//   - cmd/hooppy-mcp/main.go:783 — proxies (MCP). Low-churn.
+//   - cmd/hooppy-mcp/main.go:1524 — source resources (MCP). Low-churn.
+//
+// HIGH-CHURN (first-total rule via NewAllListEnvelopeHighChurn — unique < firstTotal):
+//   - cmd/hooppy/list.go:101 — notifications (ListAllNotificationsWithFirstAndLastTotal).
+//   - cmd/hooppy/list.go:170 — posts (ListAllPostsWithFirstAndLastTotal).
+//   - cmd/hooppy/list.go:193 — search posts (ListAllSearchPostsWithFirstAndLastTotal).
+//   - cmd/hooppy-mcp/main.go:278 — posts (MCP).
+//   - cmd/hooppy-mcp/main.go:821 — notifications (MCP).
+//   - cmd/hooppy-mcp/main.go:1486 — search posts (MCP).
+//
+// The high-churn sites use the first-total rule (unique < firstTotal) instead
+// of the equality check (unique == lastTotal). A row created between page
+// fetches shifts the offset window and makes unique != lastTotal on a healthy
+// account — the equality check false-alarms. The first-total rule treats
+// lastTotal > firstTotal as a benign mid-walk insert and only errors when
+// unique < firstTotal (rows the server initially reported but never served).
+// See NewAllListEnvelopeHighChurn and RunDoctor for the rule and the gaps it
+// does not close. The /notifications false-alarm before PR #64 and the
+// /posts gap tracked in #70 are the same defect class.
 func NewAllListEnvelope[T any](list []T, totalRows int, idFunc func(T) int) (AllListEnvelope, error) {
 	if idFunc == nil {
 		return AllListEnvelope{}, fmt.Errorf("hooppy: NewAllListEnvelope requires a non-nil idFunc — the unique-count check is meaningless without it")
@@ -263,6 +281,81 @@ func NewAllListEnvelope[T any](list []T, totalRows int, idFunc func(T) int) (All
 		return AllListEnvelope{}, fmt.Errorf("hooppy: --all walk returned %d unique rows but the server's total_rows=%d — the walk was truncated (is_has_more cleared early with a stale total_rows, or a duplicate row masked a missing one); refusing to report a short list as complete", len(unique), totalRows)
 	}
 	return AllListEnvelope{List: list, TotalRows: totalRows, IsHasMore: false}, nil
+}
+
+// NewAllListEnvelopeHighChurn is the high-churn variant of NewAllListEnvelope.
+// It applies the FIRST-TOTAL rule (unique < firstTotalRows) instead of the
+// equality check (unique == lastTotalRows). This is the rule doctor uses for
+// /notifications (see RunDoctor); it is the correct check for high-churn
+// collections where a row created between page fetches shifts the offset
+// window and makes unique != lastTotal on a healthy account.
+//
+// firstTotalRows is the server's total_rows from the FIRST page; lastTotalRows
+// is the total_rows from the LAST page. A lastTotalRows > firstTotalRows is a
+// benign mid-walk insert (the collection grew while the walk was reading it)
+// and does NOT error — the walk is not truncated, it just saw growth. Only
+// unique < firstTotalRows (the walk collected fewer unique ids than the
+// server initially said existed) is a truncation signal.
+//
+// The envelope's TotalRows is set to lastTotalRows (the server's most recent
+// total), matching what NewAllListEnvelope would have received.
+//
+// What this DOES catch:
+//   - A walk where the server cleared is_has_more early but the unique-id
+//     count is less than the first-page total_rows — rows the server said
+//     existed were never served.
+//   - A shrinking collection where the server adjusted total_rows down to
+//     match the short unique set it served: unique == lastTotal passes the
+//     equality check (a false negative), but unique < firstTotal catches the
+//     truncation.
+//
+// What this DOES NOT catch (same gaps as the doctor rule, see RunDoctor):
+//   - Concurrent growth MASKS truncation. One row inserted mid-walk and
+//     served plus one row skipped by the offset shift gives
+//     unique == firstTotal (the new id replaces the missing one in the
+//     count) and no error, even though a row was lost.
+//   - A SHRINKING collection false-positives. A row that ages out or is
+//     pruned mid-walk drops the server's total_rows below the first-page
+//     value, so unique < firstTotal on a walk that missed nothing.
+//
+// idFunc extracts the unique identity of each element. It MUST be non-nil;
+// the unique-count is meaningless without it. Reuses uniqueCount from
+// doctor.go (the same generic helper RunDoctor uses for /notifications).
+func NewAllListEnvelopeHighChurn[T any](list []T, firstTotalRows, lastTotalRows int, idFunc func(T) int) (AllListEnvelope, error) {
+	if idFunc == nil {
+		return AllListEnvelope{}, fmt.Errorf("hooppy: NewAllListEnvelopeHighChurn requires a non-nil idFunc — the unique-count check is meaningless without it")
+	}
+	unique := uniqueCount(list, idFunc)
+	if unique < firstTotalRows {
+		return AllListEnvelope{}, fmt.Errorf("hooppy: --all walk returned %d unique rows but the server's first-page total_rows=%d (last-page total_rows=%d) — the walk was truncated (fewer unique ids than the server initially reported); refusing to report a short list as complete", unique, firstTotalRows, lastTotalRows)
+	}
+	return AllListEnvelope{List: list, TotalRows: lastTotalRows, IsHasMore: false}, nil
+}
+
+// NewCappedAllListEnvelope builds an AllListEnvelope for a walk that stopped
+// at the server's reachable window — the Elasticsearch max_result_window on
+// /posts-search — instead of is_has_more going false. It is the honest shape
+// for a bounded, complete-as-possible result that is NOT a complete list.
+//
+// Unlike NewAllListEnvelope / NewAllListEnvelopeHighChurn it:
+//   - Does NOT run the unique-count validation. A capped total_rows is a
+//     CEILING, not a count (it does not decrease and is_has_more never
+//     clears), so validating unique-count against it would validate against
+//     a constant. The first-total rule (unique < firstTotal) would also
+//     false-alarm: offset-shift duplicates on a high-churn collection can
+//     leave unique < ceiling even though no row was lost, only duplicated.
+//     The cap is the signal, not a count mismatch.
+//   - Pins IsHasMore TRUE. There ARE more rows; they are unreachable by
+//     offset paging alone. NewAllListEnvelope* pin it false to ASSERT
+//     completeness — reusing them here would assert completeness that does
+//     not hold (the defect this constructor exists to prevent).
+//
+// The caller MUST surface the cap to the operator: the CLI writes a stderr
+// warning naming the row count and the date-filter remedy; the MCP tool sets
+// a structured `warning` field (no stderr there). totalRows is the server's
+// last-seen total_rows (the ceiling value).
+func NewCappedAllListEnvelope[T any](list []T, totalRows int) AllListEnvelope {
+	return AllListEnvelope{List: list, TotalRows: totalRows, IsHasMore: true}
 }
 
 // CreateSchedule creates a new publication schedule via POST /posts/schedules.

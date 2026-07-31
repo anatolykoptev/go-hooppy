@@ -678,6 +678,47 @@ func TestRetry_UpdatePostRetried(t *testing.T) {
 	}
 }
 
+// TestNewClientFromEnv_RetryEnabled is the WIRING test for defect #2: both
+// front-ends (cmd/hooppy, cmd/hooppy-mcp) call NewClientFromEnv, which set
+// BaseURL and Token but left RetryOptions nil — so every shipped binary
+// died on the first 429 with no backoff. Asserting the retry POLICY table
+// (TestRetryPolicySweep) does NOT catch this: it checks which calls WOULD
+// retry if retry were on, never that retry is actually switched on. This
+// test asserts the wiring itself: a client from NewClientFromEnv, pointed
+// at a persistent-429 server, must issue MORE than one request (retry
+// happened). Before the fix RetryOptions was nil and exactly one request
+// reached the server.
+//
+// RED-on-revert: remove the RetryOptions from NewClientFromEnv's Config and
+// calls drops to 1 (no retry path taken) — this test fails.
+func TestNewClientFromEnv_RetryEnabled(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+	c, err := NewClientFromEnv()
+	if err != nil {
+		t.Fatalf("NewClientFromEnv: %v", err)
+	}
+	// Context bounds the test: with a 2s deadline and 500ms initial backoff,
+	// at least one retry fires (attempt 1 at t=0, attempt 2 at t≈500ms).
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = c.ListAccounts(ctx, ListAccountsFilter{})
+	if err == nil {
+		t.Fatal("expected error from persistent 429, got nil")
+	}
+	if got := calls.Load(); got < 2 {
+		t.Fatalf("calls = %d, want >= 2 — NewClientFromEnv must wire retry so a 429 is retried (before the fix RetryOptions was nil and only 1 request reached the server; the policy table was green the whole time because it checks which calls WOULD retry, never that retry is switched on)", got)
+	}
+}
+
 // TestImportSearchPost_NoRetryOptions pins the default path: with
 // RetryOptions == nil, ImportSearchPost issues exactly one request and the
 // 500 surfaces as an error — byte-identical to today's behaviour.

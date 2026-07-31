@@ -1,0 +1,398 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/anatolykoptev/go-hooppy"
+)
+
+// stubPagedServer serves one path from a per-page-body map keyed by the
+// `page` query parameter (page "" or "1" → "1"). It is the list-command
+// analogue of stubDoctorPaginatedAPIServer, used to drive the runList*
+// cores end-to-end against a walker that fetches real pages.
+func stubPagedServer(t *testing.T, path string, pages map[string]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != path {
+			t.Errorf("unexpected request: %s %s, want %s", r.Method, r.URL.Path, path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		pg := r.URL.Query().Get("page")
+		if pg == "" {
+			pg = "1"
+		}
+		body, ok := pages[pg]
+		if !ok {
+			t.Errorf("unexpected %s page=%s", path, pg)
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(body))
+	}))
+}
+
+// pageRows builds a JSON page body for /accounts/pages with `count` rows of
+// sequential ids starting at `start`, the given total_rows, and is_has_more.
+func pageRows(start, count, total int, hasMore bool) string {
+	type page struct {
+		ID             int    `json:"id"`
+		SourceID       int    `json:"source_id"`
+		SocialPageName string `json:"social_page_name"`
+	}
+	list := make([]page, 0, count)
+	for i := 0; i < count; i++ {
+		list = append(list, page{ID: start + i, SourceID: 1, SocialPageName: "P"})
+	}
+	b, _ := json.Marshal(struct {
+		List      []page `json:"list"`
+		TotalRows int    `json:"total_rows"`
+		IsHasMore bool   `json:"is_has_more"`
+		RowsLimit int    `json:"rows_limit"`
+	}{list, total, hasMore, 20})
+	return string(b)
+}
+
+// TestRunListPages_TruncationWarning is the RED-then-GREEN guard for the
+// issue #103 truncation warning. A 40-page account returns 20 rows on page
+// 1 with is_has_more=true and total_rows=40. Without the fix the command
+// printed the 20 rows to stdout, nothing to stderr, and exited 0 — pages
+// 21-40 were unreachable and the user was not told. The fix prints a stderr
+// warning naming the numbers and the exact remedy, keeps stdout valid JSON,
+// and exits 0 (a truncated page is a complete answer to "give me page 1",
+// not an error).
+//
+// RED-on-revert: remove the `!all && isHasMore` branch from emitList and the
+// stderr assertion fails (warning absent); the stdout/exit-0 assertions pin
+// that the warning is NOT promoted to an error or to stdout.
+func TestRunListPages_TruncationWarning(t *testing.T) {
+	srv := stubPagedServer(t, "/accounts/pages", map[string]string{
+		"1": pageRows(1, 20, 40, true),
+	})
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListPages(context.Background(), c, &out, &errOut, hooppy.ListPagesFilter{}, false)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 — a truncated page is a complete answer, not an error; stderr=%s", code, errOut.String())
+	}
+	want := "40 pages total — showing 20. Use --all to fetch every page."
+	if !strings.Contains(errOut.String(), want) {
+		t.Fatalf("stderr = %q, want it to contain %q — the truncation warning must name total_rows, the rows shown, and the --all remedy (issue #103)", errOut.String(), want)
+	}
+	// Stdout must stay valid JSON (the warning is on stderr only).
+	var env struct {
+		List      []json.RawMessage `json:"list"`
+		TotalRows int               `json:"total_rows"`
+		IsHasMore bool              `json:"is_has_more"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v — the warning must not corrupt stdout (stdout=%q)", err, out.String())
+	}
+	if len(env.List) != 20 {
+		t.Errorf("stdout list len = %d, want 20 (the single page, unchanged)", len(env.List))
+	}
+	if !env.IsHasMore {
+		t.Errorf("stdout is_has_more = false, want true — the non-truncated stdout shape must not be altered")
+	}
+}
+
+// TestRunListPages_AllReturnsMoreRows is the RED-then-GREEN guard for --all
+// returning more rows than one page. The account has 40 pages across two
+// 20-row pages; --all walks both and emits an AllListEnvelope whose list
+// holds all 40. Without the fix `pages list` had no --all flag and pages
+// 21-40 were unreachable from the CLI by any invocation.
+//
+// RED-on-revert: break the ListAllPagesWithTotal walk (or drop the --all
+// branch from runListPages) and len(list) < 40 fails. The "more than one
+// page" assertion (40 > 20) is what makes this non-vacuous — a test that
+// only checks the flag parses would pass with the walk broken.
+func TestRunListPages_AllReturnsMoreRows(t *testing.T) {
+	srv := stubPagedServer(t, "/accounts/pages", map[string]string{
+		"1": pageRows(1, 20, 40, true),
+		"2": pageRows(21, 20, 40, false),
+	})
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListPages(context.Background(), c, &out, &errOut, hooppy.ListPagesFilter{}, true)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+	if errOut.String() != "" {
+		t.Errorf("stderr = %q, want empty — an --all walk must not emit a truncation warning", errOut.String())
+	}
+	var env hooppy.AllListEnvelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("stdout is not a valid AllListEnvelope: %v (stdout=%q)", err, out.String())
+	}
+	if env.IsHasMore {
+		t.Errorf("AllListEnvelope.is_has_more = true, want false — an --all walk pins is_has_more false")
+	}
+	if env.TotalRows != 40 {
+		t.Errorf("AllListEnvelope.total_rows = %d, want 40 (the server's total, not len(list))", env.TotalRows)
+	}
+	// AllListEnvelope.List is interface{}; re-marshal to count rows.
+	raw, _ := json.Marshal(env.List)
+	var rows []struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("AllListEnvelope.list did not decode as a page slice: %v", err)
+	}
+	if len(rows) != 40 {
+		t.Fatalf("--all returned %d rows, want 40 — --all must return MORE rows than one page (20); pages 21-40 were unreachable before the fix", len(rows))
+	}
+}
+
+// postRows builds a JSON page body for /posts with `count` rows of sequential
+// ids starting at `start`, the given total_rows, and is_has_more. Only the
+// `id` field is populated — runListPosts only needs the id for the
+// unique-count check; the rest of the Post struct is irrelevant to the
+// truncation logic under test.
+func postRows(start, count, total int, hasMore bool) string {
+	type post struct {
+		ID int `json:"id"`
+	}
+	list := make([]post, 0, count)
+	for i := 0; i < count; i++ {
+		list = append(list, post{ID: start + i})
+	}
+	b, _ := json.Marshal(struct {
+		List      []post `json:"list"`
+		TotalRows int    `json:"total_rows"`
+		IsHasMore bool   `json:"is_has_more"`
+		RowsLimit int    `json:"rows_limit"`
+	}{list, total, hasMore, 20})
+	return string(b)
+}
+
+// postRowsIDs builds a JSON page body for /posts with the given explicit ids
+// (not sequential), the given total_rows, and is_has_more. Used to simulate
+// offset-shift duplicates (same id served on two pages) and missing rows.
+func postRowsIDs(ids []int, total int, hasMore bool) string {
+	type post struct {
+		ID int `json:"id"`
+	}
+	list := make([]post, 0, len(ids))
+	for _, id := range ids {
+		list = append(list, post{ID: id})
+	}
+	b, _ := json.Marshal(struct {
+		List      []post `json:"list"`
+		TotalRows int    `json:"total_rows"`
+		IsHasMore bool   `json:"is_has_more"`
+		RowsLimit int    `json:"rows_limit"`
+	}{list, total, hasMore, 20})
+	return string(b)
+}
+
+// TestRunListPosts_AllHighChurn_BenignInsertSucceeds verifies that a high-churn
+// --all walk with a benign mid-walk insert SUCCEEDS. /posts is a high-churn
+// collection: a post created between page fetches shifts the offset window,
+// making unique != lastTotal on a healthy account. The old equality check
+// (NewAllListEnvelope, unique == lastTotal) false-alarms here; the first-total
+// rule (NewAllListEnvelopeHighChurn, unique >= firstTotal) does not.
+//
+// Setup: page 1 serves ids [1,2] with total_rows=2, is_has_more=true →
+// firstTotal=2. Page 2 serves ids [3,4] (a new row was inserted mid-walk,
+// shifting the offset window) with total_rows=3, is_has_more=false →
+// lastTotal=3. unique={1,2,3,4}=4 >= firstTotal=2 → not truncated.
+// Old equality check: unique=4 != lastTotal=3 → ERROR (false alarm).
+//
+// RED-on-revert: if runListPosts is changed back to NewAllListEnvelope with
+// ListAllPostsWithTotal, the equality check false-alarms (exit 1) and this
+// test fails.
+func TestRunListPosts_AllHighChurn_BenignInsertSucceeds(t *testing.T) {
+	srv := stubPagedServer(t, "/posts", map[string]string{
+		"1": postRows(1, 2, 2, true),
+		"2": postRows(3, 2, 3, false),
+	})
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListPosts(context.Background(), c, &out, &errOut, hooppy.ListPostsFilter{}, true)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 — a benign mid-walk insert (unique=4, firstTotal=2, lastTotal=3) must NOT fail the walk; the old equality check false-alarmed here (4 != 3); stderr=%s", code, errOut.String())
+	}
+	// stdout must be valid JSON (an AllListEnvelope).
+	var env hooppy.AllListEnvelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("stdout is not a valid AllListEnvelope: %v (stdout=%q)", err, out.String())
+	}
+	if env.IsHasMore {
+		t.Errorf("AllListEnvelope.is_has_more = true, want false — an --all walk pins is_has_more false")
+	}
+}
+
+// TestRunListPosts_AllHighChurn_TruncatedWalkFails verifies that a genuinely
+// truncated high-churn --all walk FAILS. The server said total_rows=5 on
+// page 1 but the walk only collected 2 unique ids — the server adjusted
+// total_rows down to 2 on the last page (a shrinking collection), so the
+// old equality check (unique == lastTotal) PASSES (2 == 2) and misses the
+// truncation. The first-total rule (unique < firstTotal) catches it
+// (2 < 5) and errors.
+//
+// Setup: page 1 serves ids [1,2] with total_rows=5, is_has_more=true →
+// firstTotal=5. Page 2 serves ids [1,2] again (offset-shift duplicates,
+// rows 3-5 missing) with total_rows=2, is_has_more=false → lastTotal=2.
+// unique={1,2}=2 < firstTotal=5 → TRUNCATED.
+// Old equality check: unique=2 == lastTotal=2 → PASSES (false negative).
+//
+// RED-on-revert: if runListPosts is changed back to NewAllListEnvelope with
+// ListAllPostsWithTotal, the equality check passes (exit 0) and this test
+// fails — the truncation goes undetected.
+func TestRunListPosts_AllHighChurn_TruncatedWalkFails(t *testing.T) {
+	srv := stubPagedServer(t, "/posts", map[string]string{
+		"1": postRowsIDs([]int{1, 2}, 5, true),
+		"2": postRowsIDs([]int{1, 2}, 2, false),
+	})
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListPosts(context.Background(), c, &out, &errOut, hooppy.ListPostsFilter{}, true)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 — a genuinely truncated walk (unique=2 < firstTotal=5) must fail; the old equality check missed this because the server adjusted total_rows down to match (2 == 2); stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+// TestRunListPages_NoWarningWhenComplete verifies the warning does NOT fire
+// when is_has_more is false (a complete single page) — the warning is gated
+// on truncation, not emitted unconditionally.
+func TestRunListPages_NoWarningWhenComplete(t *testing.T) {
+	srv := stubPagedServer(t, "/accounts/pages", map[string]string{
+		"1": pageRows(1, 5, 5, false),
+	})
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListPages(context.Background(), c, &out, &errOut, hooppy.ListPagesFilter{}, false)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+	if errOut.String() != "" {
+		t.Errorf("stderr = %q, want empty — no warning when is_has_more is false (the list is complete)", errOut.String())
+	}
+}
+
+// resultWindowErrorBodyCLI is the Elasticsearch max_result_window rejection
+// (HTTP 500) as the live Hooppy API returns it — the reason nested under an
+// "error" object so newAPIError's string-extraction falls through to the raw
+// body, where "Result window is too large" lives. Duplicated from the
+// library test constant so the CLI package test is self-contained (the
+// constant is unexported in the library package).
+const resultWindowErrorBodyCLI = `{"error":{"type":"illegal_argument_exception","reason":"Result window is too large, from + size must be less than or equal to: [10000] but was [10060]"},"status":500}`
+
+// TestRunListSearchPosts_AllCapped_ReturnsRowsAndExits2 is the CLI guard for
+// the result-window cap. The server serves 3 pages (6 rows) with
+// is_has_more=true and total_rows=10000 (the ES ceiling), then returns the
+// max_result_window 500 on page 4. The command MUST exit 2 (the repo's
+// partial-read convention from runScheduleQueue: 0=complete, 1=error,
+// 2=partial), emit the 6 collected rows to stdout (NOT discard them), mark
+// is_has_more=true (honestly — there ARE more rows, unreachable), and warn
+// on stderr naming the row count, the server wall, and the --date-from/
+// --date-to remedy.
+//
+// RED-on-revert: revert the cap branch in runListSearchPosts (or the walker)
+// and the command exits 1 with empty stdout — the "exit 2" and "6 rows on
+// stdout" assertions fail. A test asserting only "no error" would accept a
+// command that returns nothing.
+func TestRunListSearchPosts_AllCapped_ReturnsRowsAndExits2(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("page") {
+		case "2":
+			w.Write([]byte(postRows(3, 2, 10000, true)))
+		case "3":
+			w.Write([]byte(postRows(5, 2, 10000, true)))
+		case "1", "":
+			w.Write([]byte(postRows(1, 2, 10000, true)))
+		default: // page 4 — the server wall
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(resultWindowErrorBodyCLI))
+		}
+	}))
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListSearchPosts(context.Background(), c, &out, &errOut, hooppy.SearchPostsFilter{}, true)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 — a capped --all walk is a PARTIAL read (repo convention: 0=complete, 1=error, 2=partial, per runScheduleQueue); stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	// stdout must be valid JSON with the collected rows, is_has_more=true
+	// (honestly labelled — there ARE more rows, unreachable by offset paging),
+	// and total_rows=10000 (the ceiling).
+	var env hooppy.AllListEnvelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (stdout=%q) — the capped result must still be emitted to stdout, not discarded", err, out.String())
+	}
+	if !env.IsHasMore {
+		t.Errorf("stdout is_has_more = false, want true — a capped walk MUST NOT assert completeness (NewCappedAllListEnvelope pins it true; reusing NewAllListEnvelope would falsely pin it false)")
+	}
+	if env.TotalRows != 10000 {
+		t.Errorf("stdout total_rows = %d, want 10000 (the server's ceiling)", env.TotalRows)
+	}
+	raw, _ := json.Marshal(env.List)
+	var rows []struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("stdout list did not decode: %v (raw=%s)", err, raw)
+	}
+	if len(rows) != 6 {
+		t.Fatalf("stdout list len = %d, want 6 — the 6 rows collected before the wall MUST be on stdout, not discarded (the live defect lost 10000 rows this way)", len(rows))
+	}
+	// stderr must name the cap, the row count, the server wall, and the
+	// date-filter remedy — a silent short list is the failure mode.
+	stderr := errOut.String()
+	for _, want := range []string{"CAPPED", "6", "date", "10000"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q — the warning must name the cap, the row count, the ceiling, and the --date-from/--date-to remedy", stderr, want)
+		}
+	}
+}
+
+// TestRunListSearchPosts_AllMidWalkGeneric500_Exits1 is the CLI companion:
+// a 500 that is NOT the result-window error MUST exit 1 (error), not 2
+// (partial). The command must not turn every server error into a partial
+// success — that would mask real failures. Page 1 serves 2 rows; page 2
+// returns a generic 500.
+//
+// RED-on-revert: if the cap detection is broadened to treat any 500 as a
+// cap, code == 2 (not 1) and this test fails.
+func TestRunListSearchPosts_AllMidWalkGeneric500_Exits1(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("page") {
+		case "1", "":
+			w.Write([]byte(postRows(1, 2, 10000, true)))
+		default: // page 2 — a GENERIC 500, not the result-window wall
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"internal server error","status":500}`))
+		}
+	}))
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListSearchPosts(context.Background(), c, &out, &errOut, hooppy.SearchPostsFilter{}, true)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 — a generic mid-walk 500 is an ERROR, not a capped partial (stdout=%q stderr=%q)", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "error:") {
+		t.Errorf("stderr = %q, want it to contain \"error:\" — a genuine failure must be reported as an error, not silently swallowed", errOut.String())
+	}
+}

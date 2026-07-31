@@ -459,7 +459,7 @@ func TestListSourceResources(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	resp, err := c.ListSourceResources(context.Background())
+	resp, err := c.ListSourceResources(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("ListSourceResources: %v", err)
 	}
@@ -469,6 +469,72 @@ func TestListSourceResources(t *testing.T) {
 	s := resp.List[0]
 	if s.ID != 123 || s.Name != "Test Source" || s.SourceID != 1 {
 		t.Errorf("Source = %+v", s)
+	}
+}
+
+// TestListSourceResources_DecodesPagingFields pins the issue #98 fix: the
+// server sends total_rows/is_has_more/rows_limit on /posts-search/source-
+// resources, and SourceResourcesResponse now models them (previously only
+// List was modelled, so the signal was dropped at decode and a truncation
+// above 20 source resources was undetectable).
+//
+// RED-on-revert: remove any of the three paging fields from
+// SourceResourcesResponse and the corresponding assertion fails (zero value
+// instead of the wire value).
+func TestListSourceResources_DecodesPagingFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"list":[{"id":1,"name":"S","source_type":1,"search_type":1,"source_id":1,"data":"","hashtag":"","link":""}],"total_rows":25,"is_has_more":true,"rows_limit":20}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ListSourceResources(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("ListSourceResources: %v", err)
+	}
+	if resp.TotalRows != 25 {
+		t.Errorf("TotalRows = %d, want 25 — the field must be modelled so a truncation warning can be computed (issue #98)", resp.TotalRows)
+	}
+	if !resp.IsHasMore {
+		t.Errorf("IsHasMore = false, want true — the field must be modelled (issue #98)")
+	}
+	if resp.RowsLimit != 20 {
+		t.Errorf("RowsLimit = %d, want 20 (issue #98)", resp.RowsLimit)
+	}
+}
+
+// TestListAllSourceResources_TwoPages verifies the source-resources walker
+// accumulates both pages and terminates on is_has_more=false. This is the
+// library half of the issue #103 --all fix for `search sources`.
+//
+// RED-on-revert: break the ListAllSourceResourcesWithTotal walk (or revert
+// ListSourceResources to take no page param) and len(all) < 4 fails.
+func TestListAllSourceResources_TwoPages(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("page"))
+		switch r.URL.Query().Get("page") {
+		case "2":
+			w.Write([]byte(`{"list":[{"id":3,"name":"C","source_type":1,"search_type":1,"source_id":1,"data":"","hashtag":"","link":""},{"id":4,"name":"D","source_type":1,"search_type":1,"source_id":1,"data":"","hashtag":"","link":""}],"total_rows":4,"is_has_more":false,"rows_limit":20}`))
+		default:
+			w.Write([]byte(`{"list":[{"id":1,"name":"A","source_type":1,"search_type":1,"source_id":1,"data":"","hashtag":"","link":""},{"id":2,"name":"B","source_type":1,"search_type":1,"source_id":1,"data":"","hashtag":"","link":""}],"total_rows":4,"is_has_more":true,"rows_limit":20}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	all, total, err := c.ListAllSourceResourcesWithTotal(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllSourceResourcesWithTotal: %v", err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("len(all) = %d, want 4 (two 2-row pages)", len(all))
+	}
+	if total != 4 {
+		t.Errorf("total = %d, want 4", total)
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Fatalf("page params = %v, want [1 2] — the walk must start at page 1", pages)
 	}
 }
 
@@ -1730,5 +1796,141 @@ func TestCopySearchPostIDs_NoSliceMutation(t *testing.T) {
 	}
 	if !reflect.DeepEqual(original, originalCopy) {
 		t.Errorf("copySearchPostIDs mutated the caller's slice: got %v, want %v (slice must be read-only)", original, originalCopy)
+	}
+}
+
+// searchPostRows builds a JSON page body for /posts-search with `count` rows
+// of sequential ids starting at `start`, the given total_rows, is_has_more,
+// and rows_limit=20. Only the `id` field is populated — the cap-detection
+// walker under test only needs ids to prove the collected rows are returned
+// (not discarded); the rest of SearchPost is irrelevant to the result-window
+// logic.
+func searchPostRows(start, count, total int, hasMore bool) string {
+	type sp struct {
+		ID int `json:"id"`
+	}
+	list := make([]sp, 0, count)
+	for i := 0; i < count; i++ {
+		list = append(list, sp{ID: start + i})
+	}
+	b, _ := json.Marshal(struct {
+		List      []sp `json:"list"`
+		TotalRows int  `json:"total_rows"`
+		IsHasMore bool `json:"is_has_more"`
+		RowsLimit int  `json:"rows_limit"`
+	}{list, total, hasMore, 20})
+	return string(b)
+}
+
+// resultWindowErrorBody is the Elasticsearch max_result_window rejection,
+// shaped exactly as the live Hooppy API returns it: HTTP 500 with the reason
+// nested under an "error" object (so newAPIError's string-extraction falls
+// through to the raw body, where "Result window is too large" lives). This
+// is the shape isResultWindowError must recognise via the Body fallback.
+const resultWindowErrorBody = `{"error":{"type":"illegal_argument_exception","reason":"Result window is too large, from + size must be less than or equal to: [10000] but was [10060]"},"status":500}`
+
+// TestListAllSearchPosts_ResultWindowCap_ReturnsCollectedRows is the
+// RED-then-GREEN guard for the result-window cap. The server serves 3 pages
+// (6 rows) with is_has_more=true and total_rows=10000 (the ES ceiling), then
+// returns the max_result_window 500 on page 4. The walker MUST stop at the
+// reachable window and return the 6 rows it already collected, marked Capped
+// — NOT discard them to the error (the prior behaviour, which lost 10000
+// successfully-fetched rows on the live account).
+//
+// RED-on-revert: revert the isResultWindowError branch in the walker and it
+// returns (nil, err) — res == nil / len(res.List) == 0 fails, and the
+// "collected rows are returned, not discarded" assertion (len == 6) fails.
+// A test asserting only "no error" would accept a walker that returns nothing;
+// this one asserts the 6 rows survive.
+func TestListAllSearchPosts_ResultWindowCap_ReturnsCollectedRows(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("page"))
+		pg := r.URL.Query().Get("page")
+		switch pg {
+		case "1", "2", "3":
+			w.Header().Set("Content-Type", "application/json")
+			start, _ := strconv.Atoi(pg)
+			w.Write([]byte(searchPostRows((start-1)*2+1, 2, 10000, true)))
+		default: // page 4 — the server wall
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(resultWindowErrorBody))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	res, err := c.ListAllSearchPostsWithFirstAndLastTotal(context.Background(), SearchPostsFilter{})
+	if err != nil {
+		t.Fatalf("ListAllSearchPostsWithFirstAndLastTotal: unexpected error %v — a result-window cap after collecting rows MUST return the partial result, not discard it", err)
+	}
+	if res == nil {
+		t.Fatal("res == nil — the walker returned no result on a capped walk; the 6 collected rows were discarded (the defect this test exists to catch)")
+	}
+	if !res.Capped {
+		t.Errorf("res.Capped = false, want true — a walk that stopped at the result-window wall MUST be marked capped, not presented as complete")
+	}
+	if len(res.List) != 6 {
+		t.Fatalf("len(res.List) = %d, want 6 — the 6 rows collected before the wall MUST be returned, not discarded (pages fetched=%v)", len(res.List), pages)
+	}
+	// The collected rows must be the actual ids 1..6, in order — proving the
+	// walker returned what it collected, not an empty or synthetic slice.
+	for i, p := range res.List {
+		if p.ID != i+1 {
+			t.Errorf("res.List[%d].ID = %d, want %d — collected rows must be the rows actually served, in order", i, p.ID, i+1)
+		}
+	}
+	if res.FirstTotalRows != 10000 {
+		t.Errorf("FirstTotalRows = %d, want 10000 (the ceiling, reported on page 1)", res.FirstTotalRows)
+	}
+	if res.LastTotalRows != 10000 {
+		t.Errorf("LastTotalRows = %d, want 10000 (the ceiling does not decrease)", res.LastTotalRows)
+	}
+	// The walker MUST have attempted the page that hits the wall — otherwise
+	// the cap is undetectable (is_has_more never clears at the ceiling). 4
+	// requests = pages 1,2,3 (data) + page 4 (the 500 that signals the cap).
+	if len(pages) != 4 {
+		t.Fatalf("handler received %d requests, want 4 (pages 1-3 data + page 4 the wall); pages=%v — the walker must attempt the page that crosses the window to detect the cap", len(pages), pages)
+	}
+	if pages[3] != "4" {
+		t.Errorf("4th request page = %q, want \"4\" (the page that hits the result-window wall)", pages[3])
+	}
+}
+
+// TestListAllSearchPosts_MidWalkGeneric500_FailsLoud is the companion guard:
+// a 500 that is NOT the result-window error MUST still fail loud. The walker
+// must not turn every server error into a partial success — that would mask
+// real failures (a genuine backend crash, an exhausted 429 surfaced as 500,
+// a proxy fault). Page 1 serves 2 rows with is_has_more=true; page 2 returns
+// a generic 500 (no "Result window is too large" phrase). The walk MUST
+// return an error and NO result.
+//
+// RED-on-revert: if the cap detection is broadened to treat any 500 as a cap
+// (or any error after len(all)>0), err == nil / res != nil fails.
+func TestListAllSearchPosts_MidWalkGeneric500_FailsLoud(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(searchPostRows(1, 2, 10000, true)))
+		default: // page 2 — a GENERIC 500, not the result-window wall
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"internal server error","status":500}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	res, err := c.ListAllSearchPostsWithFirstAndLastTotal(context.Background(), SearchPostsFilter{})
+	if err == nil {
+		t.Fatalf("expected a loud error for a generic mid-walk 500, got nil — the walker must NOT turn a non-result-window server error into a partial success (res=%+v)", res)
+	}
+	if res != nil {
+		t.Errorf("res = %+v, want nil — a genuine mid-walk failure must return NO result (no partial list), only the error", res)
+	}
+	if strings.Contains(err.Error(), "CAPPED") || strings.Contains(err.Error(), "reachable window") {
+		t.Errorf("error %q mentions a cap, but a generic 500 is not the result-window wall — it must not be mislabelled as capped", err.Error())
 	}
 }

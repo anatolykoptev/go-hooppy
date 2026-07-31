@@ -130,7 +130,7 @@ func TestProxiesCRUD(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	// List
-	resp, err := c.ListProxies(context.Background())
+	resp, err := c.ListProxies(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("ListProxies: %v", err)
 	}

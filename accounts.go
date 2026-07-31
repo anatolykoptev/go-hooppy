@@ -135,6 +135,53 @@ func (c *Client) ListAllPagesWithFirstAndLastTotal(ctx context.Context, f ListPa
 	}
 }
 
+// ListAllAccounts walks GET /accounts from page 1 with the given filter,
+// accumulating accounts until is_has_more is false. The walk starts at page 1
+// so the first page is not fetched twice (the Hooppy API is 1-indexed and a
+// request with no page param is byte-identical to ?page=1). The filter's
+// non-page fields are preserved across the walk; only Page is incremented.
+// See projects.ListAllSchedules for the 1-indexed rationale and the sanity
+// cap.
+//
+// Duplicates arising from a mid-walk collection shift are NOT removed: with
+// offset pagination, a row inserted or deleted mid-walk shifts the window
+// and the server re-serves a row already seen. This entry point drops the
+// server's total_rows, so it cannot detect such duplicates. Use
+// ListAllAccountsWithTotal with NewAllListEnvelope to detect them (see
+// NewAllListEnvelope for what it does and does not catch).
+//
+// The walk is bounded by maxListAllPages; if the server never clears
+// is_has_more within that bound, ListAllAccounts returns an error instead of
+// looping forever or silently truncating.
+func (c *Client) ListAllAccounts(ctx context.Context, f ListAccountsFilter) ([]Account, error) {
+	all, _, err := c.ListAllAccountsWithTotal(ctx, f)
+	return all, err
+}
+
+// ListAllAccountsWithTotal is ListAllAccounts but also returns the server's
+// last-seen total_rows. The pair (list, totalRows) is meant to be passed to
+// NewAllListEnvelope. See projects.ListAllSchedulesWithTotal and
+// NewAllListEnvelope for what the envelope catches and what it does not.
+func (c *Client) ListAllAccountsWithTotal(ctx context.Context, f ListAccountsFilter) ([]Account, int, error) {
+	all := make([]Account, 0)
+	var totalRows int
+	for page := 1; ; page++ {
+		if page > maxListAllPages {
+			return nil, 0, fmt.Errorf("hooppy: ListAllAccounts exceeded %d pages without is_has_more going false — aborting to avoid an unbounded walk", maxListAllPages)
+		}
+		f.Page = page
+		resp, err := c.ListAccounts(ctx, f)
+		if err != nil {
+			return nil, 0, err
+		}
+		all = append(all, resp.List...)
+		totalRows = resp.TotalRows
+		if !resp.IsHasMore {
+			return all, totalRows, nil
+		}
+	}
+}
+
 // DisconnectPage disconnects a page (social media group) by ID via
 // DELETE /accounts/pages/{id}. This is idempotent — deleting a
 // non-existent page returns success.

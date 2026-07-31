@@ -110,13 +110,14 @@ func registerAccounts(root *cobra.Command) {
 		Short: "List connected social network accounts",
 	})
 	cmd.Args = cobra.NoArgs
-	var sourceID int
+	var sourceID, pageNum int
+	var all bool
 	cmd.Flags().IntVar(&sourceID, "source", 0, "filter by social network source ID")
+	cmd.Flags().IntVar(&pageNum, "page", 0, "page number, 1-indexed (0 or omit = first page)")
+	cmd.Flags().BoolVar(&all, "all", false, "fetch all pages (walks until is_has_more is false)")
 	cmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListAccounts(context.Background(), hooppy.ListAccountsFilter{SourceID: sourceID})
-		die(err)
-		printJSON(resp)
+		os.Exit(runListAccounts(context.Background(), c, os.Stdout, os.Stderr, hooppy.ListAccountsFilter{SourceID: sourceID, Page: pageNum}, all))
 	}
 }
 
@@ -136,14 +137,15 @@ func registerPages(root *cobra.Command) {
 		Short: "List connected groups/pages",
 	})
 	listCmd.Args = cobra.NoArgs
-	var sourceID, accountID int
+	var sourceID, accountID, pageNum int
+	var all bool
 	listCmd.Flags().IntVar(&sourceID, "source", 0, "filter by social network source ID")
 	listCmd.Flags().IntVar(&accountID, "account", 0, "filter by account ID")
+	listCmd.Flags().IntVar(&pageNum, "page", 0, "page number, 1-indexed (0 or omit = first page)")
+	listCmd.Flags().BoolVar(&all, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListPages(context.Background(), hooppy.ListPagesFilter{SourceID: sourceID, AccountID: accountID})
-		die(err)
-		printJSON(resp)
+		os.Exit(runListPages(context.Background(), c, os.Stdout, os.Stderr, hooppy.ListPagesFilter{SourceID: sourceID, AccountID: accountID, Page: pageNum}, all))
 	}
 
 	// pages disconnect (undocumented)
@@ -178,7 +180,7 @@ func registerPosts(root *cobra.Command) {
 		Short: "List posts",
 	})
 	listCmd.Args = cobra.NoArgs
-	var published, unpublished bool
+	var published, unpublished, all bool
 	var pubDate string
 	var pageID, sourceID, projectID, scheduleID, accountID, pageNum int
 	listCmd.Flags().BoolVar(&published, "published", false, "show only published posts")
@@ -190,6 +192,7 @@ func registerPosts(root *cobra.Command) {
 	listCmd.Flags().IntVar(&scheduleID, "schedule-id", 0, "filter by schedule ID")
 	listCmd.Flags().IntVar(&accountID, "account-id", 0, "DEPRECATED/no-op: the API silently ignores account_id on /posts; use --schedule-id, --source-id, or --project-id to narrow (setting this errors)")
 	listCmd.Flags().IntVar(&pageNum, "page", 0, "page number, 1-indexed (0 or omit = first page)")
+	listCmd.Flags().BoolVar(&all, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		if published && unpublished {
 			fmt.Fprintln(os.Stderr, "error: --published and --unpublished are mutually exclusive")
@@ -204,7 +207,7 @@ func registerPosts(root *cobra.Command) {
 			f := false
 			isPub = &f
 		}
-		resp, err := c.ListPosts(context.Background(), hooppy.ListPostsFilter{
+		os.Exit(runListPosts(context.Background(), c, os.Stdout, os.Stderr, hooppy.ListPostsFilter{
 			IsPublished:     isPub,
 			PublicationDate: pubDate,
 			PageID:          pageID,
@@ -213,9 +216,7 @@ func registerPosts(root *cobra.Command) {
 			ScheduleID:      scheduleID,
 			AccountID:       accountID,
 			Page:            pageNum,
-		})
-		die(err)
-		printJSON(resp)
+		}, all))
 	}
 
 	// posts create
@@ -404,17 +405,7 @@ func registerProjects(root *cobra.Command) {
 	listCmd.Flags().BoolVar(&projAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		if projAll {
-			all, total, err := c.ListAllProjectsWithTotal(context.Background())
-			die(err)
-			env, err := hooppy.NewAllListEnvelope(all, total, func(p hooppy.Project) int { return p.ID })
-			die(err)
-			printJSON(env)
-			return
-		}
-		resp, err := c.ListProjects(context.Background(), projPage)
-		die(err)
-		printJSON(resp)
+		os.Exit(runListProjects(context.Background(), c, os.Stdout, os.Stderr, projPage, projAll))
 	}
 
 	// projects create (undocumented)
@@ -492,17 +483,7 @@ func registerSchedules(root *cobra.Command) {
 	listCmd.Flags().BoolVar(&schedAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		if schedAll {
-			all, total, err := c.ListAllSchedulesWithTotal(context.Background())
-			die(err)
-			env, err := hooppy.NewAllListEnvelope(all, total, func(s hooppy.Schedule) int { return s.ID })
-			die(err)
-			printJSON(env)
-			return
-		}
-		resp, err := c.ListSchedules(context.Background(), schedPage)
-		die(err)
-		printJSON(resp)
+		os.Exit(runListSchedules(context.Background(), c, os.Stdout, os.Stderr, schedPage, schedAll))
 	}
 
 	// schedules create (undocumented)
@@ -725,11 +706,13 @@ func registerWatermarks(root *cobra.Command) {
 		Short: "List watermarks",
 	})
 	listCmd.Args = cobra.NoArgs
+	var wmPage int
+	var wmAll bool
+	listCmd.Flags().IntVar(&wmPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
+	listCmd.Flags().BoolVar(&wmAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListWatermarks(context.Background(), 0)
-		die(err)
-		printJSON(resp)
+		os.Exit(runListWatermarks(context.Background(), c, os.Stdout, os.Stderr, wmPage, wmAll))
 	}
 
 	// watermarks create
@@ -813,11 +796,13 @@ func registerProxies(root *cobra.Command) {
 		Short: "List proxies",
 	})
 	listCmd.Args = cobra.NoArgs
+	var proxyPage int
+	var proxyAll bool
+	listCmd.Flags().IntVar(&proxyPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
+	listCmd.Flags().BoolVar(&proxyAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListProxies(context.Background())
-		die(err)
-		printJSON(resp)
+		os.Exit(runListProxies(context.Background(), c, os.Stdout, os.Stderr, proxyPage, proxyAll))
 	}
 
 	// proxies create
@@ -890,11 +875,13 @@ func registerNotifications(root *cobra.Command) {
 		Short: "List publication status notifications (undocumented endpoint)",
 	})
 	cmd.Args = cobra.NoArgs
+	var notifPage int
+	var notifAll bool
+	cmd.Flags().IntVar(&notifPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
+	cmd.Flags().BoolVar(&notifAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	cmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListNotifications(context.Background(), 0)
-		die(err)
-		printJSON(resp)
+		os.Exit(runListNotifications(context.Background(), c, os.Stdout, os.Stderr, notifPage, notifAll))
 	}
 }
 
@@ -929,11 +916,13 @@ func registerSearch(root *cobra.Command) {
 		Short: "List configured source resources (external pages to scrape from)",
 	})
 	sourcesCmd.Args = cobra.NoArgs
+	var srcPage int
+	var srcAll bool
+	sourcesCmd.Flags().IntVar(&srcPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
+	sourcesCmd.Flags().BoolVar(&srcAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	sourcesCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListSourceResources(context.Background())
-		die(err)
-		printJSON(resp)
+		os.Exit(runListSourceResources(context.Background(), c, os.Stdout, os.Stderr, srcPage, srcAll))
 	}
 
 	// search posts
@@ -945,6 +934,7 @@ func registerSearch(root *cobra.Command) {
 	var sText, sDateFrom, sDateTo, sSortBy, sSortDir, sContentTypes, sContentTypesExclude string
 	var sSourceType, sSourceID, sSourceResourceID, sOwnerID, sPage, sMinLikes, sMinViews, sMinComments, sMinReposts, sPhotosAmount, sVideoDuration int
 	var sMinInvolvement float64
+	var sAll bool
 	postsCmd.Flags().StringVar(&sText, "text", "", "search by text")
 	postsCmd.Flags().StringVar(&sDateFrom, "date-from", "", "filter by date from (dd.mm.yyyy)")
 	postsCmd.Flags().StringVar(&sDateTo, "date-to", "", "filter by date to (dd.mm.yyyy)")
@@ -964,9 +954,10 @@ func registerSearch(root *cobra.Command) {
 	postsCmd.Flags().IntVar(&sVideoDuration, "video-duration", 0, "video duration bucket (non-negative; 0 = unset). Measured against a live account (video content only): 1 → 710; 2 → 159; 3 → 3525; 4 → 4036; 5 → 4128; 6 → 4161; 7 → 644; 8 → 677; 9 and 10 return a server error. Keys 5-8 are real and each returns a distinct result set — the prior 1..4 guard hard-errored on four working filters. The valid key space is not enumerable client-side (the vendor may add keys); any non-negative value is passed through verbatim and the server answers. The filters_plug values array is empty.")
 	postsCmd.Flags().StringVar(&sContentTypes, "content-types", "", "comma-separated content types to include: text, photos, videos, audios, links, documents (authoritative list is the content_types entry of filters_plug in any /posts-search response; that list may under-report — e.g. `documents` works yet is sometimes omitted)")
 	postsCmd.Flags().StringVar(&sContentTypesExclude, "content-types-exclude", "", "comma-separated content types to exclude: text, photos, videos, audios, links, documents (see --content-types caveat; the filters_plug list may under-report)")
+	postsCmd.Flags().BoolVar(&sAll, "all", false, "fetch all pages (walks until is_has_more is false)")
 	postsCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
-		resp, err := c.ListSearchPosts(context.Background(), hooppy.SearchPostsFilter{
+		os.Exit(runListSearchPosts(context.Background(), c, os.Stdout, os.Stderr, hooppy.SearchPostsFilter{
 			Text:                sText,
 			DateFrom:            sDateFrom,
 			DateTo:              sDateTo,
@@ -986,9 +977,7 @@ func registerSearch(root *cobra.Command) {
 			VideoDuration:       sVideoDuration,
 			ContentTypes:        sContentTypes,
 			ContentTypesExclude: sContentTypesExclude,
-		})
-		die(err)
-		printJSON(resp)
+		}, sAll))
 	}
 
 	// search status

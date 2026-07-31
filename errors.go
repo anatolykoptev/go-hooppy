@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -126,4 +127,33 @@ func IsRateLimited(err error) bool {
 		return false
 	}
 	return ae.StatusCode == http.StatusTooManyRequests
+}
+
+// isResultWindowError reports whether err is the Elasticsearch
+// max_result_window rejection: HTTP 500 carrying "Result window is too large"
+// (an illegal_argument_exception). This is the server's HARD ceiling on offset
+// paging — from + size must be <= max_result_window (10000 on Hooppy today,
+// but the value is a server config, NOT hardcoded here). It is NOT a transient
+// 500 and retrying it is pointless (the same offset reproduces it), but the
+// retry layer will still surface it after its attempts exhaust; the caller's
+// job is to recognise it and keep the rows already collected instead of
+// discarding them. The only recovery is to narrow with date filters so the
+// offset stays within the window.
+//
+// Detection matches the phrase in EITHER the extracted Message or the raw
+// Body: the real ES error nests the reason under an "error" object
+// ({"error":{"type":"illegal_argument_exception","reason":"Result window is
+// too large, ..."}}), so newAPIError's string-extraction falls through to the
+// raw body and the phrase lives in Body, not Message. Checking both is robust
+// to either shape.
+func isResultWindowError(err error) bool {
+	var ae *APIError
+	if !errorsAs(err, &ae) {
+		return false
+	}
+	if ae.StatusCode != http.StatusInternalServerError {
+		return false
+	}
+	hay := ae.Message + " " + string(ae.Body)
+	return strings.Contains(hay, "Result window is too large")
 }

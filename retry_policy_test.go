@@ -73,18 +73,22 @@ var retryPolicies = map[string]struct {
 	creates bool
 }{
 	// --- watermarks ---
-	"ListWatermarks":  {retryAllowed, false},
-	"CreateWatermark": {retryNever, true},
-	"UpdateWatermark": {retryAllowed, false},
-	"DeleteWatermark": {retryAllowed, false},
+	"ListWatermarks":             {retryAllowed, false},
+	"ListAllWatermarks":          {retryComposite, false},
+	"ListAllWatermarksWithTotal": {retryComposite, false},
+	"CreateWatermark":            {retryNever, true},
+	"UpdateWatermark":            {retryAllowed, false},
+	"DeleteWatermark":            {retryAllowed, false},
 	// --- user/settings ---
 	"GetUser":     {retryAllowed, false},
 	"GetSettings": {retryAllowed, false},
 	// --- proxies ---
-	"ListProxies": {retryAllowed, false},
-	"CreateProxy": {retryNever, true},
-	"UpdateProxy": {retryAllowed, false},
-	"DeleteProxy": {retryAllowed, false},
+	"ListProxies":             {retryAllowed, false},
+	"ListAllProxies":          {retryComposite, false},
+	"ListAllProxiesWithTotal": {retryComposite, false},
+	"CreateProxy":             {retryNever, true},
+	"UpdateProxy":             {retryAllowed, false},
+	"DeleteProxy":             {retryAllowed, false},
 	// --- projects + schedules ---
 	"ListProjects":              {retryAllowed, false},
 	"UpdateProject":             {retryAllowed, false},
@@ -105,25 +109,31 @@ var retryPolicies = map[string]struct {
 	"DeleteSchedule":         {retryAllowed, false},
 	"GetScheduleEdit":        {retryAllowed, false},
 	// --- posts search (scraping) ---
-	"ListSearchPosts":     {retryAllowed, false},
-	"ListSourceResources": {retryAllowed, false},
-	"GetParsingForm":      {retryAllowed, false},
-	"StartParsing":        {retryNever, true},
-	"StopParsing":         {retryAllowed, false},
-	"CopySearchPost":      {retryNever, true}, // PUT /posts/copy creates a copy
-	"GetSearchPostEdit":   {retryAllowed, false},
-	"RewriteSearchPost":   {retryNever, true}, // POST /posts with as_copy=1 creates
-	"ImportSearchPost":    {retryNever, true}, // PUT /posts/import creates — the #87 case
+	"ListSearchPosts":                         {retryAllowed, false},
+	"ListAllSearchPosts":                      {retryComposite, false},
+	"ListAllSearchPostsWithTotal":             {retryComposite, false},
+	"ListAllSearchPostsWithFirstAndLastTotal": {retryComposite, false},
+	"ListSourceResources":                     {retryAllowed, false},
+	"ListAllSourceResources":                  {retryComposite, false},
+	"ListAllSourceResourcesWithTotal":         {retryComposite, false},
+	"GetParsingForm":                          {retryAllowed, false},
+	"StartParsing":                            {retryNever, true},
+	"StopParsing":                             {retryAllowed, false},
+	"CopySearchPost":                          {retryNever, true}, // PUT /posts/copy creates a copy
+	"GetSearchPostEdit":                       {retryAllowed, false},
+	"RewriteSearchPost":                       {retryNever, true}, // POST /posts with as_copy=1 creates
+	"ImportSearchPost":                        {retryNever, true}, // PUT /posts/import creates — the #87 case
 	// --- posts ---
-	"ListPosts":             {retryAllowed, false},
-	"ListAllPosts":          {retryComposite, false},
-	"ListAllPostsWithTotal": {retryComposite, false},
-	"CreatePost":            {retryNever, true},
-	"UpdatePost":            {retryAllowed, false},
-	"GetPostEdit":           {retryAllowed, false},
-	"UpdatePostText":        {retryComposite, false}, // delegates to GetPostEdit + UpdatePost
-	"DeletePost":            {retryAllowed, false},
-	"BatchDeletePosts":      {retryNever, true}, // POST /posts/batch/delete
+	"ListPosts":                         {retryAllowed, false},
+	"ListAllPosts":                      {retryComposite, false},
+	"ListAllPostsWithTotal":             {retryComposite, false},
+	"ListAllPostsWithFirstAndLastTotal": {retryComposite, false},
+	"CreatePost":                        {retryNever, true},
+	"UpdatePost":                        {retryAllowed, false},
+	"GetPostEdit":                       {retryAllowed, false},
+	"UpdatePostText":                    {retryComposite, false}, // delegates to GetPostEdit + UpdatePost
+	"DeletePost":                        {retryAllowed, false},
+	"BatchDeletePosts":                  {retryNever, true}, // POST /posts/batch/delete
 	// MovePost is composite: GetPostEdit (retryAllowed) + UpdatePost
 	// (retryAllowed full-state PUT) + GetPostEdit (date recovery). The move
 	// itself is a full-state PUT to a known id, which converges on re-send;
@@ -171,6 +181,8 @@ var retryPolicies = map[string]struct {
 	"BatchPost":         {retryNever, true},
 	// --- accounts / pages ---
 	"ListAccounts":                      {retryAllowed, false},
+	"ListAllAccounts":                   {retryComposite, false},
+	"ListAllAccountsWithTotal":          {retryComposite, false},
 	"ListPages":                         {retryAllowed, false},
 	"ListAllPages":                      {retryComposite, false},
 	"ListAllPagesWithTotal":             {retryComposite, false},
