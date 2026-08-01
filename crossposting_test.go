@@ -976,7 +976,7 @@ func TestCrossPostingFix_F11_LastCheckDateDecodesFromNumberAndString(t *testing.
 }
 
 // TestCrossPostingFix_F12_SelfCheckGoesRedOnBrokenReducer is the falsification
-// half of F4: it breaks the reducer (writes a fixture whose scalar leaves are
+// half of F4: it breaks the FIXTURE (writing a non-fixed-point file), not the reducer (writes a fixture whose scalar leaves are
 // NOT the placeholder set the reducer emits) into a temp fixture dir, runs
 // --self-check against it, and asserts the script exits non-zero. A self-check
 // that passes on a broken reducer is the failure mode F4 exists to prevent.
@@ -1191,31 +1191,49 @@ func TestEnrichedCrossPostingEditMap_RefusesServerKeyCollision(t *testing.T) {
 //
 // So the wrong declaration lives here as a local mirror instead, decoupled
 // from the real struct's methods, and the assertion is that the REAL fixture
-// rejects it. Break the fix — record a fixture whose last_check_date is a
-// string — and this stops erroring. The same device as
-// wrongSchedulePostsResponse in unknown_field_diagnostic_test.go.
+// rejects it. The same device as wrongSchedulePostsResponse in
+// unknown_field_diagnostic_test.go.
 func TestCrossPostingFix_F1_WrongDeclarationIsRejected(t *testing.T) {
-	// Verbatim the declaration that shipped and broke `crossposting list`.
-	type wrongCrossPosting struct {
-		LastCheckDate          string `json:"last_check_date"`
-		InstagramLastCheckDate string `json:"instagram_last_check_date"`
-	}
-	type wrongCrossPostingsResponse struct {
-		List []wrongCrossPosting `json:"list"`
-	}
-
 	fixture := liveFixture(t, "cross_postings.json")
-	var typeErr *json.UnmarshalTypeError
-	err := json.Unmarshal(fixture, &wrongCrossPostingsResponse{})
-	if !errors.As(err, &typeErr) {
-		t.Fatalf("decoding the real fixture into the string declaration gave %v, want a *json.UnmarshalTypeError — the fixture must record last_check_date as a NUMBER; if it records a string again, the live decode breaks exactly as it did before and nothing here would notice", err)
-	}
-	// Either sibling may be the reported field: both are recorded as numbers
-	// and both are declared string in the mirror, so which one the decoder
-	// reaches first is not a property worth pinning. What matters is that the
-	// error names one of the two timestamps rather than something else, which
-	// would mean the fixture broke somewhere this test does not cover.
-	if !strings.Contains(typeErr.Field, "last_check_date") {
-		t.Errorf("UnmarshalTypeError.Field = %q, want one of the last_check_date timestamps — the error must point at a field whose recorded type is wrong", typeErr.Field)
+
+	// One mirror PER FIELD, and an EXACT field match on the error.
+	//
+	// A single mirror declaring both timestamps as strings is not enough, and
+	// the reason is worth keeping: encoding/json reports only the FIRST
+	// offending field, so with both declared wrong, either one still erroring
+	// keeps the test green — and the realistic regression is ONE field
+	// changing on the wire, not both. A substring match on "last_check_date"
+	// makes it worse, because it also matches instagram_last_check_date.
+	// Measured: the both-fields form was GREEN on each single-field fixture
+	// regression it claimed to catch.
+	for _, tc := range []struct {
+		field string
+		into  func() interface{}
+	}{
+		{"list.last_check_date", func() interface{} {
+			return &struct {
+				List []struct {
+					LastCheckDate string `json:"last_check_date"`
+				} `json:"list"`
+			}{}
+		}},
+		{"list.instagram_last_check_date", func() interface{} {
+			return &struct {
+				List []struct {
+					InstagramLastCheckDate string `json:"instagram_last_check_date"`
+				} `json:"list"`
+			}{}
+		}},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			var typeErr *json.UnmarshalTypeError
+			err := json.Unmarshal(fixture, tc.into())
+			if !errors.As(err, &typeErr) {
+				t.Fatalf("decoding the real fixture into the string declaration gave %v, want a *json.UnmarshalTypeError — the fixture must record %s as a NUMBER; if it records a string again the live decode breaks exactly as it did before", err, tc.field)
+			}
+			if typeErr.Field != tc.field {
+				t.Errorf("UnmarshalTypeError.Field = %q, want %q exactly — an inexact match lets a sibling field's error satisfy this case, which is how the previous version stayed green on every single-field regression", typeErr.Field, tc.field)
+			}
+		})
 	}
 }

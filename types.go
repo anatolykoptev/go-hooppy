@@ -2165,15 +2165,33 @@ type CrossPosting struct {
 	// has zero references elsewhere on the cross-posting surface, so it was
 	// not applied to the field that caused the outage; it is applied now.
 	//
-	// TRADE: FlexInt is a leaf in the diagnostic walker (scalarOnly), so it
-	// accepts BOTH a JSON number and a JSON numeric string. The decode gate's
-	// number→numeric-string mutation on these two fields is therefore no
-	// longer caught (a bare int rejected "0" with *json.UnmarshalTypeError;
-	// FlexInt accepts it). Object/array/non-numeric-string mutations are
-	// still caught (FlexInt rejects them with *json.UnmarshalTypeError), and
-	// null was already accepted silently by int — no coverage lost there.
+	// TRADE, measured — exactly two mutations lost, one per field, and the
+	// mechanism is not the obvious one. The recorded placeholder is a NUMBER
+	// (0), which a bare int and FlexInt BOTH decode with err == nil, so the
+	// mutation the gate can no longer see is the WIDENING FlexInt→int — not a
+	// rejection either type performs. Narrowing mutations are still caught:
+	// FlexInt→string and FlexInt→bool both go RED, and object/array shapes
+	// are rejected with *json.UnmarshalTypeError. null was already accepted
+	// silently by int, so nothing was lost there.
+	//
+	// The second consequence is larger than the lost mutations and is the one
+	// worth knowing. If the server ever sends a stringified numeric here, the
+	// recorder writes "str", and FlexInt then fails with a NON-STRUCTURAL
+	// error ("str" is not an integer). TestLiveFixtureDecodes returns that
+	// first and discards any shape mismatch, so cross_postings.json and
+	// cross_posting_edit.json would each need a fixturesBlindToDecode entry
+	// and the decode oracle would go inert for ALL their modelled fields, not
+	// for one mutation per field.
+	//
+	// That path is loud, not silent: the gate goes RED and names the
+	// mechanism, forcing a deliberate choice rather than a quiet degradation.
+	// The right answer when it happens is the remedy the diagnostic file
+	// already records — make the reducer emit a type-valid placeholder (0)
+	// for FlexInt-typed leaves — NOT to add the fixtures to the blind list,
+	// which is the first suggestion the error offers and the wrong one.
+	//
 	// The live robustness (a stringified numeric does not abort the whole
-	// list decode) is worth that one mutation per field.
+	// list decode) is worth that trade.
 	//
 	// search_start_date and search_stop_date are strings: the list row
 	// carries null for them on this account, but the /edit fixture

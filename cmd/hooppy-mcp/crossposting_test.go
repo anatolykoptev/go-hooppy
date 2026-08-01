@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -231,5 +232,109 @@ func TestListCrossPostingsTool_AllWalksEveryPage(t *testing.T) {
 	}
 	if env.IsHasMore {
 		t.Error("AllListEnvelope must pin is_has_more=false")
+	}
+}
+
+// The MCP LIST tool must carry decoded enum names, on BOTH the paged and the
+// --all branch. This is the surface whose tool description promises an agent
+// that "the enum integers are decoded to names", and it was the surface
+// without a guard: the CLI had TestRunListCrossPostings_EnumNameReachesCLI,
+// MCP had the name asserted only in the /edit test.
+//
+// RED-on-revert: drop the enrichment call from registerListCrossPostings and
+// the raw integers still decode fine while every *_name assertion below fails.
+func TestListCrossPostingsTool_EnumNamesReachTheListSurface(t *testing.T) {
+	// check_interval 99 is deliberately not in the vendor's table: an
+	// undefined value must stay distinguishable from a defined one, which is
+	// the whole point of carrying the raw value alongside the name.
+	body := `{"list":[{"id":1,"name":"cp","state":0,"search_mode":3,"search_mode_direction":0,"determine_best_by":4,"check_when_type":null,"check_interval":99}],"total_rows":1,"is_has_more":false,"rows_limit":20}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+	cs := newMCPClientSession(t)
+	for _, args := range []map[string]any{{}, {"all": true}} {
+		t.Run(fmt.Sprintf("args=%v", args), func(t *testing.T) {
+			res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+				Name:      "hooppy_list_cross_postings",
+				Arguments: args,
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if res.IsError {
+				t.Fatalf("tool returned error: %s", toolResultText(res))
+			}
+			var env struct {
+				List []map[string]json.RawMessage `json:"list"`
+			}
+			if err := json.Unmarshal([]byte(toolResultText(res)), &env); err != nil {
+				t.Fatalf("result not valid JSON: %v", err)
+			}
+			if len(env.List) != 1 {
+				t.Fatalf("list len = %d, want 1", len(env.List))
+			}
+			row := env.List[0]
+			for _, want := range []struct{ key, val string }{
+				{"search_mode", "3"},
+				{"search_mode_name", `"best"`},
+				{"determine_best_by_name", `"views"`},
+				{"check_interval", "99"},
+				{"check_interval_name", `"unknown"`},
+				{"check_interval_unknown", "true"},
+				{"check_when_type_name", `"unset"`},
+			} {
+				if got := string(row[want.key]); got != want.val {
+					t.Errorf("%s = %s, want %s — the tool description promises an agent that enum integers are decoded to names on this surface", want.key, got, want.val)
+				}
+			}
+		})
+	}
+}
+
+// A stringified timestamp from the server must reach the agent as a number.
+// FlexInt exists so a string-vs-number split in the collection cannot abort
+// the decode; it passes the wire form through on marshal, so without an
+// explicit normalisation the enriched list surface would forward that split to
+// the consumer least able to absorb it — an LLM reading a field that changes
+// type between calls.
+//
+// RED-on-revert: delete the timestamp normalisation from
+// enrichCrossPostingRows and the quoted form reaches the tool result.
+func TestListCrossPostingsTool_TimestampsAreNormalised(t *testing.T) {
+	body := `{"list":[{"id":1,"name":"cp","last_check_date":"1641664813","instagram_last_check_date":null}],"total_rows":1,"is_has_more":false,"rows_limit":20}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+	cs := newMCPClientSession(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "hooppy_list_cross_postings", Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %s", toolResultText(res))
+	}
+	var env struct {
+		List []map[string]json.RawMessage `json:"list"`
+	}
+	if err := json.Unmarshal([]byte(toolResultText(res)), &env); err != nil {
+		t.Fatalf("result not valid JSON: %v", err)
+	}
+	if got := string(env.List[0]["last_check_date"]); got != "1641664813" {
+		t.Errorf("last_check_date = %s, want the unquoted number — the server sent a string and the presentation surface must not forward that polymorphism to an agent", got)
+	}
+	if got := string(env.List[0]["instagram_last_check_date"]); got != "null" {
+		t.Errorf("instagram_last_check_date = %s, want null — an unset timestamp must stay distinguishable from a zero one", got)
 	}
 }

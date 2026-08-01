@@ -247,6 +247,29 @@ func enrichCrossPostingRows(list []CrossPosting) ([]map[string]json.RawMessage, 
 				return nil, fmt.Errorf("hooppy: enrichCrossPostingRows: %w", err)
 			}
 		}
+		// Normalise the FlexInt timestamps. FlexInt passes the wire form
+		// through on marshal, so without this the field is a number or a
+		// string depending on what the server happened to send — and this map
+		// is a presentation surface read by an agent, which is precisely the
+		// consumer least able to absorb a field that changes type between
+		// calls. The typed accessor already exists; forwarding the vendor's
+		// polymorphism to the caller is a choice, not a necessity.
+		for _, ts := range []struct {
+			key string
+			v   FlexInt
+		}{
+			{"last_check_date", list[i].LastCheckDate},
+			{"instagram_last_check_date", list[i].InstagramLastCheckDate},
+		} {
+			if _, present := row[ts.key]; !present {
+				continue
+			}
+			if !ts.v.IsSet() {
+				row[ts.key] = json.RawMessage("null")
+				continue
+			}
+			row[ts.key] = json.RawMessage(strconv.FormatInt(ts.v.Int64(), 10))
+		}
 		rows = append(rows, row)
 	}
 	return rows, nil
