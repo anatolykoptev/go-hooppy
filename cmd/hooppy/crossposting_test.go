@@ -197,3 +197,46 @@ func TestRunCrossPostingStats_EmptyIsAbsentData(t *testing.T) {
 		t.Errorf("stderr must note 'absent data' for an empty statistics array: %s", errOut.String())
 	}
 }
+
+// TestRunListCrossPostings_EnumNameReachesCLI is the CLI integration half of
+// F9: the list command emits the decoded enum name on stdout, not just the
+// bare integer. The stub serves a row with search_mode=3; the enriched output
+// must carry search_mode_name="best" alongside the raw 3.
+func TestRunListCrossPostings_EnumNameReachesCLI(t *testing.T) {
+	body := `{"list":[{"id":1,"name":"cp","state":0,"search_mode":3,"search_mode_direction":0,"determine_best_by":0,"check_when_type":0,"check_interval":0}],"total_rows":1,"is_has_more":false,"rows_limit":20}`
+	srv := stubPagedServer(t, "/cross-posting", map[string]string{"1": body})
+	defer srv.Close()
+	c := newDoctorTestClient(t, srv)
+
+	var out, errOut bytes.Buffer
+	code := runListCrossPostings(context.Background(), c, &out, &errOut, 0, false)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+	var env struct {
+		List []map[string]json.RawMessage `json:"list"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("stdout not valid JSON: %v", err)
+	}
+	if len(env.List) != 1 {
+		t.Fatalf("list len = %d, want 1", len(env.List))
+	}
+	if got := string(env.List[0]["search_mode"]); got != "3" {
+		t.Errorf("search_mode raw = %s, want 3 (raw integer must survive)", got)
+	}
+	if got := string(env.List[0]["search_mode_name"]); got != `"best"` {
+		t.Errorf("search_mode_name = %s, want \"best\" (decoded enum name must reach the CLI list surface — the MCP tool description promises it)", got)
+	}
+}
+
+// TestRunShowCrossPosting_NegativeIDRefused is the CLI half of F13: a
+// negative id exits 1 without a request, the same as id=0.
+func TestRunShowCrossPosting_NegativeIDRefused(t *testing.T) {
+	c := newDoctorTestClient(t, stubCrossPostingEditServer(t, 0, "{}"))
+	var out, errOut bytes.Buffer
+	code := runShowCrossPosting(context.Background(), c, &out, &errOut, -1)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 for id=-1 (a negative id must be refused before any request, same as id=0)", code)
+	}
+}

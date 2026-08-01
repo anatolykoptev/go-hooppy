@@ -1939,9 +1939,14 @@ func parseMetricFloat(name, v string) (float64, error) {
 
 // EnumValue carries both the raw integer (for round-tripping) and the decoded
 // human-readable name (for an agent/human). It is the shared representation
-// for every cross-posting integer enum. An integer the bundle does not define
-// decodes to Name="unknown" with Unknown=true and the raw Value preserved —
-// the pass-through contract.
+// for every cross-posting integer enum. The name is a three-way distinction:
+//
+//   - a known integer → its bundle name (Unknown=false);
+//   - an integer the bundle does not define → Name="unknown", Unknown=true,
+//     raw Value preserved (the pass-through contract);
+//   - JSON null → Name="unset", Unknown=false (the feature is not configured
+//     / the server sent null) — distinct from "unknown" so an agent does not
+//     read a null enum as "the bundle does not define this value".
 type EnumValue struct {
 	Value   int    `json:"value"`
 	Name    string `json:"name"`
@@ -1957,6 +1962,33 @@ func enumName(table map[int]string, v int) (string, bool) {
 		return "unknown", true
 	}
 	return name, false
+}
+
+// decodeEnumValue is the shared decode for every cross-posting integer enum.
+// It owns the three-way distinction an agent reads off the *_name key:
+//
+//   - JSON null  → (0, "unset", false): the server sent null / the feature is
+//     not configured. Distinct from "unknown" so an agent does not read a
+//     null check_interval as "the bundle does not define this value".
+//   - JSON number → (n, name, unknown) via enumName: a known value decodes to
+//     its name; a value the bundle does not define passes through with
+//     Name="unknown", Unknown=true, and the raw integer preserved.
+//   - A container or non-integer → an error: a shape change is loud, not a
+//     silent coerce to 0 (the same doctrine as FlexInt).
+//
+// Centralising the null/number decode keeps the pass-through contract and the
+// null-vs-unknown distinction in one place rather than copied across five
+// methods.
+func decodeEnumValue(b []byte, table map[int]string, typeName string) (value int, name string, unknown bool, err error) {
+	if bytes.Equal(bytes.TrimSpace(b), []byte("null")) {
+		return 0, "unset", false, nil
+	}
+	var n int
+	if err := json.Unmarshal(b, &n); err != nil {
+		return 0, "", false, fmt.Errorf("%s: %w", typeName, err)
+	}
+	name, unknown = enumName(table, n)
+	return n, name, unknown, nil
 }
 
 // Cross-posting enum tables, read from the hooppy.ru Nuxt bundle (dossier
@@ -2004,12 +2036,11 @@ var (
 type SearchMode EnumValue
 
 func (m *SearchMode) UnmarshalJSON(b []byte) error {
-	var n int
-	if err := json.Unmarshal(b, &n); err != nil {
-		return fmt.Errorf("SearchMode: %w", err)
+	v, name, unknown, err := decodeEnumValue(b, crossPostingSearchModeTable, "SearchMode")
+	if err != nil {
+		return err
 	}
-	m.Value = n
-	m.Name, m.Unknown = enumName(crossPostingSearchModeTable, n)
+	m.Value, m.Name, m.Unknown = v, name, unknown
 	return nil
 }
 
@@ -2021,12 +2052,11 @@ func (m SearchMode) MarshalJSON() ([]byte, error) { return json.Marshal(m.Value)
 type SearchModeDirection EnumValue
 
 func (m *SearchModeDirection) UnmarshalJSON(b []byte) error {
-	var n int
-	if err := json.Unmarshal(b, &n); err != nil {
-		return fmt.Errorf("SearchModeDirection: %w", err)
+	v, name, unknown, err := decodeEnumValue(b, crossPostingSearchModeDirectionTable, "SearchModeDirection")
+	if err != nil {
+		return err
 	}
-	m.Value = n
-	m.Name, m.Unknown = enumName(crossPostingSearchModeDirectionTable, n)
+	m.Value, m.Name, m.Unknown = v, name, unknown
 	return nil
 }
 
@@ -2038,12 +2068,11 @@ func (m SearchModeDirection) MarshalJSON() ([]byte, error) { return json.Marshal
 type DetermineBestBy EnumValue
 
 func (m *DetermineBestBy) UnmarshalJSON(b []byte) error {
-	var n int
-	if err := json.Unmarshal(b, &n); err != nil {
-		return fmt.Errorf("DetermineBestBy: %w", err)
+	v, name, unknown, err := decodeEnumValue(b, crossPostingDetermineBestByTable, "DetermineBestBy")
+	if err != nil {
+		return err
 	}
-	m.Value = n
-	m.Name, m.Unknown = enumName(crossPostingDetermineBestByTable, n)
+	m.Value, m.Name, m.Unknown = v, name, unknown
 	return nil
 }
 
@@ -2054,12 +2083,11 @@ func (m DetermineBestBy) MarshalJSON() ([]byte, error) { return json.Marshal(m.V
 type CheckWhenType EnumValue
 
 func (m *CheckWhenType) UnmarshalJSON(b []byte) error {
-	var n int
-	if err := json.Unmarshal(b, &n); err != nil {
-		return fmt.Errorf("CheckWhenType: %w", err)
+	v, name, unknown, err := decodeEnumValue(b, crossPostingCheckWhenTypeTable, "CheckWhenType")
+	if err != nil {
+		return err
 	}
-	m.Value = n
-	m.Name, m.Unknown = enumName(crossPostingCheckWhenTypeTable, n)
+	m.Value, m.Name, m.Unknown = v, name, unknown
 	return nil
 }
 
@@ -2071,12 +2099,11 @@ func (m CheckWhenType) MarshalJSON() ([]byte, error) { return json.Marshal(m.Val
 type CheckInterval EnumValue
 
 func (m *CheckInterval) UnmarshalJSON(b []byte) error {
-	var n int
-	if err := json.Unmarshal(b, &n); err != nil {
-		return fmt.Errorf("CheckInterval: %w", err)
+	v, name, unknown, err := decodeEnumValue(b, crossPostingCheckIntervalTable, "CheckInterval")
+	if err != nil {
+		return err
 	}
-	m.Value = n
-	m.Name, m.Unknown = enumName(crossPostingCheckIntervalTable, n)
+	m.Value, m.Name, m.Unknown = v, name, unknown
 	return nil
 }
 
@@ -2116,20 +2143,38 @@ type CrossPosting struct {
 	// fixture guessed both as string — that guess caused the decode failure
 	// (cannot unmarshal number into string).
 	//
-	// UNMEASURED: search_start_date and search_stop_date are null on this
-	// account, so their type when the feature is configured is not verified.
-	// They are typed string (matching next_check_date's format) but a null
-	// in the fixture does NOT confirm that — do not read null as "verified
-	// string". Many other list-row fields are also null on this account
-	// (message_to_channel, message_to_community, posts_rewrite, posts_photo,
-	// etc.); their types are recorded in the diagnostic baseline from the
-	// recording, but a null baseline entry means "the server sent null on
-	// this account", not "the server always sends null".
-	NextCheckDate       string `json:"next_check_date,omitempty"`
-	LastCheckDate       int    `json:"last_check_date,omitempty"`
-	SearchStartDate     string `json:"search_start_date,omitempty"`
-	SearchStopDate      string `json:"search_stop_date,omitempty"`
-	SourceResourcesMode int    `json:"source_resources_mode,omitempty"`
+	// last_check_date and instagram_last_check_date are nullable timestamps
+	// on an undocumented endpoint whose sibling next_check_date is a
+	// formatted STRING while they are NUMBERS — direct evidence this API
+	// family is heterogeneous on date fields. The repo doctrine (see
+	// PostPhoto.UpdatedDate / ScheduleTimeSlot) is that a nullable timestamp
+	// gets FlexInt because "a stringified numeric has appeared on this API"
+	// and "a bare int64 aborts the whole list decode when it does". FlexInt
+	// has zero references elsewhere on the cross-posting surface, so it was
+	// not applied to the field that caused the outage; it is applied now.
+	//
+	// TRADE: FlexInt is a leaf in the diagnostic walker (scalarOnly), so it
+	// accepts BOTH a JSON number and a JSON numeric string. The decode gate's
+	// number→numeric-string mutation on these two fields is therefore no
+	// longer caught (a bare int rejected "0" with *json.UnmarshalTypeError;
+	// FlexInt accepts it). Object/array/non-numeric-string mutations are
+	// still caught (FlexInt rejects them with *json.UnmarshalTypeError), and
+	// null was already accepted silently by int — no coverage lost there.
+	// The live robustness (a stringified numeric does not abort the whole
+	// list decode) is worth that one mutation per field.
+	//
+	// search_start_date and search_stop_date are strings: the list row
+	// carries null for them on this account, but the /edit fixture
+	// (cross_posting_edit.json) records both as "str", confirming the type
+	// is string (matching next_check_date's format) — not an unmeasured
+	// guess. A null in the list fixture means "the server sent null on this
+	// account", not "the server always sends null".
+	NextCheckDate          string  `json:"next_check_date,omitempty"`
+	LastCheckDate          FlexInt `json:"last_check_date,omitempty"`
+	InstagramLastCheckDate FlexInt `json:"instagram_last_check_date,omitempty"`
+	SearchStartDate        string  `json:"search_start_date,omitempty"`
+	SearchStopDate         string  `json:"search_stop_date,omitempty"`
+	SourceResourcesMode    int     `json:"source_resources_mode,omitempty"`
 }
 
 // CrossPostingsResponse wraps GET /cross-posting. Same {list, total_rows,
@@ -2194,12 +2239,14 @@ type CrossPostingEditResponse struct {
 	TakeAmount     int `json:"take_amount"`
 	// Check schedule timestamps. next_check_date is a string (absent from the
 	// edit fixture on this account); last_check_date is a number (unix epoch,
-	// measured 2026-07-31). search_start_date/search_stop_date are strings.
-	NextCheckDate       string `json:"next_check_date,omitempty"`
-	LastCheckDate       int    `json:"last_check_date,omitempty"`
-	SearchStartDate     string `json:"search_start_date,omitempty"`
-	SearchStopDate      string `json:"search_stop_date,omitempty"`
-	SourceResourcesMode int    `json:"source_resources_mode,omitempty"`
+	// measured 2026-07-31) and nullable, so FlexInt — see the CrossPosting
+	// doc for the doctrine and the decode-mutation trade. search_start_date/
+	// search_stop_date are strings (the edit fixture records both as "str").
+	NextCheckDate       string  `json:"next_check_date,omitempty"`
+	LastCheckDate       FlexInt `json:"last_check_date,omitempty"`
+	SearchStartDate     string  `json:"search_start_date,omitempty"`
+	SearchStopDate      string  `json:"search_stop_date,omitempty"`
+	SourceResourcesMode int     `json:"source_resources_mode,omitempty"`
 	// Newly-revealed keys (2026-07-31 recording): absent from the prior
 	// hand-authored fixture entirely, so nothing modelled them and the
 	// diagnostic could not see them.

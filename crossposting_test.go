@@ -1,14 +1,18 @@
 package hooppy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -656,13 +660,20 @@ var _ = io.Discard
 // F1: reverting LastCheckDate to string makes the fixture-decode test RED.
 // F2: removing is_search_started from the struct makes the diagnostic report
 //     it as unmodelled (RED).
-// F3: a FlexInt field errors on non-{null, number, numeric string} input.
-// F4: the recorder script reproduces an existing recorded fixture byte-for-byte.
+// F3: the cross-posting LastCheckDate (FlexInt) field errors on non-{null,
+//     number, numeric string} input — guarding the field the change made
+//     polymorphic, not a bare FlexInt.
+// F4: the recorder self-check asserts reduce(fixture)==fixture across every
+//     committed fixture (the idempotency oracle, not a self-fulfilling
+//     author-chosen input).
 
-// TestCrossPostingFix_F1_LastCheckDateIsNumber pins the type of last_check_date
-// as a number, not a string. The prior hand-authored fixture guessed string;
-// the live API sends a number (0, unix epoch); the decode failed with
-// "cannot unmarshal number into Go struct Field .last_check_date of type string".
+// TestCrossPostingFix_F1_LastCheckDateIsNumber pins that last_check_date
+// decodes from the JSON number the fixture sends. The prior hand-authored
+// fixture guessed string; the live API sends a number (0, unix epoch); the
+// decode failed with "cannot unmarshal number into Go struct Field
+// .last_check_date of type string". The field is now FlexInt (nullable
+// timestamp, heterogeneous date family — see the CrossPosting doc), which
+// accepts a number, a numeric string, or null.
 //
 // RED-on-revert: change LastCheckDate back to string in CrossPosting and this
 // test fails — the fixture sends a JSON number, a string field cannot receive
@@ -677,10 +688,17 @@ func TestCrossPostingFix_F1_LastCheckDateIsNumber(t *testing.T) {
 		t.Fatal("List is empty — fixture has no rows to test")
 	}
 	// The fixture's last_check_date is 0 (a JSON number). A string field would
-	// have failed above; an int field receives it. This assertion is redundant
-	// with the decode above but makes the intent explicit for a reader.
-	if resp.List[0].LastCheckDate != 0 {
-		t.Errorf("LastCheckDate = %d, want 0 (the fixture's placeholder value)", resp.List[0].LastCheckDate)
+	// have failed above; FlexInt receives it. Int64() is the typed accessor.
+	if got := resp.List[0].LastCheckDate.Int64(); got != 0 {
+		t.Errorf("LastCheckDate.Int64() = %d, want 0 (the fixture's placeholder value)", got)
+	}
+	if !resp.List[0].LastCheckDate.IsSet() {
+		t.Error("LastCheckDate.IsSet() = false, want true (the fixture sends 0, a present number — IsSet distinguishes a present 0 from an absent/null field)")
+	}
+	// instagram_last_check_date is the nullable-timestamp sibling, modelled
+	// the same way (FlexInt). The fixture sends 0 (number).
+	if got := resp.List[0].InstagramLastCheckDate.Int64(); got != 0 {
+		t.Errorf("InstagramLastCheckDate.Int64() = %d, want 0 (the fixture's placeholder value)", got)
 	}
 }
 
@@ -692,8 +710,8 @@ func TestCrossPostingFix_F1_EditLastCheckDateIsNumber(t *testing.T) {
 	if err := json.Unmarshal(fixture, &resp); err != nil {
 		t.Fatalf("decode cross_posting_edit.json: %v\n\nIf LastCheckDate was reverted to string, this is the exact defect.", err)
 	}
-	if resp.LastCheckDate != 0 {
-		t.Errorf("LastCheckDate = %d, want 0 (the fixture's placeholder value)", resp.LastCheckDate)
+	if got := resp.LastCheckDate.Int64(); got != 0 {
+		t.Errorf("LastCheckDate.Int64() = %d, want 0 (the fixture's placeholder value)", got)
 	}
 }
 
@@ -738,17 +756,25 @@ func TestCrossPostingFix_F2_ProjectIDModelled(t *testing.T) {
 	_ = resp.ProjectID
 }
 
-// TestCrossPostingFix_F3_FlexIntRejectsBadInput pins that FlexInt errors on
-// input that is not null, a JSON number, or a JSON numeric string. This is
-// the property that makes FlexInt safe to use for polymorphic fields: a shape
-// change (the API starts sending an object where it sent a number) is loud,
-// not a silent coerce to 0.
+// TestCrossPostingFix_F3_FlexIntRejectsBadInput pins that the cross-posting
+// LastCheckDate field (FlexInt) errors on input that is not null, a JSON
+// number, or a JSON numeric string. This guards the field change 2 made
+// polymorphic — not a bare FlexInt — so a shape change on last_check_date
+// (the API starts sending an object where it sent a number) is loud, not a
+// silent coerce to 0 that hides the regression behind a green decode.
 //
-// RED-on-revert: if FlexInt.UnmarshalJSON is changed to silently accept any
-// input (e.g. storing the raw bytes without validation), these cases pass
-// where they should error — but the existing TestFlexInt_RoundTrip would
-// also catch the "abc" case. This test is the explicit pin for the contract.
+// RED-on-revert: if LastCheckDate is reverted to a bare int, the numeric-string
+// case ("0") STOPS erroring in the opposite direction (int rejects it) — but
+// the object/array cases still error, and the F1 fixture-decode test carries
+// the revert-to-string guard. If FlexInt.UnmarshalJSON is changed to silently
+// accept any input, the object/array cases here pass where they should error.
 func TestCrossPostingFix_F3_FlexIntRejectsBadInput(t *testing.T) {
+	// Build a one-row /cross-posting list body and mutate only last_check_date.
+	// A bad shape on the cross-posting field must abort the whole list decode,
+	// exactly the failure class FlexInt exists to make loud.
+	row := func(lastCheckDate string) string {
+		return fmt.Sprintf(`{"list":[{"id":1,"name":"cp","last_check_date":%s}],"total_rows":1,"is_has_more":false,"rows_limit":20}`, lastCheckDate)
+	}
 	bad := []string{
 		`{"a":1}`, // object
 		`[1,2]`,   // array
@@ -758,80 +784,391 @@ func TestCrossPostingFix_F3_FlexIntRejectsBadInput(t *testing.T) {
 		`1.5`,     // non-integer number
 	}
 	for _, body := range bad {
-		var f FlexInt
-		if err := json.Unmarshal([]byte(body), &f); err == nil {
-			t.Errorf("FlexInt accepted %s with nil error — a non-{null, number, numeric string} input must error, not silently coerce", body)
+		var resp CrossPostingsResponse
+		if err := json.Unmarshal([]byte(row(body)), &resp); err == nil {
+			t.Errorf("CrossPostingsResponse decoded with last_check_date=%s and nil error — a non-{null, number, numeric string} on the cross-posting field must abort the decode, not silently coerce", body)
 		}
 	}
-	// The legitimate inputs MUST still decode.
-	good := []string{`null`, `0`, `21`, `"21"`, `"0"`}
-	for _, body := range good {
-		var f FlexInt
-		if err := json.Unmarshal([]byte(body), &f); err != nil {
-			t.Errorf("FlexInt rejected legitimate input %s: %v", body, err)
+	// The legitimate inputs MUST still decode, and the field reads back via
+	// Int64() regardless of the wire form (the point of FlexInt).
+	for _, body := range []struct {
+		wire string
+		want int64
+		set  bool
+	}{
+		{`null`, 0, false},
+		{`0`, 0, true},
+		{`21`, 21, true},
+		{`"21"`, 21, true},
+		{`"0"`, 0, true},
+	} {
+		var resp CrossPostingsResponse
+		if err := json.Unmarshal([]byte(row(body.wire)), &resp); err != nil {
+			t.Errorf("CrossPostingsResponse rejected legitimate last_check_date=%s: %v", body.wire, err)
+			continue
+		}
+		if got := resp.List[0].LastCheckDate.Int64(); got != body.want {
+			t.Errorf("last_check_date=%s: Int64() = %d, want %d", body.wire, got, body.want)
+		}
+		if resp.List[0].LastCheckDate.IsSet() != body.set {
+			t.Errorf("last_check_date=%s: IsSet() = %v, want %v", body.wire, resp.List[0].LastCheckDate.IsSet(), body.set)
 		}
 	}
 }
 
-// TestCrossPostingFix_F4_RecorderReproducesFixture pins that the fixture
-// recorder script (scripts/record_fixture.py) reproduces an existing recorded
-// fixture byte-for-byte from an un-reduced raw response. This is the property
-// that makes the recorder trustworthy: if the reducer changes, an existing
-// fixture would no longer reproduce, and this test catches that.
+// TestCrossPostingFix_F4_RecorderSelfCheckIsFixedPoint pins that the fixture
+// recorder's --self-check asserts reduce(fixture)==fixture across EVERY
+// committed fixture in testdata/live/. The prior F4 synthesized a trivial
+// one-row input that reduced to a self-fulfilling fixture — a green test that
+// proved nothing about the 22 fixtures the recorder actually owns. This test
+// shells out to the recorder's own idempotency oracle instead: it fails the
+// day a reducer change (or a trailing-newline drift) breaks any committed
+// fixture, not just the one the test author chose.
 //
-// The test synthesizes an un-reduced raw response (real values + a second
-// array element the reducer drops), runs the recorder in --from-file mode, and
-// compares the output to the committed fixture. RED-on-revert: if the reducer
-// changes its placeholder scheme (e.g. "str" → "string"), the output diverges.
-func TestCrossPostingFix_F4_RecorderReproducesFixture(t *testing.T) {
-	// Synthesize an un-reduced raw response for cross_posting_statistics.json.
-	// The reducer replaces scalars with placeholders and keeps only the first
-	// array element, so a two-element array with real values reduces to the
-	// committed one-element fixture.
-	raw := `{
-		"statistics": [
-			{
-				"date": "2026-07-31",
-				"errors": 3,
-				"posts_duplicates_amount": 5,
-				"posts_filtered_amount": 10,
-				"posts_found_amount": 20,
-				"posts_taken_amount": 2
-			},
-			{
-				"date": "2026-07-30",
-				"errors": 1,
-				"posts_duplicates_amount": 2,
-				"posts_filtered_amount": 3,
-				"posts_found_amount": 8,
-				"posts_taken_amount": 1
-			}
-		]
-	}`
-	tmpDir := t.TempDir()
-	rawPath := filepath.Join(tmpDir, "raw.json")
-	if err := os.WriteFile(rawPath, []byte(raw), 0644); err != nil {
-		t.Fatalf("write raw: %v", err)
-	}
-	// record_fixture.py writes to FIXTURE_DIR/<name> (constant "testdata/live")
-	// relative to CWD, so run from tmpDir and read from tmpDir/testdata/live/.
-	// The script path is resolved from the test's CWD (the repo root), not
-	// from tmpDir.
+// RED-on-revert: break the reducer (e.g. change "str" → "string" in
+// reduce_value) and --self-check reports N/N fixtures diverged → this test
+// goes RED. The test does NOT skip when python3 is absent — the recorder is a
+// committed part of the fixture pipeline, and a missing interpreter is a CI
+// provisioning failure to fix in preflight.yml, not a green skip.
+func TestCrossPostingFix_F4_RecorderSelfCheckIsFixedPoint(t *testing.T) {
 	scriptPath, err := filepath.Abs(filepath.Join("scripts", "record_fixture.py"))
 	if err != nil {
 		t.Fatalf("resolve script path: %v", err)
 	}
-	cmd := exec.Command("python3", scriptPath, "--from-file", rawPath, "reduced.json", "--force")
-	cmd.Dir = tmpDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("record_fixture.py: %v\n%s", err, out)
-	}
-	got, err := os.ReadFile(filepath.Join(tmpDir, "testdata", "live", "reduced.json"))
+	// --self-check reads FIXTURE_DIR (constant "testdata/live") relative to
+	// CWD, so run from the repo root where testdata/live/ lives.
+	cmd := exec.Command("python3", scriptPath, "--self-check")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("read reduced output: %v", err)
+		t.Fatalf("record_fixture.py --self-check failed (the reducer is not a fixed point on every committed fixture, or python3 is missing — the latter is a CI provisioning failure, not a skip):\n%v\n%s", err, out)
 	}
-	want := liveFixture(t, "cross_posting_statistics.json")
-	if string(got) != string(want) {
-		t.Errorf("recorder output does not match committed fixture:\n--- got\n%s\n--- want\n%s", got, want)
+	// The script prints "self-check: N fixtures are fixed points of the reducer".
+	// Assert N > 0 so a reducer that accepts an empty fixture dir (N=0) does
+	// not pass vacuously.
+	if !bytes.Contains(out, []byte("self-check:")) {
+		t.Fatalf("unexpected --self-check output (no 'self-check:' line):\n%s", out)
+	}
+	// Extract the count. The line is "self-check: N fixtures are fixed points".
+	idx := bytes.Index(out, []byte("self-check: "))
+	rest := string(out[idx+len("self-check: "):])
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	n, err := strconv.Atoi(rest[:end])
+	if err != nil || n <= 0 {
+		t.Fatalf("could not parse fixture count from --self-check output, or it is <= 0 (a reducer that passes on an empty fixture dir passes vacuously):\n%s", out)
+	}
+	t.Logf("recorder self-check: %d fixtures are fixed points of the reducer", n)
+}
+
+// TestCrossPostingFix_F9_EnumNameReachesListSurface pins that the decoded enum
+// name reaches the LIST surface (EnrichedCrossPostingsMap), not just /edit.
+// The MCP tool description promises "the enum integers are decoded to names in
+// the response"; before this change the list path emitted bare integers via
+// MarshalJSON and the promise was false on the list surface.
+//
+// RED-on-revert: drop the EnrichedCrossPostingsMap call in runListCrossPostings
+// (emit the bare resp) and the CLI test stops seeing search_mode_name. Or
+// revert injectEnum to a no-op and the name key is absent here too.
+func TestCrossPostingFix_F9_EnumNameReachesListSurface(t *testing.T) {
+	resp := &CrossPostingsResponse{
+		List: []CrossPosting{{
+			ID: 1, SearchMode: SearchMode(EnumValue{Value: 3, Name: "best"}),
+		}},
+	}
+	m, err := EnrichedCrossPostingsMap(resp)
+	if err != nil {
+		t.Fatalf("EnrichedCrossPostingsMap: %v", err)
+	}
+	var env struct {
+		List []map[string]json.RawMessage `json:"list"`
+	}
+	if err := json.Unmarshal(m["list"], &env.List); err != nil {
+		t.Fatalf("decode enriched list: %v", err)
+	}
+	if len(env.List) != 1 {
+		t.Fatalf("list len = %d, want 1", len(env.List))
+	}
+	if got := string(env.List[0]["search_mode"]); got != "3" {
+		t.Errorf("search_mode raw = %s, want 3 (raw integer must survive)", got)
+	}
+	if got := string(env.List[0]["search_mode_name"]); got != `"best"` {
+		t.Errorf("search_mode_name = %s, want \"best\" (decoded name must reach the LIST surface)", got)
+	}
+}
+
+// TestCrossPostingFix_F10_UnknownEnumDistinguishableOnList pins that an
+// undefined enum value is distinguishable on the LIST surface: the raw integer
+// survives, the name is "unknown", and the *_unknown flag is injected. An
+// agent reading the list can tell "the server sent a value the bundle does not
+// define" from "the server sent a known value" — the pass-through contract
+// made visible on the list path, not just /edit.
+func TestCrossPostingFix_F10_UnknownEnumDistinguishableOnList(t *testing.T) {
+	resp := &CrossPostingsResponse{
+		List: []CrossPosting{{
+			ID: 1, CheckInterval: CheckInterval(EnumValue{Value: 99, Name: "unknown", Unknown: true}),
+		}},
+	}
+	m, err := EnrichedCrossPostingsMap(resp)
+	if err != nil {
+		t.Fatalf("EnrichedCrossPostingsMap: %v", err)
+	}
+	var env struct {
+		List []map[string]json.RawMessage `json:"list"`
+	}
+	if err := json.Unmarshal(m["list"], &env.List); err != nil {
+		t.Fatalf("decode enriched list: %v", err)
+	}
+	if got := string(env.List[0]["check_interval"]); got != "99" {
+		t.Errorf("check_interval raw = %s, want 99 (undefined raw integer must survive)", got)
+	}
+	if got := string(env.List[0]["check_interval_name"]); got != `"unknown"` {
+		t.Errorf("check_interval_name = %s, want \"unknown\"", got)
+	}
+	if got := string(env.List[0]["check_interval_unknown"]); got != "true" {
+		t.Errorf("check_interval_unknown = %s, want true (the *_unknown flag is what distinguishes undefined from known on the list surface)", got)
+	}
+}
+
+// TestCrossPostingFix_F11_LastCheckDateDecodesFromNumberAndString pins that
+// the cross-posting LastCheckDate (FlexInt) decodes from a JSON number, a
+// JSON numeric string, and errors on a JSON object — the three-way contract
+// the FlexInt change bought. The number→numeric-string mutation is the one
+// the FlexInt trade gave up on the decode gate (FlexInt accepts it where a
+// bare int rejected it); this test is the live-robustness side of that trade,
+// asserting the stringified numeric the API family is known to send does not
+// abort the list decode.
+func TestCrossPostingFix_F11_LastCheckDateDecodesFromNumberAndString(t *testing.T) {
+	row := func(lastCheckDate string) string {
+		return fmt.Sprintf(`{"list":[{"id":1,"name":"cp","last_check_date":%s}],"total_rows":1,"is_has_more":false,"rows_limit":20}`, lastCheckDate)
+	}
+	cases := []struct {
+		wire string
+		want int64
+	}{
+		{`0`, 0},
+		{`1700000000`, 1700000000},
+		{`"1700000000"`, 1700000000},
+		{`"0"`, 0},
+	}
+	for _, tc := range cases {
+		var resp CrossPostingsResponse
+		if err := json.Unmarshal([]byte(row(tc.wire)), &resp); err != nil {
+			t.Errorf("last_check_date=%s: decode failed: %v (FlexInt must accept a number and a numeric string — the stringified-numeric case is the live-robustness the change bought)", tc.wire, err)
+			continue
+		}
+		if got := resp.List[0].LastCheckDate.Int64(); got != tc.want {
+			t.Errorf("last_check_date=%s: Int64() = %d, want %d", tc.wire, got, tc.want)
+		}
+	}
+	// An object must error — a shape change is loud, not a silent coerce.
+	var resp CrossPostingsResponse
+	if err := json.Unmarshal([]byte(row(`{"a":1}`)), &resp); err == nil {
+		t.Error("last_check_date={\"a\":1}: decoded with nil error — an object on the cross-posting field must abort the decode (FlexInt rejects containers with *json.UnmarshalTypeError)")
+	}
+}
+
+// TestCrossPostingFix_F12_SelfCheckGoesRedOnBrokenReducer is the falsification
+// half of F4: it breaks the reducer (writes a fixture whose scalar leaves are
+// NOT the placeholder set the reducer emits) into a temp fixture dir, runs
+// --self-check against it, and asserts the script exits non-zero. A self-check
+// that passes on a broken reducer is the failure mode F4 exists to prevent.
+//
+// This does NOT mutate the committed testdata/live/ — it copies the recorder
+// into a temp dir with a single broken fixture so the committed suite is not
+// touched. The committed F4 test runs the real --self-check against the real
+// fixtures; this test proves that oracle actually fires.
+func TestCrossPostingFix_F12_SelfCheckGoesRedOnBrokenReducer(t *testing.T) {
+	scriptPath, err := filepath.Abs(filepath.Join("scripts", "record_fixture.py"))
+	if err != nil {
+		t.Fatalf("resolve script path: %v", err)
+	}
+	tmpDir := t.TempDir()
+	// The script reads FIXTURE_DIR = "testdata/live" relative to CWD.
+	fixDir := filepath.Join(tmpDir, "testdata", "live")
+	if err := os.MkdirAll(fixDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A "broken" fixture: a scalar leaf that is NOT a placeholder the reducer
+	// emits (a real string value "not-a-placeholder"). reduce_value would turn
+	// it into "str", so reduce(fixture) != fixture → self-check diverges.
+	broken := []byte(`{"real_value": "not-a-placeholder", "nested": {"num": 0}}` + "\n")
+	if err := os.WriteFile(filepath.Join(fixDir, "broken.json"), broken, 0644); err != nil {
+		t.Fatalf("write broken fixture: %v", err)
+	}
+	cmd := exec.Command("python3", scriptPath, "--self-check")
+	cmd.Dir = tmpDir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("record_fixture.py --self-check exited 0 on a BROKEN fixture (a reducer that reports a non-placeholder fixture as a fixed point is inert):\n%s", out)
+	}
+	if !bytes.Contains(out, []byte("diverged")) {
+		t.Fatalf("expected --self-check to report 'diverged' on the broken fixture, got:\n%s", out)
+	}
+}
+
+// TestCrossPostingFix_F13_NegativeIDRefusedBeforeRequest pins that a negative
+// id is refused BEFORE any request is made — the guard is on the client, not
+// deferred to the server. A negative id builds an invalid path
+// (/cross-posting/-1/edit) the server cannot resolve; the prior guard
+// rejected only id==0, so -1 slipped through to a server-side 404 that looks
+// like "not found" rather than "bad argument".
+func TestCrossPostingFix_F13_NegativeIDRefusedBeforeRequest(t *testing.T) {
+	// A server that 200s on ANY path — if the client makes a request, the
+	// test sees the response and fails; the guard must fire before the call.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"GetCrossPostingEdit", func() error { _, err := c.GetCrossPostingEdit(ctx, -1); return err }},
+		{"GetCrossPostingStatistics", func() error { _, err := c.GetCrossPostingStatistics(ctx, -1); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.fn()
+			if err == nil {
+				t.Fatalf("%s(-1) returned nil error — a negative id must be refused before any request", tc.name)
+			}
+			// Confirm the server was NOT hit: the stub writes {"ok":true},
+			// so a successful call would have decoded into the response. The
+			// guard error is the only path that does not reach the server.
+			if !strings.Contains(err.Error(), "positive integer") {
+				t.Errorf("%s(-1) error = %q, want it to mention 'positive integer'", tc.name, err.Error())
+			}
+		})
+	}
+}
+
+// TestCrossPostingFix_NullEnumIsUnsetNotUnknown pins that a JSON null on an
+// enum field decodes to Name="unset" (Unknown=false), distinct from an
+// undefined integer which decodes to Name="unknown" (Unknown=true). The prior
+// decode conflated null with "unknown value" — an agent reading a null
+// check_interval as "the bundle does not define this value" would mis-report
+// a feature that is simply not configured.
+func TestCrossPostingFix_NullEnumIsUnsetNotUnknown(t *testing.T) {
+	var sm SearchMode
+	if err := json.Unmarshal([]byte(`null`), &sm); err != nil {
+		t.Fatalf("decode null into SearchMode: %v", err)
+	}
+	if sm.Name != "unset" {
+		t.Errorf("null SearchMode.Name = %q, want \"unset\" (null means the feature is not configured, distinct from an undefined value)", sm.Name)
+	}
+	if sm.Unknown {
+		t.Error("null SearchMode.Unknown = true, want false (null is not an undefined bundle value)")
+	}
+	// An undefined integer must still be "unknown"/true — the distinction is
+	// the point of the change.
+	var ci CheckInterval
+	if err := json.Unmarshal([]byte(`99`), &ci); err != nil {
+		t.Fatalf("decode 99 into CheckInterval: %v", err)
+	}
+	if ci.Name != "unknown" || !ci.Unknown {
+		t.Errorf("CheckInterval(99) = {Name:%q Unknown:%v}, want {Name:\"unknown\" Unknown:true}", ci.Name, ci.Unknown)
+	}
+	// A known integer must still decode to its name.
+	var db DetermineBestBy
+	if err := json.Unmarshal([]byte(`4`), &db); err != nil {
+		t.Fatalf("decode 4 into DetermineBestBy: %v", err)
+	}
+	if db.Name != "views" || db.Unknown {
+		t.Errorf("DetermineBestBy(4) = {Name:%q Unknown:%v}, want {Name:\"views\" Unknown:false}", db.Name, db.Unknown)
+	}
+}
+
+// TestEnrichedCrossPostingsMap pins the list-enrichment contract: every
+// modelled field survives, the five enum names are injected on every row, the
+// raw integers stay, and the envelope shape (list/total_rows/is_has_more) is
+// preserved. This is the unit-test half of F9/F10; the CLI test in
+// cmd/hooppy/crossposting_test.go is the integration half.
+func TestEnrichedCrossPostingsMap(t *testing.T) {
+	resp := &CrossPostingsResponse{
+		List: []CrossPosting{{
+			ID:                  1,
+			Name:                "cp",
+			State:               1,
+			SearchMode:          SearchMode(EnumValue{Value: 3, Name: "best"}),
+			SearchModeDirection: SearchModeDirection(EnumValue{Value: 2, Name: "newest-first"}),
+			DetermineBestBy:     DetermineBestBy(EnumValue{Value: 4, Name: "views"}),
+			CheckWhenType:       CheckWhenType(EnumValue{Value: 1, Name: "by-interval"}),
+			CheckInterval:       CheckInterval(EnumValue{Value: 99, Name: "unknown", Unknown: true}),
+		}},
+		TotalRows: 1,
+		IsHasMore: false,
+		RowsLimit: 20,
+	}
+	m, err := EnrichedCrossPostingsMap(resp)
+	if err != nil {
+		t.Fatalf("EnrichedCrossPostingsMap: %v", err)
+	}
+	// Envelope shape preserved.
+	if got := string(m["total_rows"]); got != "1" {
+		t.Errorf("total_rows = %s, want 1", got)
+	}
+	if got := string(m["is_has_more"]); got != "false" {
+		t.Errorf("is_has_more = %s, want false", got)
+	}
+	var env struct {
+		List []map[string]json.RawMessage `json:"list"`
+	}
+	if err := json.Unmarshal(m["list"], &env.List); err != nil {
+		t.Fatalf("decode enriched list: %v", err)
+	}
+	row := env.List[0]
+	// Modelled fields survive.
+	if got := string(row["id"]); got != "1" {
+		t.Errorf("id = %s, want 1", got)
+	}
+	if got := string(row["name"]); got != `"cp"` {
+		t.Errorf("name = %s, want \"cp\"", got)
+	}
+	// All five enum names injected; raw integers preserved.
+	for _, tc := range []struct {
+		key, raw, name string
+		unknown        bool
+	}{
+		{"search_mode", "3", `"best"`, false},
+		{"search_mode_direction", "2", `"newest-first"`, false},
+		{"determine_best_by", "4", `"views"`, false},
+		{"check_when_type", "1", `"by-interval"`, false},
+		{"check_interval", "99", `"unknown"`, true},
+	} {
+		if got := string(row[tc.key]); got != tc.raw {
+			t.Errorf("%s raw = %s, want %s", tc.key, got, tc.raw)
+		}
+		if got := string(row[tc.key+"_name"]); got != tc.name {
+			t.Errorf("%s_name = %s, want %s", tc.key, got, tc.name)
+		}
+		if tc.unknown {
+			if got := string(row[tc.key+"_unknown"]); got != "true" {
+				t.Errorf("%s_unknown = %s, want true", tc.key, got)
+			}
+		} else if _, ok := row[tc.key+"_unknown"]; ok {
+			t.Errorf("%s_unknown present but the value is known (Unknown=false) — the flag must be injected only for undefined values", tc.key)
+		}
+	}
+}
+
+// TestEnrichedCrossPostingEditMap_RefusesServerKeyCollision pins the
+// collision guard: if the server already sends a key the injector would
+// alias (e.g. search_mode_name), EnrichedCrossPostingEditMap errors rather
+// than silently overwriting the server field. The prior injectEnum swallowed
+// marshal errors and could clobber a server key.
+func TestEnrichedCrossPostingEditMap_RefusesServerKeyCollision(t *testing.T) {
+	// Build a raw body where the server already occupies search_mode_name.
+	raw := []byte(`{"search_mode":3,"search_mode_name":"server-sent-label"}`)
+	resp := &CrossPostingEditResponse{Raw: raw, SearchMode: SearchMode(EnumValue{Value: 3, Name: "best"})}
+	_, err := EnrichedCrossPostingEditMap(resp)
+	if err == nil {
+		t.Fatal("EnrichedCrossPostingEditMap returned nil error when the server already occupies search_mode_name — the injector must refuse to overwrite a server key, not silently clobber it")
+	}
+	if !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Errorf("error = %q, want it to mention 'refusing to overwrite'", err.Error())
 	}
 }

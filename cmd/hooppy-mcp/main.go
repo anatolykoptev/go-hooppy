@@ -1860,17 +1860,26 @@ func registerListCrossPostings(server *mcp.Server) {
 				if err != nil {
 					return errResult(err.Error())
 				}
-				env, err := hooppy.NewAllListEnvelope(all, total, func(cp hooppy.CrossPosting) int { return cp.ID })
+				// NewAllListEnvelope is the validation gate; the enriched
+				// map is the emitted payload (enum names injected per row).
+				if _, err := hooppy.NewAllListEnvelope(all, total, func(cp hooppy.CrossPosting) int { return cp.ID }); err != nil {
+					return errResult(err.Error())
+				}
+				enriched, err := hooppy.EnrichedAllCrossPostingsMap(all, total)
 				if err != nil {
 					return errResult(err.Error())
 				}
-				return jsonResult(env)
+				return jsonResult(enriched)
 			}
 			resp, err := c.ListCrossPostings(ctx, in.Page)
 			if err != nil {
 				return errResult(err.Error())
 			}
-			return jsonResult(resp)
+			enriched, err := hooppy.EnrichedCrossPostingsMap(resp)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(enriched)
 		},
 	)
 }

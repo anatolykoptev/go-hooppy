@@ -23,19 +23,31 @@ func runListCrossPostings(ctx context.Context, c *hooppy.Client, out, errOut io.
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		env, err := hooppy.NewAllListEnvelope(list, total, func(cp hooppy.CrossPosting) int { return cp.ID })
+		// NewAllListEnvelope is the validation gate (unique ids == total);
+		// the enriched map is the emitted payload, with enum names injected
+		// on every row the way /edit does.
+		if _, err := hooppy.NewAllListEnvelope(list, total, func(cp hooppy.CrossPosting) int { return cp.ID }); err != nil {
+			fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		enriched, err := hooppy.EnrichedAllCrossPostingsMap(list, total)
 		if err != nil {
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		return emitList(out, errOut, "cross-posting connections", true, len(list), total, false, env)
+		return emitList(out, errOut, "cross-posting connections", true, len(list), total, false, enriched)
 	}
 	resp, err := c.ListCrossPostings(ctx, page)
 	if err != nil {
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return 1
 	}
-	return emitList(out, errOut, "cross-posting connections", false, len(resp.List), resp.TotalRows, resp.IsHasMore, resp)
+	enriched, err := hooppy.EnrichedCrossPostingsMap(resp)
+	if err != nil {
+		fmt.Fprintf(errOut, "error: %v\n", err)
+		return 1
+	}
+	return emitList(out, errOut, "cross-posting connections", false, len(resp.List), resp.TotalRows, resp.IsHasMore, enriched)
 }
 
 // runShowCrossPosting is the testable core of `hooppy crossposting show <id>`.

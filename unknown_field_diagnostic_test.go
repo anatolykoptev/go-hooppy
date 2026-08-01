@@ -897,7 +897,8 @@ var unmodelledBaselines = map[string]map[string]string{
 	// Cross-posting rule engine (the /cross-posting subsystem, #57) — UNDOCUMENTED.
 	// The list row carries 89 keys; CrossPosting models the operator-facing
 	// subset (identity, state, the five enums, the four thresholds,
-	// take_amount, the check schedule). The 70 keys below (69 list-row +
+	// take_amount, the check schedule, last_check_date and
+	// instagram_last_check_date as FlexInt). The 69 keys below (68 list-row +
 	// filters_plug top-level) are the publication-format toggles, captions,
 	// scheduling knobs, and source metadata the read surface does not need.
 	// The /edit response is walked via crossPostingEditWalker (same struct,
@@ -915,7 +916,6 @@ var unmodelledBaselines = map[string]map[string]string{
 		"list[0].donut_paid_duration":              "number",
 		"list[0].download_vk_videos":               "null",
 		"list[0].expand_clips_title":               "null",
-		"list[0].instagram_last_check_date":        "number",
 		"list[0].instagram_ready_for_parse":        "number",
 		"list[0].is_comments_disabled":             "null",
 		"list[0].is_unique_content":                "null",

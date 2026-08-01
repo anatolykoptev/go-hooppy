@@ -104,8 +104,8 @@ func (c *Client) ListAllCrossPostingsWithTotal(ctx context.Context) ([]CrossPost
 // UNDOCUMENTED: GET /cross-posting/{id}/edit is not in the public OpenAPI
 // spec (v0.1.0). Discovered via API probing — may change without notice.
 func (c *Client) GetCrossPostingEdit(ctx context.Context, id int) (*CrossPostingEditResponse, error) {
-	if id == 0 {
-		return nil, fmt.Errorf("hooppy: GetCrossPostingEdit: id is required (got 0)")
+	if id <= 0 {
+		return nil, fmt.Errorf("hooppy: GetCrossPostingEdit: id must be a positive integer (got %d); a zero or negative id builds an invalid path (/cross-posting/%d/edit) and the server cannot resolve it", id, id)
 	}
 	var resp CrossPostingEditResponse
 	if err := c.doGET(ctx, fmt.Sprintf(pathCrossPostingEdit, id), nil, &resp, true); err != nil {
@@ -128,8 +128,8 @@ func (c *Client) GetCrossPostingEdit(ctx context.Context, id int) (*CrossPosting
 // UNDOCUMENTED: GET /cross-posting/{id}/statistics is not in the public
 // OpenAPI spec (v0.1.0). Discovered via API probing — may change without notice.
 func (c *Client) GetCrossPostingStatistics(ctx context.Context, id int) (*CrossPostingStatisticsResponse, error) {
-	if id == 0 {
-		return nil, fmt.Errorf("hooppy: GetCrossPostingStatistics: id is required (got 0)")
+	if id <= 0 {
+		return nil, fmt.Errorf("hooppy: GetCrossPostingStatistics: id must be a positive integer (got %d); a zero or negative id builds an invalid path (/cross-posting/%d/statistics) and the server cannot resolve it", id, id)
 	}
 	var resp CrossPostingStatisticsResponse
 	if err := c.doGET(ctx, fmt.Sprintf(pathCrossPostingStatistics, id), nil, &resp, true); err != nil {
@@ -159,21 +159,156 @@ func EnrichedCrossPostingEditMap(resp *CrossPostingEditResponse) (map[string]jso
 		return nil, fmt.Errorf("hooppy: EnrichedCrossPostingEditMap: decode raw body: %w", err)
 	}
 	// Inject decoded enum names + unknown flags. The raw integer stays in
-	// the original key; the *_name / *_unknown keys are additive.
-	injectEnum := func(key string, v EnumValue) {
-		if b, err := json.Marshal(v.Name); err == nil {
-			m[key+"_name"] = b
-		}
-		if v.Unknown {
-			if b, err := json.Marshal(true); err == nil {
-				m[key+"_unknown"] = b
-			}
+	// the original key; the *_name / *_unknown keys are additive. A server
+	// key already occupying an injected alias is refused, not silently
+	// overwritten (see injectEnum).
+	injections := []struct {
+		key string
+		v   EnumValue
+	}{
+		{"search_mode", EnumValue(resp.SearchMode)},
+		{"search_mode_direction", EnumValue(resp.SearchModeDirection)},
+		{"determine_best_by", EnumValue(resp.DetermineBestBy)},
+		{"check_when_type", EnumValue(resp.CheckWhenType)},
+		{"check_interval", EnumValue(resp.CheckInterval)},
+	}
+	for _, inj := range injections {
+		if err := injectEnum(m, inj.key, inj.v); err != nil {
+			return nil, fmt.Errorf("hooppy: EnrichedCrossPostingEditMap: %w", err)
 		}
 	}
-	injectEnum("search_mode", EnumValue(resp.SearchMode))
-	injectEnum("search_mode_direction", EnumValue(resp.SearchModeDirection))
-	injectEnum("determine_best_by", EnumValue(resp.DetermineBestBy))
-	injectEnum("check_when_type", EnumValue(resp.CheckWhenType))
-	injectEnum("check_interval", EnumValue(resp.CheckInterval))
 	return m, nil
+}
+
+// injectEnum injects the decoded enum name (and the unknown flag when the
+// bundle does not define the value) into a row map alongside the raw integer.
+// The raw integer stays in the original key; the *_name / *_unknown keys are
+// additive presentation aliases.
+//
+// A server key already occupying an injected alias is REFUSED, not silently
+// overwritten: the API owns its key namespace, and clobbering a server field
+// to inject a derived label would hide real data behind a presentation alias.
+// Marshal errors are propagated rather than swallowed — marshalling a string
+// or bool does not fail in practice, but a silent drop on the only error path
+// is the pattern that hides a real failure behind a green-looking result.
+func injectEnum(m map[string]json.RawMessage, key string, v EnumValue) error {
+	nameKey := key + "_name"
+	if _, ok := m[nameKey]; ok {
+		return fmt.Errorf("injectEnum: refusing to overwrite server key %q with the injected presentation alias", nameKey)
+	}
+	nameBytes, err := json.Marshal(v.Name)
+	if err != nil {
+		return fmt.Errorf("injectEnum: marshal name for %q: %w", key, err)
+	}
+	m[nameKey] = nameBytes
+	if v.Unknown {
+		unkKey := key + "_unknown"
+		if _, ok := m[unkKey]; ok {
+			return fmt.Errorf("injectEnum: refusing to overwrite server key %q with the injected presentation alias", unkKey)
+		}
+		unkBytes, err := json.Marshal(true)
+		if err != nil {
+			return fmt.Errorf("injectEnum: marshal unknown for %q: %w", key, err)
+		}
+		m[unkKey] = unkBytes
+	}
+	return nil
+}
+
+// enrichCrossPostingRows returns the list rows as per-row maps with a decoded
+// *_name (and *_unknown when the bundle does not define the value) injected
+// for each of the five enums, alongside the raw integer. Mirrors
+// EnrichedCrossPostingEditMap's injection applied to every list row. The list
+// row has no Raw (the list surface decodes only the modelled fields), so the
+// row map carries the modelled fields; the injected keys are additive.
+func enrichCrossPostingRows(list []CrossPosting) ([]map[string]json.RawMessage, error) {
+	rows := make([]map[string]json.RawMessage, 0, len(list))
+	for i := range list {
+		b, err := json.Marshal(list[i])
+		if err != nil {
+			return nil, fmt.Errorf("hooppy: enrichCrossPostingRows: marshal row %d: %w", i, err)
+		}
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal(b, &row); err != nil {
+			return nil, fmt.Errorf("hooppy: enrichCrossPostingRows: decode row %d: %w", i, err)
+		}
+		injections := []struct {
+			key string
+			v   EnumValue
+		}{
+			{"search_mode", EnumValue(list[i].SearchMode)},
+			{"search_mode_direction", EnumValue(list[i].SearchModeDirection)},
+			{"determine_best_by", EnumValue(list[i].DetermineBestBy)},
+			{"check_when_type", EnumValue(list[i].CheckWhenType)},
+			{"check_interval", EnumValue(list[i].CheckInterval)},
+		}
+		for _, inj := range injections {
+			if err := injectEnum(row, inj.key, inj.v); err != nil {
+				return nil, fmt.Errorf("hooppy: enrichCrossPostingRows: %w", err)
+			}
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+// EnrichedCrossPostingsMap builds the agent-facing presentation of a
+// /cross-posting list page: the typed response with a decoded *_name (and
+// *_unknown when the bundle does not define the value) injected for each of
+// the five enums on every row. Mirrors EnrichedCrossPostingEditMap for the
+// list surface — the MCP tool description promises "the enum integers are
+// decoded to names in the response", and this is what makes that true on the
+// list path (the bare MarshalJSON emits only the raw integer). The raw
+// integers stay in the original keys; the injected keys are additive.
+func EnrichedCrossPostingsMap(resp *CrossPostingsResponse) (map[string]json.RawMessage, error) {
+	if resp == nil {
+		return nil, fmt.Errorf("hooppy: EnrichedCrossPostingsMap: nil response")
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: EnrichedCrossPostingsMap: marshal: %w", err)
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, fmt.Errorf("hooppy: EnrichedCrossPostingsMap: decode: %w", err)
+	}
+	rows, err := enrichCrossPostingRows(resp.List)
+	if err != nil {
+		return nil, err
+	}
+	listBytes, err := json.Marshal(rows)
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: EnrichedCrossPostingsMap: marshal enriched list: %w", err)
+	}
+	out["list"] = listBytes
+	return out, nil
+}
+
+// EnrichedAllCrossPostingsMap builds the agent-facing presentation of an --all
+// walk: the AllListEnvelope shape {list, total_rows, is_has_more} with enum
+// names injected on every row. is_has_more is pinned false (the envelope
+// convention for a complete walk). total is the server's last-seen total_rows
+// (NOT len(list)) — pass the value NewAllListEnvelope validated against.
+func EnrichedAllCrossPostingsMap(list []CrossPosting, total int) (map[string]json.RawMessage, error) {
+	rows, err := enrichCrossPostingRows(list)
+	if err != nil {
+		return nil, err
+	}
+	listBytes, err := json.Marshal(rows)
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: EnrichedAllCrossPostingsMap: marshal list: %w", err)
+	}
+	totalBytes, err := json.Marshal(total)
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: EnrichedAllCrossPostingsMap: marshal total_rows: %w", err)
+	}
+	hasMoreBytes, err := json.Marshal(false)
+	if err != nil {
+		return nil, fmt.Errorf("hooppy: EnrichedAllCrossPostingsMap: marshal is_has_more: %w", err)
+	}
+	return map[string]json.RawMessage{
+		"list":        listBytes,
+		"total_rows":  totalBytes,
+		"is_has_more": hasMoreBytes,
+	}, nil
 }
