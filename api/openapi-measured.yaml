@@ -7230,7 +7230,10 @@ info:
     contact:
         name: go-hooppy client
         url: https://github.com/anatolykoptev/go-hooppy
-    description: OpenAPI 3.1 document describing the Hooppy API as MEASURED, not as advertised. Response schemas are derived from recorded fixtures by a generator (cmd/specgen). Every entry carries x-provenance. The vendor's official spec (hooppy.ru/openapi.yaml v0.1.0) declares 9 paths; this spec covers those plus undocumented endpoints discovered via API probing.
+    description: |-
+        OpenAPI 3.1 document describing the Hooppy API as MEASURED, not as advertised. Response schemas are derived from recorded fixtures by a generator (cmd/specgen). Every entry carries x-provenance. The vendor's official spec (hooppy.ru/openapi.yaml v0.1.0) declares 9 paths; this spec covers those plus undocumented endpoints discovered via API probing.
+
+        LIMITS, so a consumer does not over-trust this document. Each schema is derived from ONE recorded response, and the recorder reduces every array to a single element: `required` therefore lists the keys that response happened to carry, and `items` describes that one element. A field the server omits sometimes is still listed as required here, so a strictly-validating generated client will reject real traffic. A field that was null on the recording account has an unmeasured type. Where an endpoint has two recorded shapes the response schema is an anyOf over both — anyOf, not oneOf, because a derived empty form is a subset of the populated one rather than disjoint from it. Treat this as a floor on what the API returns, not a contract.
     license:
         name: Apache 2.0
         url: https://www.apache.org/licenses/LICENSE-2.0.html
@@ -7352,7 +7355,7 @@ paths:
         x-provenance: 'code-comment: endpoints.go:38'
     /cross-posting:
         get:
-            description: 'The cross-posting rule engine: collects from a source on a timer, ranks by engagement, filters by threshold, deduplicates and publishes into a schedule. Integer enums (search_mode, determine_best_by, check_interval) carry no names on the wire; the client decodes them alongside the raw value. last_check_date and instagram_last_check_date arrive as a number, a numeric string, or null.'
+            description: 'The cross-posting rule engine: collects from a source on a timer, ranks by engagement, filters by threshold, deduplicates and publishes into a schedule. Integer enums (search_mode, search_mode_direction, determine_best_by, check_when_type, check_interval) carry no names on the wire; the client decodes them alongside the raw value. last_check_date and instagram_last_check_date arrive as a number, a numeric string, or null.'
             operationId: getCrossPostings
             parameters:
                 - description: 1-indexed page number.
@@ -7361,7 +7364,7 @@ paths:
                   required: false
                   schema:
                     type: integer
-                  x-provenance: 'code-comment: crossposting.go'
+                  x-provenance: 'code-comment: crossposting.go:24'
             responses:
                 "200":
                     content:
@@ -7421,7 +7424,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                oneOf:
+                                anyOf:
                                     - $ref: '#/components/schemas/CrossPostingStatisticsResponse'
                                     - $ref: '#/components/schemas/CrossPostingStatisticsEmptyResponse'
                     description: Statistics for one connection. The empty form is a distinct shape, recorded separately.
@@ -7856,7 +7859,7 @@ paths:
                 - Posts
             x-provenance: 'code-comment: endpoints.go:15'
         put:
-            description: ""
+            description: 'The final segment is overloaded: an integer is a post id, while a non-integer selects a cross-post MODE (search, copy, sources, import, crosspost, rewrite, translate, queue, drafts, templates, rss, feeds, tags), which accepts the POST /posts payload and returns {id}. OpenAPI cannot express both — /posts/{id} and /posts/{mode} are the same template and 3.1 §4.8.8.2 forbids declaring both — so the mode form is recorded here rather than as its own path. Mode dispatch is from a code comment (types.go:590), unverified against a live response. Create-shaped PUTs are non-idempotent.'
             operationId: updatePost
             parameters:
                 - description: Post ID.
@@ -7903,27 +7906,6 @@ paths:
                 - Posts
             x-provenance: 'fixture: testdata/live/post_edit.json'
         x-provenance: 'code-comment: endpoints.go:52'
-    /posts/{mode}:
-        put:
-            description: 'Undocumented. {mode} is one of: search, copy, sources, import, crosspost, rewrite, translate, queue, drafts, templates, rss, feeds, tags. All modes accept the same payload as POST /posts and return {id:...}. Create-shaped PUTs are non-idempotent.'
-            operationId: crossPost
-            parameters:
-                - description: Cross-post mode (search|copy|sources|import|crosspost|rewrite|translate|queue|drafts|templates|rss|feeds|tags).
-                  in: path
-                  name: mode
-                  required: true
-                  schema:
-                    type: string
-                  x-provenance: 'code-comment: types.go:597'
-            responses:
-                "200":
-                    description: PostIDResponse with id (unverified — no fixture).
-                    x-provenance: unverified
-            summary: Cross-post a post by mode
-            tags:
-                - Posts
-            x-provenance: 'code-comment: types.go:590'
-        x-provenance: 'code-comment: types.go:590'
     /posts/batch/delete:
         post:
             description: posts_ids is a comma-joined STRING, not a JSON array. Max 1000 IDs per call.
@@ -8114,7 +8096,7 @@ paths:
         x-provenance: 'code-comment: endpoints.go:50'
     /posts/schedules:
         get:
-            description: Returns the paging envelope. Schedule objects carry 2 fields declared int in the write-side payload but returned as string by the server (posts_hashtags, posts_links in the schedule edit form). See x-write-type on each property.
+            description: Returns the paging envelope. Schedule objects carry 9 fields declared int in the Go payload struct and returned as string by the server (photos_caption, posts_caption, posts_comment, posts_location, posts_photo, publish_as_story_source_ids, publish_by_account_source_ids, share_stories_to_feed_source_ids, videos_title). See x-write-type on each property.
             operationId: getSchedules
             parameters:
                 - description: 1-indexed page number.
@@ -8269,7 +8251,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                oneOf:
+                                anyOf:
                                     - $ref: '#/components/schemas/SchedulePostsResponse'
                                     - $ref: '#/components/schemas/SchedulePostsEmptyResponse'
                     description: Schedule queue with per-day calendar. posts_by_days is a map when non-empty, an array when empty (#119).

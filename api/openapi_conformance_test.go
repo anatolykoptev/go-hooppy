@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -194,5 +195,198 @@ func TestSpecHasProvenanceOnEveryOperation(t *testing.T) {
 	}
 	if len(missing) > 0 {
 		t.Errorf("operations missing x-provenance:\n%s", strings.Join(missing, "\n"))
+	}
+}
+
+// rewriteRefs rebases every "#/components/schemas/X" pointer onto "#/$defs/X"
+// so a response schema can be resolved as a self-contained document.
+func rewriteRefs(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, val := range t {
+			if k == "$ref" {
+				if s, ok := val.(string); ok {
+					out[k] = strings.Replace(s, "#/components/schemas/", "#/$defs/", 1)
+					continue
+				}
+			}
+			out[k] = rewriteRefs(val)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(t))
+		for i, val := range t {
+			out[i] = rewriteRefs(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// TestResponseSchemasValidateTheirFixtures validates every recorded fixture
+// against the schema published on the RESPONSE, not only against its named
+// component.
+//
+// TestOpenAPIConformance above reads components.schemas[name] and never looks
+// at responses.*.content.*.schema, so a defect in how the generator composes
+// that schema is invisible to it. That is not hypothetical: an endpoint with
+// two recorded shapes was emitted as a oneOf, and because a derived empty form
+// is a SUBSET of the populated one (an empty array vacuously satisfies any
+// items constraint), both fixtures matched both branches and oneOf — "exactly
+// one" — rejected the very bodies the schema was generated from. The whole
+// suite stayed green. This test reds on that.
+func TestResponseSchemasValidateTheirFixtures(t *testing.T) {
+	specData, err := os.ReadFile(specFile)
+	if err != nil {
+		t.Fatalf("read spec %s: %v", specFile, err)
+	}
+	var spec map[string]interface{}
+	if err := yaml.Unmarshal(specData, &spec); err != nil {
+		t.Fatalf("parse spec %s: %v", specFile, err)
+	}
+
+	components, _ := spec["components"].(map[string]interface{})
+	schemasMap, _ := components["schemas"].(map[string]interface{})
+	if len(schemasMap) == 0 {
+		t.Fatal("no schemas in spec")
+	}
+	defs := rewriteRefs(schemasMap)
+
+	paths, _ := spec["paths"].(map[string]interface{})
+	if len(paths) == 0 {
+		t.Fatal("no paths in spec")
+	}
+
+	checked := 0
+	pathNames := make([]string, 0, len(paths))
+	for p := range paths {
+		pathNames = append(pathNames, p)
+	}
+	sort.Strings(pathNames)
+
+	for _, pathName := range pathNames {
+		pathMap, ok := paths[pathName].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for method, opVal := range pathMap {
+			opMap, ok := opVal.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			responses, ok := opMap["responses"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			for status, respVal := range responses {
+				respMap, ok := respVal.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				fixtures, ok := respMap["x-fixture"].(map[string]interface{})
+				if !ok || len(fixtures) == 0 {
+					continue
+				}
+				content, ok := respMap["content"].(map[string]interface{})
+				if !ok {
+					t.Errorf("%s %s %s: has x-fixture but no content schema", method, pathName, status)
+					continue
+				}
+				mediaType, ok := content["application/json"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				rawSchema, ok := mediaType["schema"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				// Self-contained document: the response schema plus every
+				// component schema as $defs.
+				doc, _ := rewriteRefs(rawSchema).(map[string]interface{})
+				selfContained := make(map[string]interface{}, len(doc)+1)
+				for k, v := range doc {
+					selfContained[k] = v
+				}
+				selfContained["$defs"] = defs
+
+				schemaJSON, err := json.Marshal(selfContained)
+				if err != nil {
+					t.Fatalf("marshal response schema for %s %s: %v", method, pathName, err)
+				}
+				var schema jsonschema.Schema
+				if err := json.Unmarshal(schemaJSON, &schema); err != nil {
+					t.Fatalf("unmarshal response schema for %s %s: %v", method, pathName, err)
+				}
+				resolved, err := schema.Resolve(nil)
+				if err != nil {
+					t.Fatalf("resolve response schema for %s %s: %v", method, pathName, err)
+				}
+
+				fixtureKeys := make([]string, 0, len(fixtures))
+				for k := range fixtures {
+					fixtureKeys = append(fixtureKeys, k)
+				}
+				sort.Strings(fixtureKeys)
+
+				for _, key := range fixtureKeys {
+					fname := filepath.Base(key)
+					t.Run(fmt.Sprintf("%s_%s", strings.TrimPrefix(pathName, "/"), fname), func(t *testing.T) {
+						data, err := os.ReadFile(filepath.Join(fixtureDir, fname))
+						if err != nil {
+							t.Fatalf("read fixture %s: %v", fname, err)
+						}
+						var instance interface{}
+						if err := json.Unmarshal(data, &instance); err != nil {
+							t.Fatalf("parse fixture %s: %v", fname, err)
+						}
+						if err := resolved.Validate(instance); err != nil {
+							t.Errorf("fixture %s does not validate against the RESPONSE schema of %s %s (%s):\n%v", fname, strings.ToUpper(method), pathName, status, err)
+						}
+					})
+					checked++
+				}
+			}
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("no response schemas carried x-fixture entries — the walk found nothing, so a green result here proves nothing")
+	}
+	t.Logf("validated %d fixture/response-schema pairs", checked)
+}
+
+// TestNoDuplicatePathTemplates fails when two paths are the same template with
+// differently-named parameters. OpenAPI 3.1 §4.8.8.2: "Templated paths with the
+// same hierarchy but different templated names MUST NOT exist as they are
+// identical." Tooling either rejects the document or silently drops one of the
+// operations, so this cannot be left to review.
+func TestNoDuplicatePathTemplates(t *testing.T) {
+	specData, err := os.ReadFile(specFile)
+	if err != nil {
+		t.Fatalf("read spec %s: %v", specFile, err)
+	}
+	var spec map[string]interface{}
+	if err := yaml.Unmarshal(specData, &spec); err != nil {
+		t.Fatalf("parse spec %s: %v", specFile, err)
+	}
+	paths, _ := spec["paths"].(map[string]interface{})
+	if len(paths) == 0 {
+		t.Fatal("no paths in spec")
+	}
+
+	param := regexp.MustCompile(`\{[^}]*\}`)
+	byTemplate := make(map[string][]string)
+	for p := range paths {
+		norm := param.ReplaceAllString(p, "{}")
+		byTemplate[norm] = append(byTemplate[norm], p)
+	}
+	for norm, group := range byTemplate {
+		if len(group) > 1 {
+			sort.Strings(group)
+			t.Errorf("paths %v are the same template %q — OpenAPI 3.1 §4.8.8.2 forbids declaring both", group, norm)
+		}
 	}
 }

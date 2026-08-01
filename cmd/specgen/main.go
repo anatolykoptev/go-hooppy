@@ -86,8 +86,6 @@ var hostileTypeFields = map[string]bool{
 	"posts_hashtags": true,
 	"posts_links":    true,
 	// SchedulePayload fields — int declared, string returned:
-	"posts_hashtags_schedule": true, // placeholder; actual fields determined below
-	"posts_links_schedule":    true,
 }
 
 // ============================================================================
@@ -281,7 +279,7 @@ func buildPaths() []pathDef {
 				{
 					method: "get", operationID: "getSchedules", tags: []string{"Schedules"},
 					summary:     "List schedules",
-					description: "Returns the paging envelope. Schedule objects carry 2 fields declared int in the write-side payload but returned as string by the server (posts_hashtags, posts_links in the schedule edit form). See x-write-type on each property.",
+					description: "Returns the paging envelope. Schedule objects carry 9 fields declared int in the Go payload struct and returned as string by the server (photos_caption, posts_caption, posts_comment, posts_location, posts_photo, publish_as_story_source_ids, publish_by_account_source_ids, share_stories_to_feed_source_ids, videos_title). See x-write-type on each property.",
 					params: []paramDef{
 						{name: "page", in: "query", schemaType: "integer", description: "1-indexed page number.", provenance: "unverified"},
 						{name: "limit", in: "query", schemaType: "integer", description: "Page size. Response echoes as rows_limit. Server default 20.", provenance: honoured},
@@ -420,7 +418,8 @@ func buildPaths() []pathDef {
 			operations: []operationDef{
 				{
 					method: "put", operationID: "updatePost", tags: []string{"Posts"},
-					summary: "Update a post",
+					summary:     "Update a post",
+					description: "The final segment is overloaded: an integer is a post id, while a non-integer selects a cross-post MODE (search, copy, sources, import, crosspost, rewrite, translate, queue, drafts, templates, rss, feeds, tags), which accepts the POST /posts payload and returns {id}. OpenAPI cannot express both — /posts/{id} and /posts/{mode} are the same template and 3.1 §4.8.8.2 forbids declaring both — so the mode form is recorded here rather than as its own path. Mode dispatch is from a code comment (types.go:590), unverified against a live response. Create-shaped PUTs are non-idempotent.",
 					params: []paramDef{
 						{name: "id", in: "path", schemaType: "integer", description: "Post ID.", provenance: "code-comment: endpoints.go:15"},
 					},
@@ -552,24 +551,6 @@ func buildPaths() []pathDef {
 						{statusCode: 200, provenance: "unverified", description: "Unverified — no fixture."},
 					},
 					provenance: "code-comment: endpoints.go:42",
-				},
-			},
-		},
-		// ---- /posts/{mode} (undocumented) ----
-		{
-			path: "/posts/{mode}", provenance: "code-comment: types.go:590",
-			operations: []operationDef{
-				{
-					method: "put", operationID: "crossPost", tags: []string{"Posts"},
-					summary:     "Cross-post a post by mode",
-					description: "Undocumented. {mode} is one of: search, copy, sources, import, crosspost, rewrite, translate, queue, drafts, templates, rss, feeds, tags. All modes accept the same payload as POST /posts and return {id:...}. Create-shaped PUTs are non-idempotent.",
-					params: []paramDef{
-						{name: "mode", in: "path", schemaType: "string", description: "Cross-post mode (search|copy|sources|import|crosspost|rewrite|translate|queue|drafts|templates|rss|feeds|tags).", provenance: "code-comment: types.go:597"},
-					},
-					responses: []responseDef{
-						{statusCode: 200, provenance: "unverified", description: "PostIDResponse with id (unverified — no fixture)."},
-					},
-					provenance: "code-comment: types.go:590",
 				},
 			},
 		},
@@ -857,9 +838,9 @@ func buildPaths() []pathDef {
 				{
 					method: "get", operationID: "getCrossPostings", tags: []string{"CrossPosting"},
 					summary:     "List cross-posting connections",
-					description: "The cross-posting rule engine: collects from a source on a timer, ranks by engagement, filters by threshold, deduplicates and publishes into a schedule. Integer enums (search_mode, determine_best_by, check_interval) carry no names on the wire; the client decodes them alongside the raw value. last_check_date and instagram_last_check_date arrive as a number, a numeric string, or null.",
+					description: "The cross-posting rule engine: collects from a source on a timer, ranks by engagement, filters by threshold, deduplicates and publishes into a schedule. Integer enums (search_mode, search_mode_direction, determine_best_by, check_when_type, check_interval) carry no names on the wire; the client decodes them alongside the raw value. last_check_date and instagram_last_check_date arrive as a number, a numeric string, or null.",
 					params: []paramDef{
-						{name: "page", in: "query", schemaType: "integer", description: "1-indexed page number.", provenance: "code-comment: crossposting.go"},
+						{name: "page", in: "query", schemaType: "integer", description: "1-indexed page number.", provenance: "code-comment: crossposting.go:24"},
 					},
 					responses: []responseDef{
 						{statusCode: 200, fixtures: map[string]string{"cross_postings.json": "CrossPostingsListResponse"}, provenance: fixtureProv("cross_postings.json"), description: "Cross-posting connections with paging envelope."},
@@ -1102,7 +1083,7 @@ func main() {
 		"openapi": "3.1.0",
 		"info": map[string]interface{}{
 			"title":       "Hooppy API — Measured Specification",
-			"description": "OpenAPI 3.1 document describing the Hooppy API as MEASURED, not as advertised. Response schemas are derived from recorded fixtures by a generator (cmd/specgen). Every entry carries x-provenance. The vendor's official spec (hooppy.ru/openapi.yaml v0.1.0) declares 9 paths; this spec covers those plus undocumented endpoints discovered via API probing.",
+			"description": "OpenAPI 3.1 document describing the Hooppy API as MEASURED, not as advertised. Response schemas are derived from recorded fixtures by a generator (cmd/specgen). Every entry carries x-provenance. The vendor's official spec (hooppy.ru/openapi.yaml v0.1.0) declares 9 paths; this spec covers those plus undocumented endpoints discovered via API probing.\n\nLIMITS, so a consumer does not over-trust this document. Each schema is derived from ONE recorded response, and the recorder reduces every array to a single element: `required` therefore lists the keys that response happened to carry, and `items` describes that one element. A field the server omits sometimes is still listed as required here, so a strictly-validating generated client will reject real traffic. A field that was null on the recording account has an unmeasured type. Where an endpoint has two recorded shapes the response schema is an anyOf over both — anyOf, not oneOf, because a derived empty form is a subset of the populated one rather than disjoint from it. Treat this as a floor on what the API returns, not a contract.",
 			"version":     "0.1.0-measured",
 			"contact": map[string]interface{}{
 				"name": "go-hooppy client",
@@ -1255,7 +1236,14 @@ func buildOperationMap(op operationDef, p pathDef) map[string]interface{} {
 			if len(refs) == 1 {
 				schema = refs[0].(map[string]interface{})
 			} else {
-				schema = map[string]interface{}{"oneOf": refs}
+				// anyOf, never oneOf. The recorded shapes are not disjoint in
+				// general: an empty form derived by the same reducer is a
+				// SUBSET of the populated one, because an empty array
+				// vacuously satisfies any items constraint. Measured on
+				// /cross-posting/{id}/statistics — both fixtures validated
+				// against both branches, so oneOf ("exactly one") rejected
+				// the very bodies it was generated from.
+				schema = map[string]interface{}{"anyOf": refs}
 			}
 			respMap["content"] = map[string]interface{}{
 				"application/json": map[string]interface{}{"schema": schema},
