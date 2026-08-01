@@ -65,7 +65,8 @@ var sensitiveFields = map[string]bool{
 // ============================================================================
 // HOSTILE TYPES — fields declared int in the Go payload struct but returned as
 // string by the server. Marked x-write-type: integer in the schema property.
-// 12 on ProjectPayload, 2 on SchedulePayload (see task spec §7).
+// Keyed by JSON field name, so one entry annotates the field wherever it is
+// emitted; the headings below say where each is DECLARED.
 // ============================================================================
 
 var hostileTypeFields = map[string]bool{
@@ -89,8 +90,9 @@ var hostileTypeFields = map[string]bool{
 	"posts_location":                true,
 	"posts_location_vk":             true,
 	"posts_photo":                   true,
-	// ProjectPayload (types.go:564-565); reached only through the project and
-	// schedule objects nested in search_post_edit, never on a schedule row:
+	// Declared on ProjectPayload (types.go:564-565). Emitted only inside
+	// search_post_edit, under BOTH projects[] and schedules[] — absent from the
+	// top-level schedule row (SchedulesListResponse):
 	"posts_hashtags": true,
 	"posts_links":    true,
 }
@@ -1299,7 +1301,7 @@ func buildMeasuredNotes() []interface{} {
 		map[string]interface{}{
 			"title":       "Hostile types",
 			"provenance":  "code-comment: types.go:513",
-			"description": "Declared int on the Go payload struct, returned as string by the server. 12 such fields are declared on ProjectPayload (posts_caption, photos_caption, tg_buttons, videos_title, posts_comment, posts_rewrite, posts_location, posts_location_vk, posts_photo, publish_as_story_source_ids, share_stories_to_feed_source_ids, publish_by_account_source_ids) and 2 on SchedulePayload (publish_as_story_source_ids, share_stories_to_feed_source_ids, types.go:121 and 129) — the two are declared on BOTH. posts_hashtags and posts_links are ProjectPayload fields (types.go:564-565) and are annotated only where a project object is nested, never on a schedule row. Marked x-write-type: integer on each property.",
+			"description": "Declared int on the Go payload struct, returned as string by the server. 12 such fields are declared on ProjectPayload (posts_caption, photos_caption, tg_buttons, videos_title, posts_comment, posts_rewrite, posts_location, posts_location_vk, posts_photo, publish_as_story_source_ids, share_stories_to_feed_source_ids, publish_by_account_source_ids) and 2 on SchedulePayload (publish_as_story_source_ids, share_stories_to_feed_source_ids, types.go:121 and 129) — the two are declared on BOTH. posts_hashtags and posts_links are declared on ProjectPayload (types.go:564-565); they are annotated inside search_post_edit under both projects[] and schedules[], and do not appear on the top-level schedule row at all. Marked x-write-type: integer on each property.",
 		},
 		map[string]interface{}{
 			"title":       "Credential-bearing fields",
