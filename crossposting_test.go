@@ -976,10 +976,18 @@ func TestCrossPostingFix_F11_LastCheckDateDecodesFromNumberAndString(t *testing.
 }
 
 // TestCrossPostingFix_F12_SelfCheckGoesRedOnBrokenReducer is the falsification
-// half of F4: it breaks the FIXTURE (writing a non-fixed-point file), not the reducer (writes a fixture whose scalar leaves are
-// NOT the placeholder set the reducer emits) into a temp fixture dir, runs
-// --self-check against it, and asserts the script exits non-zero. A self-check
-// that passes on a broken reducer is the failure mode F4 exists to prevent.
+// half of F4. It breaks the FIXTURE, not the reducer: it writes a file whose
+// scalar leaves are NOT the placeholder set the reducer emits into a temp
+// fixture dir, runs --self-check against it, and asserts the script exits
+// non-zero. That catches an identity reducer, which would pass self-check on
+// anything; F4 catches a changed placeholder scheme, where all 22 diverge at
+// once. Together they cover both directions.
+//
+// Worth stating the limit the pair does NOT close: a fixed-point self-check
+// cannot detect a WRONG reducer, because a wrong reducer's output is a fixed
+// point of that same wrong reducer. --self-check proves the reducer is
+// STABLE, not that it is CORRECT. Correctness comes from this test and from a
+// raw response the reducer did not produce.
 //
 // This does NOT mutate the committed testdata/live/ — it copies the recorder
 // into a temp dir with a single broken fixture so the committed suite is not
