@@ -100,6 +100,9 @@ func runCopySearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Wri
 	}
 	resp, err := c.CopySearchPost(ctx, payload)
 	if err != nil {
+		if code, handled := reportCreateNoID(err, out, errOut, postID); handled {
+			return code
+		}
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return 1
 	}
@@ -156,6 +159,9 @@ func runRewriteSearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 2
 		}
+		if code, handled := reportCreateNoID(err, out, errOut, postID); handled {
+			return code
+		}
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return 1
 	}
@@ -166,4 +172,35 @@ func runRewriteSearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.
 		return 1
 	}
 	return 0
+}
+
+// reportCreateNoID gives the single-post runners the same answer runImport
+// already gives: a create the server accepted while omitting the id is a
+// SUCCESS with an unaddressable handle, not a failure.
+//
+// Without it the three commands disagreed on one server behaviour — the same
+// input made `search import --post-id` exit 0 with a created_no_id record on
+// stdout while `search rewrite --post-id` exited 1 with an empty stdout, and a
+// comment in posts_search.go asserted they agreed. Exit 1 with no record is
+// the worse of the two: it reads as "nothing happened" and invites a re-run
+// that publishes the post a second time.
+//
+// Returns (exit code, true) when it handled the error, (0, false) otherwise.
+func reportCreateNoID(err error, out, errOut io.Writer, searchPostID int) (int, bool) {
+	var cnid *hooppy.CreateNoIDError
+	if !errors.As(err, &cnid) {
+		return 0, false
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if encErr := enc.Encode(map[string]interface{}{
+		"id":             0,
+		"status":         "created_no_id",
+		"search_post_id": searchPostID,
+	}); encErr != nil {
+		fmt.Fprintf(errOut, "error encoding output: %v\n", encErr)
+		return 1, true
+	}
+	fmt.Fprintf(errOut, "warn: the post was accepted but the server returned no id — it probably exists and cannot be addressed from this response; reconcile before re-running (%v)\n", err)
+	return 0, true
 }

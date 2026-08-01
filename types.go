@@ -649,6 +649,20 @@ type PostIDResponse struct {
 	ScheduleID      int              `json:"schedule_id,omitempty"`
 	SlotLookupError string           `json:"slot_lookup_error,omitempty"`
 	Slots           []ScheduleSlot   `json:"slots,omitempty"`
+
+	// CreatedNoID counts batch posts the server accepted while omitting the
+	// id (CreateNoIDError). Those posts are NOT in IDs — a zero id flows into
+	// move/update/delete as a real-looking handle (#131) — so without this
+	// field a batch where every post came back id-less is indistinguishable
+	// from a batch that published nothing: err nil, IDs empty, exit 0. A
+	// caller reading that as "nothing happened" re-runs and duplicates every
+	// post, which is the hazard the partial-result contract exists to
+	// prevent, reached from the other side.
+	//
+	// Non-zero means: N posts probably exist on the server and you cannot
+	// address them from this response. Reconcile against the account before
+	// re-running, do not treat the empty IDs as permission to retry.
+	CreatedNoID int `json:"created_no_id,omitempty"`
 }
 
 // ScheduleSlot is one created post's assigned publication slot, used in the

@@ -2681,6 +2681,54 @@ func TestF22_BatchAllCreatedNoID_ReturnsSuccessNotFailure(t *testing.T) {
 	if len(resp.IDs) != 0 {
 		t.Errorf("resp.IDs = %v, want empty — a created-no-id batch returns no ids (the server omitted them), but the outcome is success not failure", resp.IDs)
 	}
+	// And the count MUST reach the caller. Fixing the false loud signal ("no
+	// posts were published") by counting created-no-id posts and keeping the
+	// number inside the function replaces it with a correct SILENT one: err
+	// nil, IDs empty, exit 0, and two posts that probably exist. A caller
+	// reads a clean success with no ids and re-runs, duplicating both. The
+	// count is the only thing that distinguishes "published nothing" from
+	// "published two posts I cannot address".
+	if resp.CreatedNoID != 2 {
+		t.Errorf("resp.CreatedNoID = %d, want 2 — an empty IDs list with a zero count is indistinguishable from a batch that published nothing, and a caller that reads it that way re-runs and duplicates every post", resp.CreatedNoID)
+	}
+}
+
+// TestF22_MixedCreatedNoID_CountsTheUnaddressable is the case F22 alone does
+// not cover: one post returns a real id and two do not. resp.IDs carries the
+// one addressable post, so a caller following PartialPostError's "read
+// Result.IDs to skip what already landed" instruction would re-publish the
+// other two. The count is what tells it not to.
+func TestF22_MixedCreatedNoID_CountsTheUnaddressable(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/posts" {
+			posts++
+			if posts == 1 {
+				w.Write([]byte(`{"id":5001}`))
+				return
+			}
+			w.Write([]byte(`{}`)) // accepted, id omitted
+			return
+		}
+		w.Write([]byte(`{"id":"11","texts":[{"text":"t"}],"attachments":[]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{11, 22, 33},
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{1},
+	})
+	if err != nil {
+		t.Fatalf("mixed created-no-id batch: expected nil error, got: %v", err)
+	}
+	if len(resp.IDs) != 1 || resp.IDs[0] != 5001 {
+		t.Errorf("resp.IDs = %v, want [5001] — the one addressable post", resp.IDs)
+	}
+	if resp.CreatedNoID != 2 {
+		t.Errorf("resp.CreatedNoID = %d, want 2 — without the count, a caller reading resp.IDs skips post 5001 on re-run and republishes the other two", resp.CreatedNoID)
+	}
 }
 
 // F23 — selected_pages_ids and schedules_ids marshal as `[]`, never `null`, on

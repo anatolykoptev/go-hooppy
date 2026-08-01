@@ -495,3 +495,53 @@ func TestRunRewriteSearchPost_PartialEncodeError_HandlesIt(t *testing.T) {
 type failingWriter struct{}
 
 func (failingWriter) Write(p []byte) (int, error) { return 0, errors.New("write failed") }
+
+// F24 — a create the server accepts while omitting the id must produce the
+// SAME answer from every single-post command. Before this, identical input
+// gave `search import --post-id` exit 0 with a created_no_id record and
+// `search rewrite --post-id` exit 1 with an empty stdout, while a comment in
+// posts_search.go asserted they agreed.
+//
+// Exit 1 with no record is the worse half: it reads as "nothing happened" and
+// invites a re-run that publishes the post a second time.
+//
+// RED-on-revert: drop the reportCreateNoID call from either runner and that
+// runner returns 1 with no stdout record.
+func TestSinglePostCommands_AgreeOnCreateNoID_F24(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/posts" {
+			w.Write([]byte(`{}`)) // 2xx, no id — the create succeeded, the handle is missing
+			return
+		}
+		w.Write([]byte(`{"id":"7001","texts":[{"text":"t"}],"attachments":[]}`))
+	}))
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name string
+		run  func(out, errOut *bytes.Buffer) int
+	}{
+		{"rewrite", func(out, errOut *bytes.Buffer) int {
+			return runRewriteSearchPost(context.Background(), newStubClient(t, srv), out, errOut,
+				7001, "", "new text", 1, 1, "123", "", "", "", "", false)
+		}},
+		{"copy", func(out, errOut *bytes.Buffer) int {
+			return runCopySearchPost(context.Background(), newStubClient(t, srv), out, errOut,
+				7001, 1, 1, "123", "", "", "", "")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			code := tc.run(&out, &errOut)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 — a create the server accepted is a success with an unaddressable handle, not a failure; exit 1 with no record reads as 'nothing happened' and invites a duplicating re-run.\nstderr: %s", code, errOut.String())
+			}
+			if !strings.Contains(out.String(), "created_no_id") {
+				t.Errorf("stdout must carry the created_no_id record so the operator knows a post probably exists, got:\n%s", out.String())
+			}
+			if !strings.Contains(errOut.String(), "no id") {
+				t.Errorf("stderr should warn that the post cannot be addressed, got:\n%s", errOut.String())
+			}
+		})
+	}
+}

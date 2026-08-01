@@ -1084,6 +1084,18 @@ func (c *Client) resolvePublishBatch(ctx context.Context, ids []int, target Publ
 	// Single-post path: a failure is a plain error, not a partial — there is
 	// nothing to accumulate. Return the wrapped error with a nil result,
 	// matching the pre-batch contract.
+	// Surface the count BEFORE any return. Counting created-no-id posts and
+	// keeping the number inside this function replaces a false loud signal
+	// ("no posts were published") with a correct silent one: err nil, IDs
+	// empty, exit 0, and N posts that probably exist on the server. A caller
+	// reads a clean success with no ids and re-runs, duplicating every one.
+	//
+	// It sits above every return deliberately: the mixed case (some ids
+	// returned, some omitted) has no failures and leaves through the
+	// len(failed) == 0 branch below, so an assignment placed after that
+	// branch reaches only the partial path and the count silently stays
+	// zero on the very case that most needs it.
+	resp.CreatedNoID = createdNoID
 	if len(ids) == 1 && len(failed) > 0 {
 		return nil, failed[0].Err
 	}
