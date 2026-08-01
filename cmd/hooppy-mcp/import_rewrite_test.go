@@ -128,3 +128,81 @@ func TestMCP_PartialBatch_StatusDiscriminator(t *testing.T) {
 		t.Errorf("result has no partial_error field — the partial failure detail must be carried alongside the status discriminator")
 	}
 }
+
+// F20 — hooppy_import_search_post refuses schedules_ids with
+// publication_when_type=1 BEFORE any request reaches the server (assert
+// request count zero), and refuses when-type 0 and 4. The round-3 BLOCKER
+// shipped the import handler with neither guard: schedules_ids with when-type
+// 1 was silently dropped (the post published to pages NOW), and when-type 0
+// (the zero value an agent produces by omitting the field) fell through
+// `default:` into the same publish-now branch. Extracting
+// buildImportSearchPostPayload with both guards closes it.
+//
+// This drives the real handler end to end (in-memory MCP transport → handler
+// → buildImportSearchPostPayload → errResult) with a stub server that counts
+// requests. The guard fires inside the builder, BEFORE client() is called, so
+// no request reaches the server.
+//
+// RED-on-revert: delete either guard from buildImportSearchPostPayload → the
+// builder returns a payload with err == nil → the handler calls client() →
+// ImportSearchPost → requests reach the server → reqCount > 0 → this test
+// fails.
+func TestF20_MCP_ImportSearchPost_GuardsBeforeRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{
+			"schedules_with_when_type_1",
+			map[string]any{
+				"search_post_id":        2001,
+				"publication_when_type": 1,
+				"selected_pages_ids":    "123",
+				"schedules_ids":         "10,11",
+			},
+		},
+		{
+			"when_type_0_omitted_field",
+			map[string]any{
+				"search_post_id":        2001,
+				"publication_when_type": 0,
+				"selected_pages_ids":    "123",
+			},
+		},
+		{
+			"when_type_4_out_of_range",
+			map[string]any{
+				"search_post_id":        2001,
+				"publication_when_type": 4,
+				"selected_pages_ids":    "123",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reqCount int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt32(&reqCount, 1)
+				w.Write([]byte(`{"id":5001}`))
+			}))
+			defer srv.Close()
+
+			t.Setenv("HOOPPY_TOKEN", "test-token")
+			t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+			cs := newMCPClientSession(t)
+			res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+				Name:      "hooppy_import_search_post",
+				Arguments: tc.args,
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("IsError=false — the guard must fire and return an error result for %s; result=%s", tc.name, toolResultText(res))
+			}
+			if got := atomic.LoadInt32(&reqCount); got != 0 {
+				t.Fatalf("reqCount = %d, want 0 — the guard must fire BEFORE any request reaches the server (an irreversible publish would have happened for %s); stderr/result=%s", got, tc.name, toolResultText(res))
+			}
+		})
+	}
+}

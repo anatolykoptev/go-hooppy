@@ -88,6 +88,11 @@ type stopParsingOutput struct {
 // server when the guard fires, not merely a non-zero exit (a command that
 // published and then errored would pass an exit-only check).
 func runCopySearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, postID, whenType, howType int, pages, schedules, date, hours, minutes string) int {
+	// The deprecation notice goes to stderr (stdout is data) before the
+	// runner does the work. Emitted from the runner (not the cobra Run
+	// closure) so a runner test can observe it — everything else moved
+	// into the runner for the same testability reason.
+	fmt.Fprintln(errOut, "warn: 'search copy' is deprecated and now behaves like 'search import' (resolve+publish); use 'search import' instead.")
 	payload, err := buildCopyPayload(postID, whenType, howType, pages, schedules, date, hours, minutes)
 	if err != nil {
 		fmt.Fprintf(errOut, "error: %v\n", err)
@@ -135,10 +140,19 @@ func runRewriteSearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.
 		var ppe *hooppy.PartialPostError
 		if errors.As(err, &ppe) {
 			// Partial batch: print the populated result (what landed) to
-			// stdout, the error to stderr, exit 2 (partial).
+			// stdout, the error to stderr, exit 2 (partial). The stdout
+			// record IS the operator's record of what landed — a silent
+			// encode failure here produces exit 2 with no record, the
+			// exact outcome this branch exists to prevent. So check the
+			// encode and fall back to exit 1 (error) when the record
+			// could not be written, matching the success branch's
+			// handling of the same failure.
 			enc := json.NewEncoder(out)
 			enc.SetIndent("", "  ")
-			_ = enc.Encode(resp)
+			if err := enc.Encode(resp); err != nil {
+				fmt.Fprintf(errOut, "error encoding output: %v\n", err)
+				return 1
+			}
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 2
 		}

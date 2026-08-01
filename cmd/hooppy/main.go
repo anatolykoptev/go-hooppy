@@ -1066,11 +1066,6 @@ func registerSearch(root *cobra.Command) {
 	copyCmd.Flags().StringVar(&copyHours, "hours", "", "publication hours HH (for when-type 2)")
 	copyCmd.Flags().StringVar(&copyMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
 	copyCmd.Run = func(_ *cobra.Command, _ []string) {
-		// The deprecation notice goes to stderr (stdout is data) before the
-		// runner does the work: the runner owns the exit-code convention
-		// (0 complete, 1 error, 2 partial) and takes its writers as
-		// parameters so the guard can be falsified at the command level.
-		fmt.Fprintln(os.Stderr, "warn: 'search copy' is deprecated and now behaves like 'search import' (resolve+publish); use 'search import' instead.")
 		os.Exit(runCopySearchPost(context.Background(), mustClient(), os.Stdout, os.Stderr, copyPostID, copyWhenType, copyHowType, copyPages, copySchedules, copyDate, copyHours, copyMinutes))
 	}
 

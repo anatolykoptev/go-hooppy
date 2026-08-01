@@ -1828,6 +1828,72 @@ type importSearchPostInput struct {
 	NoAttachments       bool   `json:"no_attachments,omitempty" jsonschema:"Strip all attachments (photos, videos, links) — publish text only."`
 }
 
+// buildImportSearchPostPayload validates an importSearchPostInput and builds
+// the payload — the testable analogue of the CLI buildImportPayload. Extracted
+// from the inline handler so the schedules/when-type contradiction guard
+// (issue #111) and the when-type range guard are reachable from a test: the
+// prior inline form carried NEITHER guard, so schedules_ids with
+// publication_when_type=1 was silently dropped (the post published to pages
+// NOW instead of by schedule) and publication_when_type=0 (the zero value an
+// agent produces by omitting the field) fell through `default:` into the same
+// publish-now branch — the exact irreversible publishes the two siblings refuse
+// (buildCopySearchPostPayload:1752/1768, buildRewriteSearchPostPayload:1937/1952).
+// Mirrors the other two builders' guard order and shape.
+func buildImportSearchPostPayload(in importSearchPostInput) (hooppy.CopySearchPostPayload, error) {
+	if in.SearchPostID != 0 && in.SearchPostIDs != "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id and search_post_ids are mutually exclusive — pass only one")
+	}
+	if in.SearchPostID == 0 && in.SearchPostIDs == "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id or search_post_ids is required (use list_search_posts to find IDs)")
+	}
+	if err := checkPublicationWhenType(in.PublicationWhenType); err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
+	if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
+	}
+	if in.PublicationWhenType == 3 && in.SchedulesIDs == "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("schedules_ids is required for publication_when_type=3 (by schedule) — a schedule-driven import targeted at no schedule publishes to nothing")
+	}
+	// A flag combination that cannot do what the caller asked must fail loudly
+	// before the request (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it (the switch below sets
+	// SchedulesIDs only in case 3). Without this guard, schedules_ids with
+	// when_type 1/2 is silently dropped and the post is published to pages NOW
+	// — an irreversible publish the caller did not ask for.
+	if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
+		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids", "publication_when_type")
+	}
+	payload := hooppy.CopySearchPostPayload{
+		PublicationWhenType: in.PublicationWhenType,
+		PublicationHowType:  in.PublicationHowType,
+	}
+	if in.SearchPostIDs != "" {
+		ids, err := parseOrderedIDListStr(in.SearchPostIDs)
+		if err != nil {
+			return hooppy.CopySearchPostPayload{}, err
+		}
+		payload.SearchPostIDs = ids
+	} else {
+		payload.SearchPostID = in.SearchPostID
+	}
+	switch in.PublicationWhenType {
+	case 3:
+		payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
+	case 2:
+		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
+		payload.PublicationDate = &hooppy.PublicationDate{
+			Date:    in.PublishDate,
+			Hours:   in.PublishHours,
+			Minutes: in.PublishMinutes,
+		}
+	default:
+		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
+	}
+	payload.NoAttachments = in.NoAttachments
+	return payload, nil
+}
+
 func registerImportSearchPost(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
@@ -1835,46 +1901,14 @@ func registerImportSearchPost(server *mcp.Server) {
 			Description: "Import one or more scraped posts (from list_search_posts) to your own pages. Each post is resolved (text + attachments) and published independently via POST /posts. Pass a single id via search_post_id, or a batch via search_post_ids (comma-separated). Import keeps each post's original text. UNDOCUMENTED endpoint.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in importSearchPostInput) (*mcp.CallToolResult, error) {
-			if in.SearchPostID != 0 && in.SearchPostIDs != "" {
-				return errResult("search_post_id and search_post_ids are mutually exclusive — pass only one")
-			}
-			if in.SearchPostID == 0 && in.SearchPostIDs == "" {
-				return errResult("search_post_id or search_post_ids is required (use list_search_posts to find IDs)")
-			}
-			if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
-				return errResult("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
+			payload, err := buildImportSearchPostPayload(in)
+			if err != nil {
+				return errResult(err.Error())
 			}
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			payload := hooppy.CopySearchPostPayload{
-				PublicationWhenType: in.PublicationWhenType,
-				PublicationHowType:  in.PublicationHowType,
-			}
-			if in.SearchPostIDs != "" {
-				ids, err := parseOrderedIDListStr(in.SearchPostIDs)
-				if err != nil {
-					return errResult(err.Error())
-				}
-				payload.SearchPostIDs = ids
-			} else {
-				payload.SearchPostID = in.SearchPostID
-			}
-			switch in.PublicationWhenType {
-			case 3:
-				payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
-			case 2:
-				payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
-				payload.PublicationDate = &hooppy.PublicationDate{
-					Date:    in.PublishDate,
-					Hours:   in.PublishHours,
-					Minutes: in.PublishMinutes,
-				}
-			default:
-				payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
-			}
-			payload.NoAttachments = in.NoAttachments
 			resp, err := c.ImportSearchPost(ctx, payload)
 			if err != nil {
 				var ppe *hooppy.PartialPostError

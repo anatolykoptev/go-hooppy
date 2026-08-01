@@ -2627,3 +2627,106 @@ func TestIdsWireField_ZeroGuard(t *testing.T) {
 		t.Fatalf("POST body ids = %v, want \"\" — a zero SearchPostID must produce an empty ids field on the wire (the zero guard is load-bearing)", postBody["ids"])
 	}
 }
+
+// F22 — a batch where every post returns 2xx with no id (CreateNoIDError) is
+// reported as created-with-unknown-id, NOT as "no posts were published".
+// CreateNoIDError means the create SUCCEEDED and the server omitted the id
+// (success_gate.go:121: "The post may exist on the server"). The prior code
+// filed every such post under `failed`, tripped the all-failed gate, and
+// reported "no posts were published" — asserted as fact, potentially false,
+// inviting the duplicate-spawning re-run the round-1 blocker was about.
+//
+// After the fix: a batch of all-created-no-id returns (resp, nil) — success,
+// resp non-nil, resp.IDs empty (no ids to return). The CLI exit code matches
+// runImport's (exit 0 for all-succeeded — see the CLI-level F22 in
+// search_runners_test.go).
+//
+// RED-on-revert: revert the createdNoID third-bucket in resolvePublishBatch
+// (put CreateNoIDError back into `failed` for batches) → every post is in
+// `failed` → len(resp.IDs) == 0 → the all-failed gate fires → err is non-nil
+// with "no post ids were returned" → the err == nil assertion fails.
+func TestF22_BatchAllCreatedNoID_ReturnsSuccessNotFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"x","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			// 2xx with no id — CreateNoIDError. The create succeeded; the
+			// server omitted the id.
+			w.Write([]byte(`{}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
+		SearchPostIDs:       []int{11, 22},
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: []int{1},
+	})
+	// err MUST be nil — the posts were created (the server omitted ids, but
+	// the creates succeeded). The prior code returned a plain error here
+	// ("no posts were published") which may be false.
+	if err != nil {
+		t.Fatalf("ImportSearchPost batch all-created-no-id: expected nil error (creates succeeded, ids unknown), got: %v — a created-no-id batch must NOT be reported as a failure (MAJOR 1)", err)
+	}
+	// resp MUST be non-nil — the batch succeeded (with unknown ids).
+	if resp == nil {
+		t.Fatal("resp is nil — a batch of all-created-no-id must return a non-nil result (success with unknown ids), not nil (MAJOR 1)")
+	}
+	// resp.IDs is empty (no ids were returned) — but that is NOT a failure.
+	if len(resp.IDs) != 0 {
+		t.Errorf("resp.IDs = %v, want empty — a created-no-id batch returns no ids (the server omitted them), but the outcome is success not failure", resp.IDs)
+	}
+}
+
+// F23 — selected_pages_ids and schedules_ids marshal as `[]`, never `null`, on
+// the wire. The server expects arrays, not null (PublishPost comment at
+// posts_search.go:802). The nil→[] normalization blocks for these two fields
+// were deleted in the main merge (along with texts/attachments, which were a
+// clean trade). Deleting the pages/schedules normalization leaves the entire
+// suite green — the behaviour was pinned by TestCopySearchPost_NilSlicesInitialized,
+// one of three tests the merge deleted. This re-adds the guard for the two
+// fields that still need it.
+//
+// RED-on-revert: delete the `if pages == nil { pages = []int{} }` or
+// `if schedules == nil { schedules = []int{} }` block from PublishPost → the
+// field marshals as `null` → the assertion `!= nil` fails.
+func TestF23_NilSlicesMarshalAsEmptyArray(t *testing.T) {
+	var postBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/posts" {
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &postBody)
+			w.Write([]byte(`{"id":99002}`))
+			return
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	// PublishPost with nil SelectedPagesIDs and nil SchedulesIDs — the
+	// normalization must send `[]` not `null` for both. when_type=1 so the
+	// schedule snapshot path does not run (no extra requests).
+	_, err := c.PublishPost(context.Background(), SourceContent{
+		SearchPostID: 0,
+		Texts:        []PostText{{Text: "x", SourceID: 0}},
+	}, PublishTarget{
+		PublicationWhenType: 1, PublicationHowType: 1,
+		SelectedPagesIDs: nil, // nil — must marshal as []
+		SchedulesIDs:     nil, // nil — must marshal as []
+	})
+	if err != nil {
+		t.Fatalf("PublishPost: %v", err)
+	}
+	if postBody["selected_pages_ids"] == nil {
+		t.Errorf("selected_pages_ids = null, want [] — the server expects arrays, not null (PublishPost:802); the nil→[] normalization was deleted and left the suite green (MAJOR 2)")
+	}
+	if postBody["schedules_ids"] == nil {
+		t.Errorf("schedules_ids = null, want [] — the server expects arrays, not null (PublishPost:802); the nil→[] normalization was deleted and left the suite green (MAJOR 2)")
+	}
+}

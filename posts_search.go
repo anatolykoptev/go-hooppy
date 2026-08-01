@@ -2,6 +2,7 @@ package hooppy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -1009,6 +1010,7 @@ func (c *Client) resolvePublishBatch(ctx context.Context, ids []int, target Publ
 	}
 	var resp PostIDResponse
 	var failed []PostFailure
+	createdNoID := 0 // batch posts that succeeded but returned no id (CreateNoIDError)
 	for _, id := range ids {
 		content, err := c.ResolveSearchPost(ctx, id)
 		if err != nil {
@@ -1031,6 +1033,30 @@ func (c *Client) resolvePublishBatch(ctx context.Context, ids []int, target Publ
 		}
 		r, err := c.PublishPost(ctx, content, target)
 		if err != nil {
+			var cnid *CreateNoIDError
+			if errors.As(err, &cnid) {
+				// CreateNoIDError means the create SUCCEEDED and the
+				// server omitted the id (success_gate.go:121: "The post
+				// may exist on the server"). For a BATCH, this is a
+				// success-with-unknown-id — a third bucket, not a
+				// failure. Treating it as a failure files every post
+				// under `failed`, trips the all-failed gate, and reports
+				// "no posts were published" which may be FALSE — the
+				// posts may well exist on the server. That wording
+				// invites a duplicate-spawning re-run (the round-1
+				// blocker's exact hazard). Match runImport's
+				// created_no_id status: count it as succeeded, do NOT
+				// add a zero id to resp.IDs (a zero flows into
+				// move/update/delete as a real-looking handle, issue
+				// #131). The single-post path (len(ids) == 1) keeps the
+				// pre-batch contract: return the typed error so the
+				// caller can type-assert *CreateNoIDError (F2), and the
+				// CLI runner maps it to exit 0 the way runImport does.
+				if len(ids) > 1 {
+					createdNoID++
+					continue
+				}
+			}
 			failed = append(failed, PostFailure{SearchPostID: id, Err: fmt.Errorf("hooppy: %s: publish %d: %w", callerName, id, err)})
 			continue
 		}
@@ -1064,9 +1090,10 @@ func (c *Client) resolvePublishBatch(ctx context.Context, ids []int, target Publ
 	if len(failed) == 0 {
 		return &resp, nil
 	}
-	// All-failed batch (len(ids) > 1, every post failed): return a PLAIN
-	// error with a nil result — NOT a *PartialPostError. The documented
-	// three-outcome contract (see PartialPostError) is:
+	// All-failed batch (len(ids) > 1, every post failed, no created-no-id
+	// successes): return a PLAIN error with a nil result — NOT a
+	// *PartialPostError. The documented three-outcome contract (see
+	// PartialPostError) is:
 	//   - err == nil                  → every post succeeded
 	//   - err is *PartialPostError     → SOME succeeded, some failed (resp non-nil)
 	//   - err is non-nil, not *PartialPostError → EVERY post failed (resp is nil)
@@ -1077,8 +1104,16 @@ func (c *Client) resolvePublishBatch(ctx context.Context, ids []int, target Publ
 	// failure — diverging from runImport, which exits 1 on all-failed. A plain
 	// error makes both CLI paths exit 1 (runImport via its own loop, rewrite
 	// via die(err)) and lets a caller distinguish total from partial by type.
-	if len(resp.IDs) == 0 {
-		return nil, fmt.Errorf("hooppy: %s: every post in the batch failed (%d/%d); no posts were published — first failure: %w", callerName, len(failed), len(ids), failed[0].Err)
+	//
+	// The createdNoID guard: a batch where every post returned 2xx with no id
+	// (CreateNoIDError) is NOT all-failed — those posts succeeded with an
+	// unknown id (MAJOR 1). Without this guard, createdNoID > 0 with empty
+	// resp.IDs would fall into the all-failed branch and report "no posts were
+	// published" which may be false. The wording is softened from "no posts
+	// were published" to "no post ids were returned" because the former is
+	// asserted as fact and may be false when the server omitted ids.
+	if len(resp.IDs) == 0 && createdNoID == 0 {
+		return nil, fmt.Errorf("hooppy: %s: every post in the batch failed (%d/%d); no post ids were returned — first failure: %w", callerName, len(failed), len(ids), failed[0].Err)
 	}
 	// Batch partial: some succeeded, some failed. Return the populated result
 	// alongside the typed error so a caller never loses already-published ids.

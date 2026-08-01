@@ -465,3 +465,166 @@ func TestBuildPayloads_AcceptValidWhenType(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildImportSearchPostPayload_SchedulesWhenTypeGuard mirrors the copy and
+// rewrite guard tables for the import builder. The import handler was the
+// BLOCKER of round 3: it built its payload inline with NEITHER guard, so
+// schedules_ids with publication_when_type=1 was silently dropped (the post
+// published to pages NOW) and publication_when_type=0 fell through `default:`
+// into the same publish-now branch. Extracting buildImportSearchPostPayload
+// makes both guards reachable from a test.
+//
+// F8 RED-on-revert: delete the contradiction guard from
+// buildImportSearchPostPayload and the "when_type 1 + schedules → error" case
+// returns a payload with err == nil → this assertion fails.
+func TestBuildImportSearchPostPayload_SchedulesWhenTypeGuard(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        importSearchPostInput
+		wantErr   bool
+		errSub    string
+		wantSched []int
+	}{
+		{
+			"when_type 1 + schedules → error (contradiction guard)",
+			importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SchedulesIDs: "10,11"},
+			true, "publication_when_type=3", nil,
+		},
+		{
+			"when_type 3 + schedules → SchedulesIDs populated (_OK pair)",
+			importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: "10,11"},
+			false, "", []int{10, 11},
+		},
+		{
+			"when_type 3 + no schedules → error (existing converse guard)",
+			importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: ""},
+			true, "publication_when_type=3", nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := buildImportSearchPostPayload(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("buildImportSearchPostPayload(%+v) = %+v, nil — want an error (the contradiction guard must refuse schedules with a non-schedule when-type; the round-3 BLOCKER shipped without this guard)", tc.in, p)
+				}
+				if !strings.Contains(err.Error(), "schedules") {
+					t.Errorf("error must name schedules, got: %v", err)
+				}
+				if tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
+					t.Errorf("error must contain %q, got: %v", tc.errSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildImportSearchPostPayload(%+v): %v", tc.in, err)
+			}
+			if !sliceEq(p.SchedulesIDs, tc.wantSched) {
+				t.Errorf("SchedulesIDs = %v, want %v — schedules must reach the payload under when-type 3 (the _OK pair stops the contradiction guard from refusing ALL schedules)", p.SchedulesIDs, tc.wantSched)
+			}
+		})
+	}
+}
+
+// TestBuildImportSearchPostPayload_RejectInvalidWhenType mirrors F12 for the
+// import builder: publication_when_type outside {1,2,3} is refused, and 0
+// (the Go zero value an agent produces by omitting the field) in particular.
+// The round-3 BLOCKER shipped without checkPublicationWhenType, so 0 and 4
+// fell through `default:` into the publish-now branch.
+func TestBuildImportSearchPostPayload_RejectInvalidWhenType(t *testing.T) {
+	for _, wt := range []int{0, 4, -1} {
+		t.Run(fmt.Sprintf("import_when_type_%d", wt), func(t *testing.T) {
+			_, err := buildImportSearchPostPayload(importSearchPostInput{
+				SearchPostID:        2001,
+				PublicationWhenType: wt,
+				SelectedPagesIDs:    "123",
+			})
+			if err == nil {
+				t.Fatalf("publication_when_type=%d was accepted — an out-of-range when-type must not fall through to the publish-now branch (the round-3 BLOCKER shipped without this guard)", wt)
+			}
+			if !strings.Contains(err.Error(), "publication_when_type") {
+				t.Errorf("error should name publication_when_type so an agent can correct it, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestBuildPayloads_CrossSurface_Guards_F21 is the table-driven cross-surface
+// invariant: EVERY publish builder refuses schedules with a when-type other
+// than 3, and refuses a when-type outside {1,2,3}. The builders are enumerated
+// explicitly so adding a fourth publish tool without its guard fails the suite
+// rather than shipping — a count of 2 guards across 3 tools is what hid the
+// round-3 BLOCKER (the import builder had neither guard, and no test seam
+// reached it).
+//
+// F21 — the table catches an unguarded builder. Proven by adding a
+// deliberately unguarded fake builder to the table and watching it go RED,
+// then removing the fake (see the falsification log in the report).
+func TestBuildPayloads_CrossSurface_Guards_F21(t *testing.T) {
+	cases := []struct {
+		name      string
+		schedules func() error // schedules_ids with when-type 1 — must error
+		whenType0 func() error // when-type 0 (omitted field) — must error
+		whenType4 func() error // when-type 4 (out of range) — must error
+	}{
+		{"buildCopySearchPostPayload",
+			func() error {
+				_, err := buildCopySearchPostPayload(copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SchedulesIDs: "10,11"})
+				return err
+			},
+			func() error {
+				_, err := buildCopySearchPostPayload(copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 0, SelectedPagesIDs: "123"})
+				return err
+			},
+			func() error {
+				_, err := buildCopySearchPostPayload(copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 4, SelectedPagesIDs: "123"})
+				return err
+			},
+		},
+		{"buildRewriteSearchPostPayload",
+			func() error {
+				_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 1, SchedulesIDs: "10,11"})
+				return err
+			},
+			func() error {
+				_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 0, SelectedPagesIDs: "123"})
+				return err
+			},
+			func() error {
+				_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 4, SelectedPagesIDs: "123"})
+				return err
+			},
+		},
+		{"buildImportSearchPostPayload",
+			func() error {
+				_, err := buildImportSearchPostPayload(importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SchedulesIDs: "10,11"})
+				return err
+			},
+			func() error {
+				_, err := buildImportSearchPostPayload(importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 0, SelectedPagesIDs: "123"})
+				return err
+			},
+			func() error {
+				_, err := buildImportSearchPostPayload(importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 4, SelectedPagesIDs: "123"})
+				return err
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/schedules_with_when_type_1", func(t *testing.T) {
+			if err := tc.schedules(); err == nil {
+				t.Fatalf("%s: schedules_ids with publication_when_type=1 was accepted — every publish builder must refuse this (the schedules are silently dropped and the post publishes NOW, the round-3 BLOCKER)", tc.name)
+			}
+		})
+		t.Run(tc.name+"/when_type_0", func(t *testing.T) {
+			if err := tc.whenType0(); err == nil {
+				t.Fatalf("%s: publication_when_type=0 was accepted — every publish builder must refuse an out-of-range when-type (0 is the zero value an agent produces by omitting the field)", tc.name)
+			}
+		})
+		t.Run(tc.name+"/when_type_4", func(t *testing.T) {
+			if err := tc.whenType4(); err == nil {
+				t.Fatalf("%s: publication_when_type=4 was accepted — every publish builder must refuse a when-type outside {1,2,3}", tc.name)
+			}
+		})
+	}
+}
