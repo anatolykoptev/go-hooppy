@@ -285,6 +285,1725 @@ components:
         CopySearchPostPayload:
             description: Request body schema not derived from fixtures — see Go payload struct in types.go.
             x-provenance: unverified
+        CrossPostingEditResponse:
+            properties:
+                accounts_for_parsing:
+                    properties:
+                        "3":
+                            type: integer
+                            x-provenance: fixture
+                    required:
+                        - "3"
+                    type: object
+                    x-provenance: fixture
+                add_link_to_user:
+                    type: integer
+                    x-provenance: fixture
+                check_interval:
+                    type: integer
+                    x-provenance: fixture
+                check_times:
+                    items: {}
+                    type: array
+                    x-provenance: fixture
+                check_when_type:
+                    type: integer
+                    x-provenance: fixture
+                copy_mode:
+                    type: integer
+                    x-provenance: fixture
+                delete_posts_day:
+                    type: integer
+                    x-provenance: fixture
+                delete_posts_hour:
+                    type: integer
+                    x-provenance: fixture
+                determine_best_by:
+                    type: integer
+                    x-provenance: fixture
+                donut_paid_duration:
+                    type: integer
+                    x-provenance: fixture
+                download_vk_videos:
+                    type: integer
+                    x-provenance: fixture
+                expand_clips_title:
+                    type: integer
+                    x-provenance: fixture
+                id:
+                    type: integer
+                    x-provenance: fixture
+                is_comments_disabled:
+                    type: integer
+                    x-provenance: fixture
+                is_search_started:
+                    type: boolean
+                    x-provenance: fixture
+                is_unique_content:
+                    type: integer
+                    x-provenance: fixture
+                last_check_date:
+                    type: integer
+                    x-provenance: fixture
+                message_to_channel:
+                    type: integer
+                    x-provenance: fixture
+                message_to_community:
+                    type: integer
+                    x-provenance: fixture
+                name:
+                    type: string
+                    x-provenance: fixture
+                not_publish_in_videos:
+                    type: integer
+                    x-provenance: fixture
+                parse_links:
+                    type: integer
+                    x-provenance: fixture
+                photos_caption:
+                    description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                    type: string
+                    x-provenance: fixture
+                    x-write-type: integer
+                plan_by_network:
+                    type: integer
+                    x-provenance: fixture
+                posts_caption:
+                    description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                    type: string
+                    x-provenance: fixture
+                    x-write-type: integer
+                posts_caption_position_type:
+                    type: integer
+                    x-provenance: fixture
+                posts_caption_space_type:
+                    type: integer
+                    x-provenance: fixture
+                posts_comment:
+                    description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                    type: string
+                    x-provenance: fixture
+                    x-write-type: integer
+                posts_filter:
+                    properties:
+                        must_have:
+                            type: string
+                            x-provenance: fixture
+                        must_have_logical_union:
+                            type: string
+                            x-provenance: fixture
+                        photos_amount:
+                            type: integer
+                            x-provenance: fixture
+                        skip_like:
+                            type: string
+                            x-provenance: fixture
+                        skip_with:
+                            type: string
+                            x-provenance: fixture
+                        video_duration:
+                            type: integer
+                            x-provenance: fixture
+                        video_size:
+                            type: integer
+                            x-provenance: fixture
+                    required:
+                        - must_have
+                        - must_have_logical_union
+                        - photos_amount
+                        - skip_like
+                        - skip_with
+                        - video_duration
+                        - video_size
+                    type: object
+                    x-provenance: fixture
+                posts_hashtags:
+                    properties:
+                        hashtags:
+                            type: string
+                            x-provenance: fixture
+                        max_amount:
+                            type: string
+                            x-provenance: fixture
+                        position_type:
+                            type: integer
+                            x-provenance: fixture
+                        selection_type:
+                            type: integer
+                            x-provenance: fixture
+                    required:
+                        - hashtags
+                        - max_amount
+                        - position_type
+                        - selection_type
+                    type: object
+                    x-provenance: fixture
+                posts_links:
+                    properties:
+                        links:
+                            type: string
+                            x-provenance: fixture
+                        max_amount:
+                            type: integer
+                            x-provenance: fixture
+                        selection_type:
+                            type: integer
+                            x-provenance: fixture
+                        space_type:
+                            type: integer
+                            x-provenance: fixture
+                    required:
+                        - links
+                        - max_amount
+                        - selection_type
+                        - space_type
+                    type: object
+                    x-provenance: fixture
+                posts_location:
+                    properties:
+                        id:
+                            type: string
+                            x-provenance: fixture
+                    required:
+                        - id
+                    type: object
+                    x-provenance: fixture
+                posts_location_vk:
+                    properties:
+                        id:
+                            type: string
+                            x-provenance: fixture
+                    required:
+                        - id
+                    type: object
+                    x-provenance: fixture
+                posts_photo:
+                    type: "null"
+                    x-provenance: fixture
+                posts_photo_always:
+                    type: integer
+                    x-provenance: fixture
+                posts_rewrite:
+                    properties:
+                        no_posts_if_no_rewrite:
+                            type: string
+                            x-provenance: fixture
+                        rewrite_command:
+                            type: string
+                            x-provenance: fixture
+                        rewrite_for_every_page:
+                            type: string
+                            x-provenance: fixture
+                        rewrite_state:
+                            type: integer
+                            x-provenance: fixture
+                    required:
+                        - no_posts_if_no_rewrite
+                        - rewrite_command
+                        - rewrite_for_every_page
+                        - rewrite_state
+                    type: object
+                    x-provenance: fixture
+                posts_text:
+                    properties:
+                        black_list:
+                            type: string
+                            x-provenance: fixture
+                        carved_list:
+                            type: string
+                            x-provenance: fixture
+                        text_limit:
+                            type: string
+                            x-provenance: fixture
+                        white_list:
+                            type: string
+                            x-provenance: fixture
+                    required:
+                        - black_list
+                        - carved_list
+                        - text_limit
+                        - white_list
+                    type: object
+                    x-provenance: fixture
+                posts_text_modification:
+                    properties:
+                        add_link_on:
+                            type: string
+                            x-provenance: fixture
+                        carved_list:
+                            type: string
+                            x-provenance: fixture
+                        cut_smiles:
+                            type: string
+                            x-provenance: fixture
+                        replace_words:
+                            type: string
+                            x-provenance: fixture
+                        save_markup:
+                            type: string
+                            x-provenance: fixture
+                        text_rewrite:
+                            type: string
+                            x-provenance: fixture
+                        text_translate:
+                            type: string
+                            x-provenance: fixture
+                        tg_buttons:
+                            description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                            type: string
+                            x-provenance: fixture
+                            x-write-type: integer
+                        translate_lang_to:
+                            type: integer
+                            x-provenance: fixture
+                    required:
+                        - add_link_on
+                        - carved_list
+                        - cut_smiles
+                        - replace_words
+                        - save_markup
+                        - text_rewrite
+                        - text_translate
+                        - tg_buttons
+                        - translate_lang_to
+                    type: object
+                    x-provenance: fixture
+                posts_upgrade:
+                    properties:
+                        add_link_on:
+                            type: string
+                            x-provenance: fixture
+                        do_not_take:
+                            type: string
+                            x-provenance: fixture
+                        remove_from:
+                            type: string
+                            x-provenance: fixture
+                        take_only:
+                            type: string
+                            x-provenance: fixture
+                    required:
+                        - add_link_on
+                        - do_not_take
+                        - remove_from
+                        - take_only
+                    type: object
+                    x-provenance: fixture
+                privacy_level:
+                    type: integer
+                    x-provenance: fixture
+                project_id:
+                    type: integer
+                    x-provenance: fixture
+                projects:
+                    items:
+                        properties:
+                            add_link_to_user:
+                                type: integer
+                                x-provenance: fixture
+                            delete_posts_day:
+                                type: integer
+                                x-provenance: fixture
+                            delete_posts_hour:
+                                type: integer
+                                x-provenance: fixture
+                            donut_paid_duration:
+                                type: integer
+                                x-provenance: fixture
+                            download_vk_videos:
+                                type: integer
+                                x-provenance: fixture
+                            expand_clips_title:
+                                type: integer
+                                x-provenance: fixture
+                            id:
+                                type: integer
+                                x-provenance: fixture
+                            is_comments_disabled:
+                                type: integer
+                                x-provenance: fixture
+                            is_deleted:
+                                type: integer
+                                x-provenance: fixture
+                            is_unique_content:
+                                type: integer
+                                x-provenance: fixture
+                            message_to_channel:
+                                type: integer
+                                x-provenance: fixture
+                            message_to_community:
+                                type: integer
+                                x-provenance: fixture
+                            name:
+                                type: string
+                                x-provenance: fixture
+                            not_publish_in_videos:
+                                type: integer
+                                x-provenance: fixture
+                            parse_links:
+                                type: integer
+                                x-provenance: fixture
+                            photos_caption:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            plan_by_network:
+                                type: integer
+                                x-provenance: fixture
+                            position:
+                                type: integer
+                                x-provenance: fixture
+                            posts_caption:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_caption_position_type:
+                                type: integer
+                                x-provenance: fixture
+                            posts_caption_space_type:
+                                type: integer
+                                x-provenance: fixture
+                            posts_comment:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_count:
+                                type: integer
+                                x-provenance: fixture
+                            posts_location:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_location_vk:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_photo:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_photo_always:
+                                type: integer
+                                x-provenance: fixture
+                            posts_rewrite:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            privacy_level:
+                                type: integer
+                                x-provenance: fixture
+                            publication_where_type:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_article:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_article_by_link:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_carousel:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_clips:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_reels:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_shorts:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_story:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_story_source_ids:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            publish_as_user:
+                                type: integer
+                                x-provenance: fixture
+                            publish_by_account:
+                                type: integer
+                                x-provenance: fixture
+                            publish_by_account_source_ids:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            publish_comment_by_account:
+                                type: integer
+                                x-provenance: fixture
+                            publish_in_channel:
+                                type: integer
+                                x-provenance: fixture
+                            publish_only_in_videos:
+                                type: integer
+                                x-provenance: fixture
+                            publish_reels_as_trial:
+                                type: integer
+                                x-provenance: fixture
+                            repeat_video:
+                                type: integer
+                                x-provenance: fixture
+                            save_vk_videos_names:
+                                type: integer
+                                x-provenance: fixture
+                            share_channel_to_feed:
+                                type: integer
+                                x-provenance: fixture
+                            share_clips_to_feed:
+                                type: integer
+                                x-provenance: fixture
+                            share_clips_to_feed_if_no_video:
+                                type: integer
+                                x-provenance: fixture
+                            share_clips_to_feed_with_text:
+                                type: integer
+                                x-provenance: fixture
+                            share_reels_to_feed:
+                                type: integer
+                                x-provenance: fixture
+                            share_shorts_to_feed:
+                                type: "null"
+                                x-provenance: fixture
+                            share_stories_to_feed:
+                                type: integer
+                                x-provenance: fixture
+                            share_stories_to_feed_source_ids:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            tg_buttons:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            user_id:
+                                type: integer
+                                x-provenance: fixture
+                            utm_tags:
+                                type: string
+                                x-provenance: fixture
+                            videos_title:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            watermark_id:
+                                type: integer
+                                x-provenance: fixture
+                            youtube_category:
+                                type: integer
+                                x-provenance: fixture
+                        required:
+                            - add_link_to_user
+                            - delete_posts_day
+                            - delete_posts_hour
+                            - donut_paid_duration
+                            - download_vk_videos
+                            - expand_clips_title
+                            - id
+                            - is_comments_disabled
+                            - is_deleted
+                            - is_unique_content
+                            - message_to_channel
+                            - message_to_community
+                            - name
+                            - not_publish_in_videos
+                            - parse_links
+                            - photos_caption
+                            - plan_by_network
+                            - position
+                            - posts_caption
+                            - posts_caption_position_type
+                            - posts_caption_space_type
+                            - posts_comment
+                            - posts_count
+                            - posts_location
+                            - posts_location_vk
+                            - posts_photo
+                            - posts_photo_always
+                            - posts_rewrite
+                            - privacy_level
+                            - publication_where_type
+                            - publish_as_article
+                            - publish_as_article_by_link
+                            - publish_as_carousel
+                            - publish_as_clips
+                            - publish_as_reels
+                            - publish_as_shorts
+                            - publish_as_story
+                            - publish_as_story_source_ids
+                            - publish_as_user
+                            - publish_by_account
+                            - publish_by_account_source_ids
+                            - publish_comment_by_account
+                            - publish_in_channel
+                            - publish_only_in_videos
+                            - publish_reels_as_trial
+                            - repeat_video
+                            - save_vk_videos_names
+                            - share_channel_to_feed
+                            - share_clips_to_feed
+                            - share_clips_to_feed_if_no_video
+                            - share_clips_to_feed_with_text
+                            - share_reels_to_feed
+                            - share_shorts_to_feed
+                            - share_stories_to_feed
+                            - share_stories_to_feed_source_ids
+                            - tg_buttons
+                            - user_id
+                            - utm_tags
+                            - videos_title
+                            - watermark_id
+                            - youtube_category
+                        type: object
+                    type: array
+                    x-provenance: fixture
+                publication_how_type:
+                    type: integer
+                    x-provenance: fixture
+                publication_interval:
+                    type: integer
+                    x-provenance: fixture
+                publication_interval_from:
+                    type: integer
+                    x-provenance: fixture
+                publication_interval_to:
+                    type: integer
+                    x-provenance: fixture
+                publication_interval_type:
+                    type: integer
+                    x-provenance: fixture
+                publication_when_type:
+                    type: integer
+                    x-provenance: fixture
+                publication_where_type:
+                    type: integer
+                    x-provenance: fixture
+                publish_as_article:
+                    type: integer
+                    x-provenance: fixture
+                publish_as_article_by_link:
+                    type: integer
+                    x-provenance: fixture
+                publish_as_carousel:
+                    type: integer
+                    x-provenance: fixture
+                publish_as_clips:
+                    type: integer
+                    x-provenance: fixture
+                publish_as_reels:
+                    type: integer
+                    x-provenance: fixture
+                publish_as_shorts:
+                    type: integer
+                    x-provenance: fixture
+                publish_as_story:
+                    type: integer
+                    x-provenance: fixture
+                publish_as_story_source_ids:
+                    description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                    type: string
+                    x-provenance: fixture
+                    x-write-type: integer
+                publish_as_user:
+                    type: integer
+                    x-provenance: fixture
+                publish_by_account:
+                    type: integer
+                    x-provenance: fixture
+                publish_by_account_source_ids:
+                    description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                    type: string
+                    x-provenance: fixture
+                    x-write-type: integer
+                publish_comment_by_account:
+                    type: integer
+                    x-provenance: fixture
+                publish_in_channel:
+                    type: integer
+                    x-provenance: fixture
+                publish_only_in_videos:
+                    type: integer
+                    x-provenance: fixture
+                publish_reels_as_trial:
+                    type: integer
+                    x-provenance: fixture
+                repeat_video:
+                    type: integer
+                    x-provenance: fixture
+                save_vk_videos_names:
+                    type: integer
+                    x-provenance: fixture
+                schedule_id:
+                    type: integer
+                    x-provenance: fixture
+                schedules:
+                    items:
+                        properties:
+                            add_link_to_user:
+                                type: integer
+                                x-provenance: fixture
+                            delete_posts_day:
+                                type: integer
+                                x-provenance: fixture
+                            delete_posts_hour:
+                                type: integer
+                                x-provenance: fixture
+                            donut_paid_duration:
+                                type: integer
+                                x-provenance: fixture
+                            download_vk_videos:
+                                type: integer
+                                x-provenance: fixture
+                            expand_clips_title:
+                                type: integer
+                                x-provenance: fixture
+                            id:
+                                type: integer
+                                x-provenance: fixture
+                            is_comments_disabled:
+                                type: integer
+                                x-provenance: fixture
+                            is_deleted:
+                                type: integer
+                                x-provenance: fixture
+                            is_posts_repeated:
+                                type: integer
+                                x-provenance: fixture
+                            is_random_content:
+                                type: integer
+                                x-provenance: fixture
+                            is_unique_content:
+                                type: integer
+                                x-provenance: fixture
+                            message_to_channel:
+                                type: "null"
+                                x-provenance: fixture
+                            message_to_community:
+                                type: "null"
+                                x-provenance: fixture
+                            name:
+                                type: string
+                                x-provenance: fixture
+                            not_publish_in_videos:
+                                type: "null"
+                                x-provenance: fixture
+                            parse_links:
+                                type: integer
+                                x-provenance: fixture
+                            photos_caption:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            plan_by_network:
+                                type: integer
+                                x-provenance: fixture
+                            position:
+                                type: integer
+                                x-provenance: fixture
+                            posts_caption:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_caption_position_type:
+                                type: integer
+                                x-provenance: fixture
+                            posts_caption_space_type:
+                                type: integer
+                                x-provenance: fixture
+                            posts_comment:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_count:
+                                type: integer
+                                x-provenance: fixture
+                            posts_location:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_location_vk:
+                                type: "null"
+                                x-provenance: fixture
+                            posts_photo:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_photo_always:
+                                type: "null"
+                                x-provenance: fixture
+                            posts_rewrite:
+                                type: "null"
+                                x-provenance: fixture
+                            privacy_level:
+                                type: integer
+                                x-provenance: fixture
+                            publication_how_type:
+                                type: integer
+                                x-provenance: fixture
+                            publication_where_type:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_article:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_article_by_link:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_carousel:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_clips:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_reels:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_shorts:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_story:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_story_source_ids:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            publish_as_user:
+                                type: integer
+                                x-provenance: fixture
+                            publish_by_account:
+                                type: integer
+                                x-provenance: fixture
+                            publish_by_account_source_ids:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            publish_comment_by_account:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_in_channel:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_only_in_videos:
+                                type: integer
+                                x-provenance: fixture
+                            publish_reels_as_trial:
+                                type: "null"
+                                x-provenance: fixture
+                            repeat_video:
+                                type: integer
+                                x-provenance: fixture
+                            save_vk_videos_names:
+                                type: integer
+                                x-provenance: fixture
+                            share_channel_to_feed:
+                                type: "null"
+                                x-provenance: fixture
+                            share_clips_to_feed:
+                                type: integer
+                                x-provenance: fixture
+                            share_clips_to_feed_if_no_video:
+                                type: "null"
+                                x-provenance: fixture
+                            share_clips_to_feed_with_text:
+                                type: integer
+                                x-provenance: fixture
+                            share_reels_to_feed:
+                                type: integer
+                                x-provenance: fixture
+                            share_shorts_to_feed:
+                                type: "null"
+                                x-provenance: fixture
+                            share_stories_to_feed:
+                                type: integer
+                                x-provenance: fixture
+                            share_stories_to_feed_source_ids:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            start_date:
+                                type: integer
+                                x-provenance: fixture
+                            state:
+                                type: integer
+                                x-provenance: fixture
+                            stop_date:
+                                type: integer
+                                x-provenance: fixture
+                            tg_buttons:
+                                type: "null"
+                                x-provenance: fixture
+                            user_id:
+                                type: integer
+                                x-provenance: fixture
+                            utm_tags:
+                                type: string
+                                x-provenance: fixture
+                            videos_title:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            watermark_id:
+                                type: integer
+                                x-provenance: fixture
+                            youtube_category:
+                                type: integer
+                                x-provenance: fixture
+                        required:
+                            - add_link_to_user
+                            - delete_posts_day
+                            - delete_posts_hour
+                            - donut_paid_duration
+                            - download_vk_videos
+                            - expand_clips_title
+                            - id
+                            - is_comments_disabled
+                            - is_deleted
+                            - is_posts_repeated
+                            - is_random_content
+                            - is_unique_content
+                            - message_to_channel
+                            - message_to_community
+                            - name
+                            - not_publish_in_videos
+                            - parse_links
+                            - photos_caption
+                            - plan_by_network
+                            - position
+                            - posts_caption
+                            - posts_caption_position_type
+                            - posts_caption_space_type
+                            - posts_comment
+                            - posts_count
+                            - posts_location
+                            - posts_location_vk
+                            - posts_photo
+                            - posts_photo_always
+                            - posts_rewrite
+                            - privacy_level
+                            - publication_how_type
+                            - publication_where_type
+                            - publish_as_article
+                            - publish_as_article_by_link
+                            - publish_as_carousel
+                            - publish_as_clips
+                            - publish_as_reels
+                            - publish_as_shorts
+                            - publish_as_story
+                            - publish_as_story_source_ids
+                            - publish_as_user
+                            - publish_by_account
+                            - publish_by_account_source_ids
+                            - publish_comment_by_account
+                            - publish_in_channel
+                            - publish_only_in_videos
+                            - publish_reels_as_trial
+                            - repeat_video
+                            - save_vk_videos_names
+                            - share_channel_to_feed
+                            - share_clips_to_feed
+                            - share_clips_to_feed_if_no_video
+                            - share_clips_to_feed_with_text
+                            - share_reels_to_feed
+                            - share_shorts_to_feed
+                            - share_stories_to_feed
+                            - share_stories_to_feed_source_ids
+                            - start_date
+                            - state
+                            - stop_date
+                            - tg_buttons
+                            - user_id
+                            - utm_tags
+                            - videos_title
+                            - watermark_id
+                            - youtube_category
+                        type: object
+                    type: array
+                    x-provenance: fixture
+                search_comments:
+                    type: integer
+                    x-provenance: fixture
+                search_likes:
+                    type: integer
+                    x-provenance: fixture
+                search_mode:
+                    type: integer
+                    x-provenance: fixture
+                search_mode_direction:
+                    type: integer
+                    x-provenance: fixture
+                search_reposts:
+                    type: integer
+                    x-provenance: fixture
+                search_start_date:
+                    type: string
+                    x-provenance: fixture
+                search_stop_date:
+                    type: string
+                    x-provenance: fixture
+                search_views:
+                    type: integer
+                    x-provenance: fixture
+                selected_albums_by_source_ids:
+                    properties: {}
+                    required: []
+                    type: object
+                    x-provenance: fixture
+                selected_pages_by_source_ids:
+                    properties:
+                        "10":
+                            items:
+                                type: integer
+                            type: array
+                            x-provenance: fixture
+                    required:
+                        - "10"
+                    type: object
+                    x-provenance: fixture
+                share_channel_to_feed:
+                    type: integer
+                    x-provenance: fixture
+                share_clips_to_feed:
+                    type: integer
+                    x-provenance: fixture
+                share_clips_to_feed_if_no_video:
+                    type: integer
+                    x-provenance: fixture
+                share_clips_to_feed_with_text:
+                    type: integer
+                    x-provenance: fixture
+                share_reels_to_feed:
+                    type: integer
+                    x-provenance: fixture
+                share_stories_to_feed:
+                    type: integer
+                    x-provenance: fixture
+                share_stories_to_feed_source_ids:
+                    description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                    type: string
+                    x-provenance: fixture
+                    x-write-type: integer
+                social_albums_by_pages:
+                    items: {}
+                    type: array
+                    x-provenance: fixture
+                social_pages_by_accounts:
+                    items:
+                        properties:
+                            account:
+                                properties:
+                                    id:
+                                        type: integer
+                                        x-provenance: fixture
+                                    link:
+                                        type: string
+                                        x-provenance: fixture
+                                    name:
+                                        type: string
+                                        x-provenance: fixture
+                                    photo:
+                                        type: string
+                                        x-provenance: fixture
+                                    social_id:
+                                        type: string
+                                        x-provenance: fixture
+                                    source_id:
+                                        type: integer
+                                        x-provenance: fixture
+                                required:
+                                    - id
+                                    - link
+                                    - name
+                                    - photo
+                                    - social_id
+                                    - source_id
+                                type: object
+                                x-provenance: fixture
+                            pages:
+                                items:
+                                    properties:
+                                        alias:
+                                            type: string
+                                            x-provenance: fixture
+                                        id:
+                                            type: integer
+                                            x-provenance: fixture
+                                        link:
+                                            type: string
+                                            x-provenance: fixture
+                                        name:
+                                            type: string
+                                            x-provenance: fixture
+                                        photo:
+                                            type: string
+                                            x-provenance: fixture
+                                        social_id:
+                                            type: string
+                                            x-provenance: fixture
+                                        type:
+                                            type: string
+                                            x-provenance: fixture
+                                    required:
+                                        - alias
+                                        - id
+                                        - link
+                                        - name
+                                        - photo
+                                        - social_id
+                                        - type
+                                    type: object
+                                type: array
+                                x-provenance: fixture
+                        required:
+                            - account
+                            - pages
+                        type: object
+                    type: array
+                    x-provenance: fixture
+                source_resources:
+                    items: {}
+                    type: array
+                    x-provenance: fixture
+                source_resources_mode:
+                    type: integer
+                    x-provenance: fixture
+                take_amount:
+                    type: integer
+                    x-provenance: fixture
+                tg_buttons:
+                    properties:
+                        list:
+                            items: {}
+                            type: array
+                            x-provenance: fixture
+                    required:
+                        - list
+                    type: object
+                    x-provenance: fixture
+                videos_title:
+                    description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                    type: string
+                    x-provenance: fixture
+                    x-write-type: integer
+                watermark_id:
+                    type: integer
+                    x-provenance: fixture
+                watermarks:
+                    items: {}
+                    type: array
+                    x-provenance: fixture
+                youtube_category:
+                    type: integer
+                    x-provenance: fixture
+            required:
+                - accounts_for_parsing
+                - add_link_to_user
+                - check_interval
+                - check_times
+                - check_when_type
+                - copy_mode
+                - delete_posts_day
+                - delete_posts_hour
+                - determine_best_by
+                - donut_paid_duration
+                - download_vk_videos
+                - expand_clips_title
+                - id
+                - is_comments_disabled
+                - is_search_started
+                - is_unique_content
+                - last_check_date
+                - message_to_channel
+                - message_to_community
+                - name
+                - not_publish_in_videos
+                - parse_links
+                - photos_caption
+                - plan_by_network
+                - posts_caption
+                - posts_caption_position_type
+                - posts_caption_space_type
+                - posts_comment
+                - posts_filter
+                - posts_hashtags
+                - posts_links
+                - posts_location
+                - posts_location_vk
+                - posts_photo
+                - posts_photo_always
+                - posts_rewrite
+                - posts_text
+                - posts_text_modification
+                - posts_upgrade
+                - privacy_level
+                - project_id
+                - projects
+                - publication_how_type
+                - publication_interval
+                - publication_interval_from
+                - publication_interval_to
+                - publication_interval_type
+                - publication_when_type
+                - publication_where_type
+                - publish_as_article
+                - publish_as_article_by_link
+                - publish_as_carousel
+                - publish_as_clips
+                - publish_as_reels
+                - publish_as_shorts
+                - publish_as_story
+                - publish_as_story_source_ids
+                - publish_as_user
+                - publish_by_account
+                - publish_by_account_source_ids
+                - publish_comment_by_account
+                - publish_in_channel
+                - publish_only_in_videos
+                - publish_reels_as_trial
+                - repeat_video
+                - save_vk_videos_names
+                - schedule_id
+                - schedules
+                - search_comments
+                - search_likes
+                - search_mode
+                - search_mode_direction
+                - search_reposts
+                - search_start_date
+                - search_stop_date
+                - search_views
+                - selected_albums_by_source_ids
+                - selected_pages_by_source_ids
+                - share_channel_to_feed
+                - share_clips_to_feed
+                - share_clips_to_feed_if_no_video
+                - share_clips_to_feed_with_text
+                - share_reels_to_feed
+                - share_stories_to_feed
+                - share_stories_to_feed_source_ids
+                - social_albums_by_pages
+                - social_pages_by_accounts
+                - source_resources
+                - source_resources_mode
+                - take_amount
+                - tg_buttons
+                - videos_title
+                - watermark_id
+                - watermarks
+                - youtube_category
+            type: object
+            x-fixture-file: cross_posting_edit.json
+            x-provenance: 'fixture: testdata/live/cross_posting_edit.json'
+        CrossPostingStatisticsEmptyResponse:
+            properties:
+                statistics:
+                    items: {}
+                    type: array
+                    x-provenance: fixture
+            required:
+                - statistics
+            type: object
+            x-fixture-file: cross_posting_statistics_empty.json
+            x-provenance: 'fixture: testdata/live/cross_posting_statistics_empty.json'
+        CrossPostingStatisticsResponse:
+            properties:
+                statistics:
+                    items:
+                        properties:
+                            date:
+                                type: string
+                                x-provenance: fixture
+                            errors:
+                                type: integer
+                                x-provenance: fixture
+                            posts_duplicates_amount:
+                                type: integer
+                                x-provenance: fixture
+                            posts_filtered_amount:
+                                type: integer
+                                x-provenance: fixture
+                            posts_found_amount:
+                                type: integer
+                                x-provenance: fixture
+                            posts_taken_amount:
+                                type: integer
+                                x-provenance: fixture
+                        required:
+                            - date
+                            - errors
+                            - posts_duplicates_amount
+                            - posts_filtered_amount
+                            - posts_found_amount
+                            - posts_taken_amount
+                        type: object
+                    type: array
+                    x-provenance: fixture
+            required:
+                - statistics
+            type: object
+            x-fixture-file: cross_posting_statistics.json
+            x-provenance: 'fixture: testdata/live/cross_posting_statistics.json'
+        CrossPostingsListResponse:
+            properties:
+                filters_plug:
+                    items:
+                        properties:
+                            name:
+                                type: string
+                                x-provenance: fixture
+                            placeholder:
+                                type: string
+                                x-provenance: fixture
+                            selected_value:
+                                type: string
+                                x-provenance: fixture
+                            slug:
+                                type: string
+                                x-provenance: fixture
+                            type:
+                                type: string
+                                x-provenance: fixture
+                            values:
+                                items: {}
+                                type: array
+                                x-provenance: fixture
+                        required:
+                            - name
+                            - placeholder
+                            - selected_value
+                            - slug
+                            - type
+                            - values
+                        type: object
+                    type: array
+                    x-provenance: fixture
+                is_has_more:
+                    type: boolean
+                    x-provenance: fixture
+                list:
+                    items:
+                        properties:
+                            add_link_to_user:
+                                type: "null"
+                                x-provenance: fixture
+                            check_interval:
+                                type: integer
+                                x-provenance: fixture
+                            check_step:
+                                type: integer
+                                x-provenance: fixture
+                            check_times:
+                                type: "null"
+                                x-provenance: fixture
+                            check_when_type:
+                                type: integer
+                                x-provenance: fixture
+                            copy_mode:
+                                type: integer
+                                x-provenance: fixture
+                            delete_posts_day:
+                                type: "null"
+                                x-provenance: fixture
+                            delete_posts_hour:
+                                type: "null"
+                                x-provenance: fixture
+                            determine_best_by:
+                                type: integer
+                                x-provenance: fixture
+                            donut_paid_duration:
+                                type: integer
+                                x-provenance: fixture
+                            download_vk_videos:
+                                type: "null"
+                                x-provenance: fixture
+                            expand_clips_title:
+                                type: "null"
+                                x-provenance: fixture
+                            id:
+                                type: integer
+                                x-provenance: fixture
+                            instagram_last_check_date:
+                                type: integer
+                                x-provenance: fixture
+                            instagram_ready_for_parse:
+                                type: integer
+                                x-provenance: fixture
+                            is_comments_disabled:
+                                type: "null"
+                                x-provenance: fixture
+                            is_unique_content:
+                                type: "null"
+                                x-provenance: fixture
+                            last_check_date:
+                                type: integer
+                                x-provenance: fixture
+                            message_to_channel:
+                                type: "null"
+                                x-provenance: fixture
+                            message_to_community:
+                                type: "null"
+                                x-provenance: fixture
+                            name:
+                                type: string
+                                x-provenance: fixture
+                            next_check_date:
+                                type: string
+                                x-provenance: fixture
+                            not_publish_in_videos:
+                                type: "null"
+                                x-provenance: fixture
+                            pages:
+                                items:
+                                    properties:
+                                        page_id:
+                                            type: integer
+                                            x-provenance: fixture
+                                        source_id:
+                                            type: integer
+                                            x-provenance: fixture
+                                    required:
+                                        - page_id
+                                        - source_id
+                                    type: object
+                                type: array
+                                x-provenance: fixture
+                            parse_links:
+                                type: "null"
+                                x-provenance: fixture
+                            photos_caption:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            plan_by_network:
+                                type: "null"
+                                x-provenance: fixture
+                            position:
+                                type: integer
+                                x-provenance: fixture
+                            posts_caption:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_caption_position_type:
+                                type: integer
+                                x-provenance: fixture
+                            posts_caption_space_type:
+                                type: integer
+                                x-provenance: fixture
+                            posts_comment:
+                                type: "null"
+                                x-provenance: fixture
+                            posts_location:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            posts_location_vk:
+                                type: "null"
+                                x-provenance: fixture
+                            posts_pagination:
+                                type: "null"
+                                x-provenance: fixture
+                            posts_photo:
+                                type: "null"
+                                x-provenance: fixture
+                            posts_photo_always:
+                                type: "null"
+                                x-provenance: fixture
+                            posts_rewrite:
+                                type: "null"
+                                x-provenance: fixture
+                            privacy_level:
+                                type: integer
+                                x-provenance: fixture
+                            publication_how_type:
+                                type: integer
+                                x-provenance: fixture
+                            publication_interval:
+                                type: integer
+                                x-provenance: fixture
+                            publication_interval_from:
+                                type: integer
+                                x-provenance: fixture
+                            publication_interval_to:
+                                type: integer
+                                x-provenance: fixture
+                            publication_interval_type:
+                                type: integer
+                                x-provenance: fixture
+                            publication_when_type:
+                                type: integer
+                                x-provenance: fixture
+                            publication_where_type:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_article:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_as_article_by_link:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_as_carousel:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_as_clips:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_as_reels:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_as_shorts:
+                                type: integer
+                                x-provenance: fixture
+                            publish_as_story:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_as_story_source_ids:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            publish_as_user:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_by_account:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_by_account_source_ids:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            publish_comment_by_account:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_in_channel:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_only_in_videos:
+                                type: "null"
+                                x-provenance: fixture
+                            publish_reels_as_trial:
+                                type: "null"
+                                x-provenance: fixture
+                            repeat_video:
+                                type: "null"
+                                x-provenance: fixture
+                            save_vk_videos_names:
+                                type: integer
+                                x-provenance: fixture
+                            search_comments:
+                                type: integer
+                                x-provenance: fixture
+                            search_likes:
+                                type: integer
+                                x-provenance: fixture
+                            search_mode:
+                                type: integer
+                                x-provenance: fixture
+                            search_mode_direction:
+                                type: integer
+                                x-provenance: fixture
+                            search_pagination:
+                                type: "null"
+                                x-provenance: fixture
+                            search_reposts:
+                                type: integer
+                                x-provenance: fixture
+                            search_start_date:
+                                type: "null"
+                                x-provenance: fixture
+                            search_stop_date:
+                                type: "null"
+                                x-provenance: fixture
+                            search_views:
+                                type: integer
+                                x-provenance: fixture
+                            search_with_pagination:
+                                type: integer
+                                x-provenance: fixture
+                            share_channel_to_feed:
+                                type: "null"
+                                x-provenance: fixture
+                            share_clips_to_feed:
+                                type: "null"
+                                x-provenance: fixture
+                            share_clips_to_feed_if_no_video:
+                                type: "null"
+                                x-provenance: fixture
+                            share_clips_to_feed_with_text:
+                                type: "null"
+                                x-provenance: fixture
+                            share_reels_to_feed:
+                                type: "null"
+                                x-provenance: fixture
+                            share_shorts_to_feed:
+                                type: "null"
+                                x-provenance: fixture
+                            share_stories_to_feed:
+                                type: "null"
+                                x-provenance: fixture
+                            share_stories_to_feed_source_ids:
+                                description: 'Hostile type: declared int in the Go payload struct, returned as string by the server. The write-side type is integer.'
+                                type: string
+                                x-provenance: fixture
+                                x-write-type: integer
+                            source_resources_mode:
+                                type: integer
+                                x-provenance: fixture
+                            state:
+                                type: integer
+                                x-provenance: fixture
+                            take_amount:
+                                type: integer
+                                x-provenance: fixture
+                            tg_buttons:
+                                type: "null"
+                                x-provenance: fixture
+                            user_id:
+                                type: integer
+                                x-provenance: fixture
+                            videos_title:
+                                type: "null"
+                                x-provenance: fixture
+                            watermark_id:
+                                type: integer
+                                x-provenance: fixture
+                            youtube_category:
+                                type: integer
+                                x-provenance: fixture
+                        required:
+                            - add_link_to_user
+                            - check_interval
+                            - check_step
+                            - check_times
+                            - check_when_type
+                            - copy_mode
+                            - delete_posts_day
+                            - delete_posts_hour
+                            - determine_best_by
+                            - donut_paid_duration
+                            - download_vk_videos
+                            - expand_clips_title
+                            - id
+                            - instagram_last_check_date
+                            - instagram_ready_for_parse
+                            - is_comments_disabled
+                            - is_unique_content
+                            - last_check_date
+                            - message_to_channel
+                            - message_to_community
+                            - name
+                            - next_check_date
+                            - not_publish_in_videos
+                            - pages
+                            - parse_links
+                            - photos_caption
+                            - plan_by_network
+                            - position
+                            - posts_caption
+                            - posts_caption_position_type
+                            - posts_caption_space_type
+                            - posts_comment
+                            - posts_location
+                            - posts_location_vk
+                            - posts_pagination
+                            - posts_photo
+                            - posts_photo_always
+                            - posts_rewrite
+                            - privacy_level
+                            - publication_how_type
+                            - publication_interval
+                            - publication_interval_from
+                            - publication_interval_to
+                            - publication_interval_type
+                            - publication_when_type
+                            - publication_where_type
+                            - publish_as_article
+                            - publish_as_article_by_link
+                            - publish_as_carousel
+                            - publish_as_clips
+                            - publish_as_reels
+                            - publish_as_shorts
+                            - publish_as_story
+                            - publish_as_story_source_ids
+                            - publish_as_user
+                            - publish_by_account
+                            - publish_by_account_source_ids
+                            - publish_comment_by_account
+                            - publish_in_channel
+                            - publish_only_in_videos
+                            - publish_reels_as_trial
+                            - repeat_video
+                            - save_vk_videos_names
+                            - search_comments
+                            - search_likes
+                            - search_mode
+                            - search_mode_direction
+                            - search_pagination
+                            - search_reposts
+                            - search_start_date
+                            - search_stop_date
+                            - search_views
+                            - search_with_pagination
+                            - share_channel_to_feed
+                            - share_clips_to_feed
+                            - share_clips_to_feed_if_no_video
+                            - share_clips_to_feed_with_text
+                            - share_reels_to_feed
+                            - share_shorts_to_feed
+                            - share_stories_to_feed
+                            - share_stories_to_feed_source_ids
+                            - source_resources_mode
+                            - state
+                            - take_amount
+                            - tg_buttons
+                            - user_id
+                            - videos_title
+                            - watermark_id
+                            - youtube_category
+                        type: object
+                    type: array
+                    x-provenance: fixture
+                rows_limit:
+                    type: integer
+                    x-provenance: fixture
+                total_rows:
+                    type: integer
+                    x-provenance: fixture
+            required:
+                - filters_plug
+                - is_has_more
+                - list
+                - rows_limit
+                - total_rows
+            type: object
+            x-fixture-file: cross_postings.json
+            x-provenance: 'fixture: testdata/live/cross_postings.json'
         NotificationsListResponse:
             properties:
                 filters_plug:
@@ -5631,6 +7350,90 @@ paths:
                 - Accounts
             x-provenance: 'code-comment: accounts.go:187'
         x-provenance: 'code-comment: endpoints.go:38'
+    /cross-posting:
+        get:
+            description: 'The cross-posting rule engine: collects from a source on a timer, ranks by engagement, filters by threshold, deduplicates and publishes into a schedule. Integer enums (search_mode, determine_best_by, check_interval) carry no names on the wire; the client decodes them alongside the raw value. last_check_date and instagram_last_check_date arrive as a number, a numeric string, or null.'
+            operationId: getCrossPostings
+            parameters:
+                - description: 1-indexed page number.
+                  in: query
+                  name: page
+                  required: false
+                  schema:
+                    type: integer
+                  x-provenance: 'code-comment: crossposting.go'
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/CrossPostingsListResponse'
+                    description: Cross-posting connections with paging envelope.
+                    x-fixture:
+                        testdata/live/cross_postings.json: '#/components/schemas/CrossPostingsListResponse'
+                    x-provenance: 'fixture: testdata/live/cross_postings.json'
+            summary: List cross-posting connections
+            tags:
+                - CrossPosting
+            x-provenance: 'fixture: testdata/live/cross_postings.json'
+        x-provenance: 'code-comment: endpoints.go:56'
+    /cross-posting/{id}/edit:
+        get:
+            description: 'Carries the whole rule: source, targets, thresholds, schedule binding and filters. Fields that are null on the recording account have unmeasured types — a null here means not observed, not nullable by contract.'
+            operationId: getCrossPostingEdit
+            parameters:
+                - description: Cross-posting connection ID.
+                  in: path
+                  name: id
+                  required: true
+                  schema:
+                    type: integer
+                  x-provenance: 'code-comment: endpoints.go:57'
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/CrossPostingEditResponse'
+                    description: Full editable state of one cross-posting connection.
+                    x-fixture:
+                        testdata/live/cross_posting_edit.json: '#/components/schemas/CrossPostingEditResponse'
+                    x-provenance: 'fixture: testdata/live/cross_posting_edit.json'
+            summary: Get a cross-posting connection's full editable state
+            tags:
+                - CrossPosting
+            x-provenance: 'fixture: testdata/live/cross_posting_edit.json'
+        x-provenance: 'code-comment: endpoints.go:57'
+    /cross-posting/{id}/statistics:
+        get:
+            description: Per-connection collection and publication counters. The empty form returns statistics as an empty array, so a consumer must not assume the populated shape.
+            operationId: getCrossPostingStatistics
+            parameters:
+                - description: Cross-posting connection ID.
+                  in: path
+                  name: id
+                  required: true
+                  schema:
+                    type: integer
+                  x-provenance: 'code-comment: endpoints.go:58'
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                oneOf:
+                                    - $ref: '#/components/schemas/CrossPostingStatisticsResponse'
+                                    - $ref: '#/components/schemas/CrossPostingStatisticsEmptyResponse'
+                    description: Statistics for one connection. The empty form is a distinct shape, recorded separately.
+                    x-fixture:
+                        testdata/live/cross_posting_statistics.json: '#/components/schemas/CrossPostingStatisticsResponse'
+                        testdata/live/cross_posting_statistics_empty.json: '#/components/schemas/CrossPostingStatisticsEmptyResponse'
+                    x-provenance: 'fixture: testdata/live/cross_posting_statistics.json'
+            summary: Get a cross-posting connection's statistics
+            tags:
+                - CrossPosting
+            x-provenance: 'fixture: testdata/live/cross_posting_statistics.json'
+        x-provenance: 'code-comment: endpoints.go:58'
     /files/documents/upload:
         post:
             description: Multipart form upload. Max 50 MB (MaxUploadBytes).
@@ -6466,7 +8269,9 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/SchedulePostsResponse'
+                                oneOf:
+                                    - $ref: '#/components/schemas/SchedulePostsResponse'
+                                    - $ref: '#/components/schemas/SchedulePostsEmptyResponse'
                     description: Schedule queue with per-day calendar. posts_by_days is a map when non-empty, an array when empty (#119).
                     x-fixture:
                         testdata/live/schedule_posts.json: '#/components/schemas/SchedulePostsResponse'

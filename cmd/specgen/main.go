@@ -17,7 +17,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -848,6 +850,68 @@ func buildPaths() []pathDef {
 				},
 			},
 		},
+		// ---- /cross-posting (undocumented) ----
+		{
+			path: "/cross-posting", provenance: "code-comment: endpoints.go:56",
+			operations: []operationDef{
+				{
+					method: "get", operationID: "getCrossPostings", tags: []string{"CrossPosting"},
+					summary:     "List cross-posting connections",
+					description: "The cross-posting rule engine: collects from a source on a timer, ranks by engagement, filters by threshold, deduplicates and publishes into a schedule. Integer enums (search_mode, determine_best_by, check_interval) carry no names on the wire; the client decodes them alongside the raw value. last_check_date and instagram_last_check_date arrive as a number, a numeric string, or null.",
+					params: []paramDef{
+						{name: "page", in: "query", schemaType: "integer", description: "1-indexed page number.", provenance: "code-comment: crossposting.go"},
+					},
+					responses: []responseDef{
+						{statusCode: 200, fixtures: map[string]string{"cross_postings.json": "CrossPostingsListResponse"}, provenance: fixtureProv("cross_postings.json"), description: "Cross-posting connections with paging envelope."},
+					},
+					provenance: fixtureProv("cross_postings.json"),
+				},
+			},
+		},
+		// ---- /cross-posting/{id}/edit (undocumented) ----
+		{
+			path: "/cross-posting/{id}/edit", provenance: "code-comment: endpoints.go:57",
+			operations: []operationDef{
+				{
+					method: "get", operationID: "getCrossPostingEdit", tags: []string{"CrossPosting"},
+					summary:     "Get a cross-posting connection's full editable state",
+					description: "Carries the whole rule: source, targets, thresholds, schedule binding and filters. Fields that are null on the recording account have unmeasured types — a null here means not observed, not nullable by contract.",
+					params: []paramDef{
+						{name: "id", in: "path", schemaType: "integer", description: "Cross-posting connection ID.", provenance: "code-comment: endpoints.go:57"},
+					},
+					responses: []responseDef{
+						{statusCode: 200, fixtures: map[string]string{"cross_posting_edit.json": "CrossPostingEditResponse"}, provenance: fixtureProv("cross_posting_edit.json"), description: "Full editable state of one cross-posting connection."},
+					},
+					provenance: fixtureProv("cross_posting_edit.json"),
+				},
+			},
+		},
+		// ---- /cross-posting/{id}/statistics (undocumented) ----
+		{
+			path: "/cross-posting/{id}/statistics", provenance: "code-comment: endpoints.go:58",
+			operations: []operationDef{
+				{
+					method: "get", operationID: "getCrossPostingStatistics", tags: []string{"CrossPosting"},
+					summary:     "Get a cross-posting connection's statistics",
+					description: "Per-connection collection and publication counters. The empty form returns statistics as an empty array, so a consumer must not assume the populated shape.",
+					params: []paramDef{
+						{name: "id", in: "path", schemaType: "integer", description: "Cross-posting connection ID.", provenance: "code-comment: endpoints.go:58"},
+					},
+					responses: []responseDef{
+						{
+							statusCode: 200,
+							fixtures: map[string]string{
+								"cross_posting_statistics.json":       "CrossPostingStatisticsResponse",
+								"cross_posting_statistics_empty.json": "CrossPostingStatisticsEmptyResponse",
+							},
+							provenance:  fixtureProv("cross_posting_statistics.json"),
+							description: "Statistics for one connection. The empty form is a distinct shape, recorded separately.",
+						},
+					},
+					provenance: fixtureProv("cross_posting_statistics.json"),
+				},
+			},
+		},
 	}
 }
 
@@ -921,24 +985,28 @@ func inferSchema(v interface{}) map[string]interface{} {
 //
 //	"schedule_posts_empty.json" → "SchedulePostsEmptyResponse"
 var fixtureSchemaNames = map[string]string{
-	"accounts.json":             "AccountsListResponse",
-	"accounts_pages.json":       "PagesListResponse",
-	"notifications.json":        "NotificationsListResponse",
-	"parsing_form.json":         "ParsingFormResponse",
-	"post_edit.json":            "PostEditResponse",
-	"posts.json":                "PostsListResponse",
-	"posts_search.json":         "SearchPostsListResponse",
-	"projects.json":             "ProjectsListResponse",
-	"proxies.json":              "ProxiesListResponse",
-	"schedule_edit.json":        "ScheduleEditResponse",
-	"schedule_posts.json":       "SchedulePostsResponse",
-	"schedule_posts_empty.json": "SchedulePostsEmptyResponse",
-	"schedules.json":            "SchedulesListResponse",
-	"search_post_edit.json":     "SearchPostEditResponse",
-	"source_resources.json":     "SourceResourcesListResponse",
-	"users_me.json":             "UserResponse",
-	"users_settings.json":       "SettingsResponse",
-	"watermarks.json":           "WatermarksListResponse",
+	"accounts.json":                       "AccountsListResponse",
+	"cross_posting_edit.json":             "CrossPostingEditResponse",
+	"cross_posting_statistics.json":       "CrossPostingStatisticsResponse",
+	"cross_posting_statistics_empty.json": "CrossPostingStatisticsEmptyResponse",
+	"cross_postings.json":                 "CrossPostingsListResponse",
+	"accounts_pages.json":                 "PagesListResponse",
+	"notifications.json":                  "NotificationsListResponse",
+	"parsing_form.json":                   "ParsingFormResponse",
+	"post_edit.json":                      "PostEditResponse",
+	"posts.json":                          "PostsListResponse",
+	"posts_search.json":                   "SearchPostsListResponse",
+	"projects.json":                       "ProjectsListResponse",
+	"proxies.json":                        "ProxiesListResponse",
+	"schedule_edit.json":                  "ScheduleEditResponse",
+	"schedule_posts.json":                 "SchedulePostsResponse",
+	"schedule_posts_empty.json":           "SchedulePostsEmptyResponse",
+	"schedules.json":                      "SchedulesListResponse",
+	"search_post_edit.json":               "SearchPostEditResponse",
+	"source_resources.json":               "SourceResourcesListResponse",
+	"users_me.json":                       "UserResponse",
+	"users_settings.json":                 "SettingsResponse",
+	"watermarks.json":                     "WatermarksListResponse",
 }
 
 // ============================================================================
@@ -946,6 +1014,16 @@ var fixtureSchemaNames = map[string]string{
 // ============================================================================
 
 func main() {
+	// -check regenerates into memory and asserts the committed spec is
+	// byte-identical, instead of overwriting it. The endpoint table above is
+	// hand-maintained while the schemas are derived, so editing the table and
+	// forgetting to regenerate leaves a spec that still validates every
+	// fixture — the conformance test stays green — while no longer describing
+	// what the generator produces. Same shape as
+	// scripts/record_fixture.py --self-check.
+	checkOnly := flag.Bool("check", false, "regenerate into memory and fail if the committed spec differs; do not write")
+	flag.Parse()
+
 	// 1. Walk fixtures and infer schemas.
 	fixtureSchemas := make(map[string]map[string]interface{})
 	fixtureFiles, err := filepath.Glob(filepath.Join(fixtureDir, "*.json"))
@@ -1052,7 +1130,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 6. Write.
+	// 6. Write, or compare when -check.
+	if *checkOnly {
+		committed, err := os.ReadFile(outputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "specgen -check: read %s: %v\n(run `GOWORK=off go run ./cmd/specgen` to generate it)\n", outputFile, err)
+			os.Exit(1)
+		}
+		if !bytes.Equal(committed, out) {
+			fmt.Fprintf(os.Stderr, "specgen -check: %s is stale — it differs from what the generator produces now (committed %d bytes, generated %d).\nRun `GOWORK=off go run ./cmd/specgen` and commit the result.\n", outputFile, len(committed), len(out))
+			os.Exit(1)
+		}
+		fmt.Printf("specgen -check: %s is up to date (%d bytes)\n", outputFile, len(out))
+		return
+	}
 	if err := os.MkdirAll(filepath.Dir(outputFile), 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "specgen: mkdir %s: %v\n", filepath.Dir(outputFile), err)
 		os.Exit(1)
@@ -1137,18 +1228,37 @@ func buildOperationMap(op operationDef, p pathDef) map[string]interface{} {
 			}
 			respMap["x-fixture"] = fixtureMap
 		}
-		// If there are fixtures, add content with the first fixture's schema.
+		// Response content. Iterate the fixture names in sorted order, never in
+		// map order: a Go map has no first element, so `for … range … break`
+		// picked a different schema on different runs and the generated spec
+		// was not reproducible. Measured: 1 run in 6 emitted a different $ref
+		// for the same input, which makes -check unusable as a gate.
+		//
+		// An endpoint with more than one recorded fixture genuinely returns
+		// more than one shape (a populated body and its empty form), so both
+		// are emitted as a oneOf rather than one being picked and the other
+		// silently dropped.
 		if len(resp.fixtures) > 0 {
-			// Use the first fixture's schema for the response content.
-			for _, schemaName := range resp.fixtures {
-				respMap["content"] = map[string]interface{}{
-					"application/json": map[string]interface{}{
-						"schema": map[string]interface{}{
-							"$ref": "#/components/schemas/" + schemaName,
-						},
-					},
-				}
-				break
+			fnames := make([]string, 0, len(resp.fixtures))
+			for fname := range resp.fixtures {
+				fnames = append(fnames, fname)
+			}
+			sort.Strings(fnames)
+
+			refs := make([]interface{}, 0, len(fnames))
+			for _, fname := range fnames {
+				refs = append(refs, map[string]interface{}{
+					"$ref": "#/components/schemas/" + resp.fixtures[fname],
+				})
+			}
+			var schema map[string]interface{}
+			if len(refs) == 1 {
+				schema = refs[0].(map[string]interface{})
+			} else {
+				schema = map[string]interface{}{"oneOf": refs}
+			}
+			respMap["content"] = map[string]interface{}{
+				"application/json": map[string]interface{}{"schema": schema},
 			}
 		}
 		responses[fmt.Sprintf("%d", resp.statusCode)] = respMap

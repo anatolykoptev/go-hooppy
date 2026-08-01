@@ -1,7 +1,7 @@
-.PHONY: preflight build test lint fmt vet clean install py-test
+.PHONY: preflight build test lint fmt vet clean install py-test spec spec-check
 
-# preflight is the CI gate: gofmt + vet + build + test + python guard tests
-preflight: fmt-check vet build test py-test
+# preflight is the CI gate: gofmt + vet + build + test + python guard tests + spec drift
+preflight: fmt-check vet build test py-test spec-check
 
 build:
 	go build ./...
@@ -46,3 +46,17 @@ install: build
 # Part of preflight so the guard is exercised on every PR alongside the Go gate.
 py-test:
 	python3 scripts/test_issue_open_tasks.py
+
+# spec regenerates api/openapi-measured.yaml from the recorded fixtures.
+spec:
+	go run ./cmd/specgen
+
+# spec-check fails when the committed spec is not what the generator produces.
+# It is in preflight because the conformance test cannot catch this: that test
+# validates each fixture against its schema, so editing the hand-maintained
+# endpoint table and forgetting to regenerate leaves every fixture still valid
+# and the suite still green while the spec no longer describes the generator's
+# output. Verified by mutating the table and watching go test ./api/... stay ok
+# while this target fails.
+spec-check:
+	go run ./cmd/specgen -check
