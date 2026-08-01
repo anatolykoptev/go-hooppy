@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -1043,23 +1042,22 @@ func registerSearch(root *cobra.Command) {
 		os.Exit(runStopParsing(context.Background(), mustClient(), os.Stdout, os.Stderr))
 	}
 
-	// search copy
+	// search copy — DEPRECATED alias for `search import`. The historical
+	// `search copy` (PUT /posts/copy) created empty posts; the restored
+	// CopySearchPost library shim now delegates to resolve+publish (the same
+	// path import uses), so this alias does the same. A one-line deprecation
+	// note prints to stderr (never stdout — stdout is data). Use `search
+	// import` for the non-deprecated name.
 	copyCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
 		Name:  "copy",
-		Short: "Copy a scraped post to your own pages (auto-fills text + photos from the scraped post)",
+		Short: "Deprecated: copy a scraped post to your pages (use 'search import' instead)",
 	})
 	copyCmd.Args = cobra.NoArgs
 	var copyPostID int
-	var copyPages string
+	var copyPages, copySchedules string
 	var copyWhenType, copyHowType int
-	var copySchedules string
 	var copyDate, copyHours, copyMinutes string
-	// copy does NOT offer --post-ids: PUT /posts/copy takes a singular
-	// search_post_id int, and the batch slice is silently dropped on that
-	// endpoint (the server does not read search_post_ids — probed: a batch
-	// payload reaches the wire with search_post_id:0 and an unread array,
-	// no error). Use `search rewrite` or `search import` for a batch.
-	copyCmd.Flags().IntVar(&copyPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED). copy is single-post only — for a batch use 'search rewrite --post-ids' or 'search import --post-ids' (PUT /posts/copy takes one search_post_id).")
+	copyCmd.Flags().IntVar(&copyPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED). copy is single-post only — for a batch use 'search import --post-ids'.")
 	copyCmd.Flags().StringVar(&copyPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
 	copyCmd.Flags().IntVar(&copyWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule (default 3 — a published post cannot be un-published from the queue; pass --when-type 1 explicitly to publish now)")
 	copyCmd.Flags().IntVar(&copyHowType, "how-type", 1, "publication how type (1=default)")
@@ -1084,8 +1082,8 @@ func registerSearch(root *cobra.Command) {
 	var rwDate, rwHours, rwMinutes string
 	var rwNoAttachments bool
 	rewriteCmd.Flags().IntVar(&rwPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
-	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Schedule slots are reported in publication order (the queue's own order), not the order given on the command line. Per-post attachment download is skipped in batch mode — use --post-id for attachment preservation. Batch rewrite CANNOT override text (the payload shape cannot express per-post text), so --text is rejected with --post-ids; --post-ids alone keeps each post's original text (like 'search import --post-ids').")
-	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (required for --post-id; NOT allowed with --post-ids — batch rewrite cannot express per-post text; omit --text with --post-ids to keep each post's original text)")
+	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Each post is resolved and published independently (client-side loop) — attachments are preserved per post from the resolve step. Batch rewrite keeps each post's original text (the --text flag is rejected with --post-ids); use --post-id for a single-post text override.")
+	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (required for --post-id; NOT allowed with --post-ids — batch keeps each post's original text)")
 	rewriteCmd.Flags().StringVar(&rwPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
 	rewriteCmd.Flags().IntVar(&rwWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule (default 3 — a published post cannot be un-published from the queue; pass --when-type 1 explicitly to publish now)")
 	rewriteCmd.Flags().IntVar(&rwHowType, "how-type", 1, "publication how type (1=default)")
@@ -1093,17 +1091,16 @@ func registerSearch(root *cobra.Command) {
 	rewriteCmd.Flags().StringVar(&rwDate, "date", "", "publication date dd.mm.yyyy (for when-type 2)")
 	rewriteCmd.Flags().StringVar(&rwHours, "hours", "", "publication hours HH (for when-type 2)")
 	rewriteCmd.Flags().StringVar(&rwMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
-	rewriteCmd.Flags().BoolVar(&rwNoAttachments, "no-attachments", false, "strip all attachments (photos, links, etc.) from the scraped post")
+	rewriteCmd.Flags().BoolVar(&rwNoAttachments, "no-attachments", false, "strip all attachments (photos, videos, links, etc.) — publish text only")
 	rewriteCmd.Run = func(_ *cobra.Command, _ []string) {
 		os.Exit(runRewriteSearchPost(context.Background(), mustClient(), os.Stdout, os.Stderr, rwPostID, rwPostIDs, rwText, rwWhenType, rwHowType, rwPages, rwSchedules, rwDate, rwHours, rwMinutes, rwNoAttachments))
 	}
 
-	// search import — copy one or more scraped posts via PUT /posts/import with full text + attachments.
+	// search import — copy one or more scraped posts with full text + attachments.
 	//
-	// import copies the source post's text VERBATIM (batch: the server
-	// auto-copies; single: the CLI fills from the edit endpoint). The caller
-	// is expected to rewrite the text for the target networks — import does
-	// not rewrite. Two hygiene checks always run and warn to stderr:
+	// import copies the source post's text VERBATIM. The caller is expected to
+	// rewrite the text for the target networks — import does not rewrite. Two
+	// hygiene checks always run and warn to stderr:
 	//   - VK wiki-link markup ([url|text]) — renders as a hyperlink only on
 	//     VK; a schedule targeting other networks publishes literal brackets.
 	//   - Russian advertising disclosures (Erid, Реклама., ИНН) — identify a
@@ -1111,12 +1108,10 @@ func registerSearch(root *cobra.Command) {
 	//     republishing them asserts we are party to a contract we are not.
 	// Advertising markers are NEVER auto-removed: a disclosure that genuinely
 	// IS our advertising must stay, and the tool cannot tell the two apart.
-	// --strip-vk-markup converts [url|text] to text (opt-in: it routes each
-	// post through its own import request — N import calls instead of 1 batch
-	// call — so a flag that changes the cost profile must be asked for).
+	// --strip-vk-markup converts [url|text] to text (opt-in).
 	importCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
 		Name:  "import",
-		Short: "Copy a scraped post with full text + photos/videos via PUT /posts/import (server downloads photos async)",
+		Short: "Copy a scraped post with full text + photos/videos (resolves via edit endpoint, publishes via POST /posts)",
 	})
 	importCmd.Args = cobra.NoArgs
 	var impPostID int
@@ -1125,12 +1120,12 @@ func registerSearch(root *cobra.Command) {
 	var impWhenType, impHowType int
 	var impNoAttachments, impStripVK bool
 	importCmd.Flags().IntVar(&impPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
-	importCmd.Flags().StringVar(&impPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Schedule slots are reported in publication order (the queue's own order), not the order given on the command line. Batch import keeps each post's ORIGINAL text (no per-post text override) and strips attachments — the server downloads photos async from the ids it receives. Use --post-id for a single post to pull its text/attachments from the edit endpoint.")
+	importCmd.Flags().StringVar(&impPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Each post is resolved and published independently (client-side loop) — text and attachments are preserved per post from the resolve step. Schedule slots are reported in publication order (the queue's own order), not the order given on the command line.")
 	importCmd.Flags().IntVar(&impWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule")
 	importCmd.Flags().IntVar(&impHowType, "how-type", 2, "publication how type (2=by schedule pages)")
 	importCmd.Flags().StringVar(&impSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
 	importCmd.Flags().BoolVar(&impNoAttachments, "no-attachments", false, "strip all attachments (photos, videos, links, etc.)")
-	importCmd.Flags().BoolVar(&impStripVK, "strip-vk-markup", false, "convert VK wiki-link markup [url|text] to text (opt-in). On a batch this routes each post through its own import request (N import calls instead of 1 batch call) — the cost-profile change is why the flag is opt-in. On a batch the stdout JSON shape also changes: instead of a single PostIDResponse, it emits {\"strip_vk_markup\":true,\"per_post\":[{search_post_id,status(\"created\"|\"failed\"),post_id?,error?}]} listing every post attempted, so a partial failure (this path is NOT atomic) leaves a record of what already landed. Advertising disclosures (Erid/Реклама./ИНН) are NEVER auto-removed: a disclosure that genuinely is our advertising must stay, and the tool cannot tell the two apart.")
+	importCmd.Flags().BoolVar(&impStripVK, "strip-vk-markup", false, "convert VK wiki-link markup [url|text] to text (opt-in). Advertising disclosures (Erid/Реклама./ИНН) are NEVER auto-removed: a disclosure that genuinely is our advertising must stay, and the tool cannot tell the two apart.")
 	importCmd.Run = func(_ *cobra.Command, _ []string) {
 		os.Exit(runImport(context.Background(), mustClient(), os.Stdout, os.Stderr, importArgs{
 			postID:        impPostID,
@@ -1198,13 +1193,11 @@ func errSchedulesWithoutWhenType3(whenType int, flagName string) error {
 }
 
 // buildCopyPayload validates search copy flags and builds the payload. copy
-// does NOT support --post-ids: PUT /posts/copy takes a singular
-// search_post_id int, and the batch slice is silently dropped on that
-// endpoint (the server does not read search_post_ids). Use `search rewrite`
-// or `search import` for a batch.
+// is single-post only (the restored CopySearchPost shim refuses SearchPostIDs);
+// use `search import` or `search rewrite` for a batch.
 func buildCopyPayload(postID, whenType, howType int, pages, schedules, date, hours, minutes string) (hooppy.CopySearchPostPayload, error) {
 	if postID == 0 {
-		return hooppy.CopySearchPostPayload{}, errors.New("--post-id is required (see 'hooppy search posts'); copy does not support --post-ids — use 'search rewrite' or 'search import' for a batch (PUT /posts/copy takes a single search_post_id)")
+		return hooppy.CopySearchPostPayload{}, errors.New("--post-id is required (see 'hooppy search posts'); copy does not support --post-ids — use 'search import' or 'search rewrite' for a batch")
 	}
 	if whenType == 2 && (date == "" || hours == "" || minutes == "") {
 		return hooppy.CopySearchPostPayload{}, errors.New("--date, --hours, --minutes are required for --when-type 2")
@@ -1249,23 +1242,17 @@ func buildCopyPayload(postID, whenType, howType int, pages, schedules, date, hou
 	return payload, nil
 }
 
-// buildRewritePayload validates search rewrite flags and builds the payload
-// (without attachments — the per-post photo download is a network step the
-// Run closure performs for the single-post form). --post-id and --post-ids
-// are mutually exclusive.
+// buildRewritePayload validates search rewrite flags and builds the payload.
+// --post-id and --post-ids are mutually exclusive. RewriteSearchPost resolves
+// each post via ResolveSearchPost (which fetches text + attachments) and
+// publishes via PublishPost; the payload's Texts field is the only field
+// RewriteSearchPost reads beyond the IDs and publication target.
 //
-// Text handling is form-dependent (finding 4): rewrite exists to OVERRIDE
-// text, but the payload shape (a single texts array alongside N ids) cannot
-// express per-post text — one text for N posts is either a broadcast or a
-// positional pairing that blanks posts 2..N, neither of which is what a
-// batch rewrite caller means. So:
-//   - SINGLE-post (--post-id): --text is REQUIRED (the override).
-//   - BATCH (--post-ids): --text is NOT allowed — the combination errors
-//     naming the reason. --post-ids alone behaves like batch import: no
-//     text override, so the server keeps each post's original text (an empty
-//     non-nil Texts slice is sent, matching buildImportPayload's batch form).
-//     A per-post text override for a batch is not expressible through this
-//     payload shape; callers who need it must issue one rewrite per post.
+// Text handling:
+//   - SINGLE-post (--post-id): --text is REQUIRED (the override). The resolved
+//     text is replaced with this text before publishing.
+//   - BATCH (--post-ids): --text is NOT allowed — each post keeps its own
+//     resolved text (per-post, the whole point of the client-side loop).
 func buildRewritePayload(postID int, postIDs, text string, whenType, howType int, pages, schedules, date, hours, minutes string) (hooppy.CopySearchPostPayload, error) {
 	if postID != 0 && postIDs != "" {
 		return hooppy.CopySearchPostPayload{}, errors.New("--post-id and --post-ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
@@ -1318,12 +1305,8 @@ func buildRewritePayload(postID int, postIDs, text string, whenType, howType int
 	}
 	if batch {
 		payload.SearchPostIDs = idList
-		// Empty (non-nil) slice: RewriteSearchPost only replaces a nil slice,
-		// so this passes through as `[]` on the wire and the server keeps each
-		// post's original text (same shape as batch import). NOT
-		// []PostText{{Text: ""}} — that sends an explicit empty-text entry
-		// which risks publishing blank across the whole batch.
-		payload.Texts = []hooppy.PostText{}
+		// Batch: Texts is empty — RewriteSearchPost ignores it and each post
+		// keeps its own resolved text (per-post, from the resolve step).
 	} else {
 		payload.SearchPostID = postID
 		payload.Texts = []hooppy.PostText{{Text: text, SourceID: 0}}
@@ -1340,13 +1323,11 @@ func buildRewritePayload(postID int, postIDs, text string, whenType, howType int
 	return payload, nil
 }
 
-// buildImportPayload validates search import flags and builds the base
-// payload. In batch mode (--post-ids) Texts is an empty (non-nil) slice so
-// ImportSearchPost's nil-normalisation leaves it as-is and the server keeps
-// each post's original text — sending an explicit empty-text entry
-// ([]PostText{{Text: ""}}) risks the server publishing blank across the whole
-// batch. In single-post mode Texts is left nil for the Run closure to fill
-// from GetSearchPostEdit.
+// buildImportPayload validates search import flags and builds the payload.
+// ImportSearchPost resolves each post via ResolveSearchPost (which fetches
+// text + attachments) and publishes via PublishPost; the payload's Texts and
+// Attachments fields are ignored by ImportSearchPost (the resolve step fills
+// them). Only the IDs and publication target are read.
 func buildImportPayload(postID int, postIDs string, whenType, howType int, schedules string) (hooppy.CopySearchPostPayload, error) {
 	if postID != 0 && postIDs != "" {
 		return hooppy.CopySearchPostPayload{}, errors.New("--post-id and --post-ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
@@ -1382,34 +1363,10 @@ func buildImportPayload(postID int, postIDs string, whenType, howType int, sched
 	}
 	if postIDs != "" {
 		payload.SearchPostIDs = idList
-		// Empty (non-nil) slice: ImportSearchPost only replaces a nil slice,
-		// so this passes through as `[]` on the wire and the server keeps
-		// each post's original text. NOT []PostText{{Text: ""}} — that sends
-		// an explicit empty-text entry which risks publishing blank.
-		payload.Texts = []hooppy.PostText{}
 	} else {
 		payload.SearchPostID = postID
-		// Texts left nil; Run fills from GetSearchPostEdit.
 	}
 	return payload, nil
-}
-
-func downloadPhoto(url, dest string) error {
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	out, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, resp.Body)
-	return err
 }
 
 // --- doctor ---

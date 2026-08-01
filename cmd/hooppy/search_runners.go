@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/anatolykoptev/go-hooppy"
 )
@@ -88,6 +88,11 @@ type stopParsingOutput struct {
 // server when the guard fires, not merely a non-zero exit (a command that
 // published and then errored would pass an exit-only check).
 func runCopySearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, postID, whenType, howType int, pages, schedules, date, hours, minutes string) int {
+	// The deprecation notice goes to stderr (stdout is data) before the
+	// runner does the work. Emitted from the runner (not the cobra Run
+	// closure) so a runner test can observe it — everything else moved
+	// into the runner for the same testability reason.
+	fmt.Fprintln(errOut, "warn: 'search copy' is deprecated and now behaves like 'search import' (resolve+publish); use 'search import' instead.")
 	payload, err := buildCopyPayload(postID, whenType, howType, pages, schedules, date, hours, minutes)
 	if err != nil {
 		fmt.Fprintf(errOut, "error: %v\n", err)
@@ -95,6 +100,9 @@ func runCopySearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Wri
 	}
 	resp, err := c.CopySearchPost(ctx, payload)
 	if err != nil {
+		if code, handled := reportCreateNoID(err, out, errOut, postID); handled {
+			return code
+		}
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return 1
 	}
@@ -107,73 +115,53 @@ func runCopySearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Wri
 	return 0
 }
 
-// runRewriteSearchPost implements `search rewrite`. Extracted from the inline
-// Run closure for the same reason as runCopySearchPost: the schedules-dropped
-// guard (issue #111) is falsified at the command level with a stub server
-// asserting NO request reached the server when the guard fires. The per-post
-// attachment download block is preserved verbatim from the prior inline form.
+// runRewriteSearchPost implements `search rewrite`. The runner shape (writers
+// as parameters, an int exit code) comes from the guard work on main: the
+// schedules-dropped guard (issue #111) is falsified at the command level with
+// a stub server asserting NO request reached the server when the guard fires.
+//
+// The BODY is this branch's shape, not main's. main's runner downloaded each
+// photo from GET /posts-search/{id}/edit and re-uploaded it before publishing;
+// after the collapse onto resolve+publish that work lives in the library
+// (ResolveSearchPost maps the edit endpoint's read-shape attachments to the
+// write shape), so re-applying it here would re-upload every attachment twice.
+// The partial-batch contract is likewise this branch's: a *PartialPostError
+// carries a populated result, which goes to stdout before exit 2 so a caller
+// can skip the already-published ids on a re-run (same dedup-via-stdout design
+// as runImport).
+//
+// Exit codes (repo convention): 0=complete, 1=error, 2=partial.
 func runRewriteSearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, postID int, postIDs, text string, whenType, howType int, pages, schedules, date, hours, minutes string, noAttachments bool) int {
 	payload, err := buildRewritePayload(postID, postIDs, text, whenType, howType, pages, schedules, date, hours, minutes)
 	if err != nil {
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return 1
 	}
-	batch := postIDs != ""
-	// Per-post attachment download only applies to the single-post form:
-	// it fetches GetSearchPostEdit for --post-id and re-uploads photos.
-	// A batch (--post-ids) spans multiple scraped posts, so there is no
-	// single edit to fetch — skip the block (equivalent to --no-attachments).
-	if !noAttachments && !batch {
-		// By default, preserve ALL attachments from the scraped post:
-		// - Photos: download from edit endpoint URLs → re-upload via UploadMedia
-		//   (server doesn't download automatically; MediaItem must have id/name/folder/file_path)
-		// - Other attachments (copyright, link, poll, etc.): pass through as-is
-		edit, err := c.GetSearchPostEdit(ctx, postID)
-		if err != nil {
-			fmt.Fprintf(errOut, "error: %v\n", err)
-			return 1
-		}
-		var mediaItems []interface{}
-		var attachments []hooppy.Attachment
-		for i, att := range edit.Attachments {
-			if att.Type != "photo" && att.Type != "video" {
-				// Non-photo attachment — pass through as-is
-				attachments = append(attachments, att)
-				continue
-			}
-			// Extract URL from the attachment data
-			data, ok := att.Data.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			photoURL, _ := data["url"].(string)
-			if photoURL == "" {
-				continue
-			}
-			// Download photo
-			tmpPath := fmt.Sprintf("/tmp/hooppy_photo_%d_%d.jpg", postID, i)
-			if err := downloadPhoto(photoURL, tmpPath); err != nil {
-				fmt.Fprintf(errOut, "error: download photo %d: %v\n", i, err)
-				return 1
-			}
-			// Upload with generated file_id (server uses it as id + name)
-			media, err := c.UploadMedia(ctx, tmpPath, "")
-			if err != nil {
-				fmt.Fprintf(errOut, "error: %v\n", err)
-				return 1
-			}
-			mediaItems = append(mediaItems, media.Photo)
-			os.Remove(tmpPath)
-		}
-		if len(mediaItems) > 0 {
-			attachments = append([]hooppy.Attachment{{Type: "photos", Data: mediaItems}}, attachments...)
-		}
-		if len(attachments) > 0 {
-			payload.Attachments = attachments
-		}
-	}
+	payload.NoAttachments = noAttachments
 	resp, err := c.RewriteSearchPost(ctx, payload)
 	if err != nil {
+		var ppe *hooppy.PartialPostError
+		if errors.As(err, &ppe) {
+			// Partial batch: print the populated result (what landed) to
+			// stdout, the error to stderr, exit 2 (partial). The stdout
+			// record IS the operator's record of what landed — a silent
+			// encode failure here produces exit 2 with no record, the
+			// exact outcome this branch exists to prevent. So check the
+			// encode and fall back to exit 1 (error) when the record
+			// could not be written, matching the success branch's
+			// handling of the same failure.
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(resp); err != nil {
+				fmt.Fprintf(errOut, "error encoding output: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(errOut, "error: %v\n", err)
+			return 2
+		}
+		if code, handled := reportCreateNoID(err, out, errOut, postID); handled {
+			return code
+		}
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return 1
 	}
@@ -184,4 +172,35 @@ func runRewriteSearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.
 		return 1
 	}
 	return 0
+}
+
+// reportCreateNoID gives the single-post runners the same answer runImport
+// already gives: a create the server accepted while omitting the id is a
+// SUCCESS with an unaddressable handle, not a failure.
+//
+// Without it the three commands disagreed on one server behaviour — the same
+// input made `search import --post-id` exit 0 with a created_no_id record on
+// stdout while `search rewrite --post-id` exited 1 with an empty stdout, and a
+// comment in posts_search.go asserted they agreed. Exit 1 with no record is
+// the worse of the two: it reads as "nothing happened" and invites a re-run
+// that publishes the post a second time.
+//
+// Returns (exit code, true) when it handled the error, (0, false) otherwise.
+func reportCreateNoID(err error, out, errOut io.Writer, searchPostID int) (int, bool) {
+	var cnid *hooppy.CreateNoIDError
+	if !errors.As(err, &cnid) {
+		return 0, false
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if encErr := enc.Encode(map[string]interface{}{
+		"id":             0,
+		"status":         "created_no_id",
+		"search_post_id": searchPostID,
+	}); encErr != nil {
+		fmt.Fprintf(errOut, "error encoding output: %v\n", encErr)
+		return 1, true
+	}
+	fmt.Fprintf(errOut, "warn: the post was accepted but the server returned no id — it probably exists and cannot be addressed from this response; reconcile before re-running (%v)\n", err)
+	return 0, true
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,32 @@ func newStubClient(t *testing.T, srv *httptest.Server) *hooppy.Client {
 		t.Fatalf("NewClient: %v", err)
 	}
 	return c
+}
+
+// searchStub answers the resolve+publish pair the collapsed copy family walks:
+// GET /posts-search/{id}/edit?as_copy=1 (the resolve) and POST /posts (the
+// publish). main's versions of the three "queued OK" pair tests below stubbed
+// PUT /posts/copy and PUT /posts/import, the endpoints this branch collapsed
+// away; the ASSERTION they carry (with when_type 3 the schedules reach the
+// wire, so the guard is not a refuse-everything guard) is preserved verbatim,
+// only the wire it watches moved. GET /posts answers the slot-recovery
+// snapshot fillScheduleSlots takes when when_type=3.
+func searchStub(postBody *map[string]interface{}, sawPost *atomic.Bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Write([]byte(`{"id":"2001","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"original","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, postBody)
+			sawPost.Store(true)
+			w.Write([]byte(`{"id":5001}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/posts":
+			w.Write([]byte(`{"data":[],"meta":{"current_page":1,"last_page":1,"per_page":20,"total":0}}`))
+		default:
+			w.Write([]byte(`{"id":5001}`))
+		}
+	}
 }
 
 // F1 — `search stop` against a stub whose DELETE returns 2xx but where the
@@ -217,19 +244,11 @@ func TestRunRewriteSearchPost_SchedulesDropped_NoRequest_F3(t *testing.T) {
 func TestRunRewriteSearchPost_SchedulesQueued_OK(t *testing.T) {
 	var postBody map[string]interface{}
 	var sawPost atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/posts" {
-			body, _ := io.ReadAll(r.Body)
-			_ = json.Unmarshal(body, &postBody)
-			sawPost.Store(true)
-		}
-		w.Write([]byte(`{"id":5001}`))
-	}))
+	srv := httptest.NewServer(searchStub(&postBody, &sawPost))
 	defer srv.Close()
 
 	var out, errOut bytes.Buffer
-	// Batch (--post-ids) so the only request is the single RewriteSearchPost
-	// call (no per-post attachment download path). when-type 3 + schedules.
+	// Batch (--post-ids) with when-type 3 + schedules.
 	code := runRewriteSearchPost(context.Background(), newStubClient(t, srv), &out, &errOut,
 		0, "2001", "" /*text*/, 3, 1, "", "10,11", "", "", "", false)
 	if code != 0 {
@@ -276,21 +295,14 @@ func TestRunCopySearchPost_SchedulesDropped_NoRequest_F4(t *testing.T) {
 
 // TestRunCopySearchPost_SchedulesQueued_OK is the pair to F4: when --schedules
 // is given with the (new) default when-type 3, the schedules ARE sent on the
-// PUT body and the request reaches the server. This stops F4 from being
-// satisfied by a guard that refuses all schedules. (A when-type-3 copy also
-// issues a before-snapshot and a slot-lookup GET around the PUT, so the
-// assertion is on the PUT body's schedules_ids, not a total request count.)
+// publish body and the request reaches the server. This stops F4 from being
+// satisfied by a guard that refuses all schedules. `search copy` is a
+// deprecated shim delegating to resolve+publish, so the wire watched here is
+// POST /posts (main watched PUT /posts/copy, the endpoint that no longer runs).
 func TestRunCopySearchPost_SchedulesQueued_OK(t *testing.T) {
-	var putBody map[string]interface{}
-	var sawPut atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut && r.URL.Path == "/posts/copy" {
-			body, _ := io.ReadAll(r.Body)
-			_ = json.Unmarshal(body, &putBody)
-			sawPut.Store(true)
-		}
-		w.Write([]byte(`{"id":5001}`))
-	}))
+	var postBody map[string]interface{}
+	var sawPost atomic.Bool
+	srv := httptest.NewServer(searchStub(&postBody, &sawPost))
 	defer srv.Close()
 
 	var out, errOut bytes.Buffer
@@ -299,12 +311,12 @@ func TestRunCopySearchPost_SchedulesQueued_OK(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 — schedules with when-type 3 should queue and succeed:\nstderr: %s", code, errOut.String())
 	}
-	if !sawPut.Load() {
-		t.Fatalf("no PUT /posts/copy reached the server — the request must be issued when schedules pair with when-type 3")
+	if !sawPost.Load() {
+		t.Fatalf("no POST /posts reached the server — the request must be issued when schedules pair with when-type 3")
 	}
-	sched, _ := putBody["schedules_ids"].([]interface{})
+	sched, _ := postBody["schedules_ids"].([]interface{})
 	if len(sched) != 2 {
-		t.Errorf("schedules_ids on the PUT wire = %v, want [10 11] — the schedules must be sent when when-type is 3", putBody["schedules_ids"])
+		t.Errorf("schedules_ids on the publish wire = %v, want [10 11] — the schedules must be sent when when-type is 3", postBody["schedules_ids"])
 	}
 }
 
@@ -346,18 +358,12 @@ func TestRunImport_SchedulesDropped_NoRequest_F6(t *testing.T) {
 
 // TestRunImport_SchedulesQueued_OK is the pair to F6: with when-type 3 the
 // schedules ARE sent and the request reaches the server. Without this, F6 is
-// satisfied by a guard that refuses every schedule.
+// satisfied by a guard that refuses every schedule. import publishes via
+// POST /posts (resolve+publish), not the PUT /posts/import main watched.
 func TestRunImport_SchedulesQueued_OK(t *testing.T) {
-	var putBody map[string]interface{}
-	var sawPut atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut && r.URL.Path == "/posts/import" {
-			body, _ := io.ReadAll(r.Body)
-			_ = json.Unmarshal(body, &putBody)
-			sawPut.Store(true)
-		}
-		w.Write([]byte(`{"id":5001}`))
-	}))
+	var postBody map[string]interface{}
+	var sawPost atomic.Bool
+	srv := httptest.NewServer(searchStub(&postBody, &sawPost))
 	defer srv.Close()
 
 	var out, errOut bytes.Buffer
@@ -366,11 +372,176 @@ func TestRunImport_SchedulesQueued_OK(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 — schedules with when-type 3 should queue and succeed:\nstderr: %s", code, errOut.String())
 	}
-	if !sawPut.Load() {
-		t.Fatalf("no PUT /posts/import reached the server — the request must be issued when schedules pair with when-type 3")
+	if !sawPost.Load() {
+		t.Fatalf("no POST /posts reached the server — the request must be issued when schedules pair with when-type 3")
 	}
-	sched, _ := putBody["schedules_ids"].([]interface{})
+	sched, _ := postBody["schedules_ids"].([]interface{})
 	if len(sched) != 2 {
-		t.Errorf("schedules_ids on the PUT wire = %v, want [10 11] — the schedules must be sent when when-type is 3", putBody["schedules_ids"])
+		t.Errorf("schedules_ids on the publish wire = %v, want [10 11] — the schedules must be sent when when-type is 3", postBody["schedules_ids"])
+	}
+}
+
+// F22 (CLI level) — a batch where every post returns 2xx with no id exits 0
+// via the rewrite runner, matching runImport's created_no_id → exit 0. The
+// library half (resolvePublishBatch returns (resp, nil) for all-created-no-id)
+// is tested in posts_search_test.go; this test pins the CLI exit code so the
+// two surfaces agree (MAJOR 1: the library and runImport must agree).
+//
+// RED-on-revert: revert the createdNoID third-bucket in resolvePublishBatch →
+// the batch returns a plain error → runRewriteSearchPost hits the non-partial
+// error branch → exit 1 (not 0) → this assertion fails.
+func TestF22_RunRewriteSearchPost_BatchAllCreatedNoID_Exit0(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Write([]byte(`{"id":"x","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			w.Write([]byte(`{}`)) // 2xx, no id — CreateNoIDError
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	code := runRewriteSearchPost(context.Background(), newStubClient(t, srv), &out, &errOut,
+		0, "11,22", "" /*text*/, 1, 1, "1", "", "", "", "", false)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 — a batch of all-created-no-id must exit 0 (matching runImport's created_no_id → exit 0), not %d; the creates succeeded, the server omitted the ids (MAJOR 1)\nstderr: %s", code, code, errOut.String())
+	}
+	// The old wording "no posts were published" must NOT appear — the posts
+	// may exist on the server (CreateNoIDError: "The post may exist on the
+	// server").
+	if strings.Contains(errOut.String(), "no posts were published") {
+		t.Fatalf("stderr contains the old false wording \"no posts were published\" — a created-no-id batch must NOT be reported as a failure (the posts may exist on the server):\n%s", errOut.String())
+	}
+}
+
+// TestRunCopySearchPost_DeprecationWarning verifies the deprecation notice is
+// emitted from the runner (not the cobra Run closure), so a runner test can
+// observe it. The warning was in the cobra closure (cmd/hooppy/main.go:1073);
+// neither runner test could see it. Moving it into the runner makes it
+// observable and keeps it co-located with the work it describes.
+func TestRunCopySearchPost_DeprecationWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Write([]byte(`{"id":"2001","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			w.Write([]byte(`{"id":5001}`))
+		default:
+			w.Write([]byte(`{"id":5001}`))
+		}
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	code := runCopySearchPost(context.Background(), newStubClient(t, srv), &out, &errOut,
+		1001, 1, 1, "1", "", "", "", "")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0:\nstderr: %s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "deprecated") {
+		t.Fatalf("stderr does not contain the deprecation warning — it must be emitted from the runner so a test can observe it; got:\n%s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "search import") {
+		t.Errorf("deprecation warning should name the replacement ('search import'), got:\n%s", errOut.String())
+	}
+}
+
+// TestRunRewriteSearchPost_PartialEncodeError_HandlesIt verifies the partial
+// branch checks enc.Encode and returns 1 on failure (not 2 with no record).
+// The partial branch's stdout IS the operator's record of what landed; a
+// silent encode failure there produces exit 2 with no record — the exact
+// outcome the branch exists to prevent. The success branch already checks the
+// same encode; the partial branch was the asymmetry.
+//
+// RED-on-revert: revert the partial branch to `_ = enc.Encode(resp)` → the
+// encode failure is swallowed → exit 2 (not 1) → this assertion fails.
+func TestRunRewriteSearchPost_PartialEncodeError_HandlesIt(t *testing.T) {
+	var postCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Write([]byte(`{"id":"x","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			n := atomic.AddInt32(&postCount, 1)
+			if n == 2 {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"message":"boom"}`))
+				return
+			}
+			w.Write([]byte(`{"id":90001}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	// failingWriter always returns an error on Write, so enc.Encode fails.
+	var errOut bytes.Buffer
+	code := runRewriteSearchPost(context.Background(), newStubClient(t, srv), &failingWriter{}, &errOut,
+		0, "11,22", "" /*text*/, 1, 1, "1", "", "", "", "", false)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 — a partial batch whose stdout encode fails must exit 1 (the operator's record could not be written), not 2 (partial with no record — the outcome the branch exists to prevent); stderr: %s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "error encoding output") {
+		t.Errorf("stderr should name the encode failure, got:\n%s", errOut.String())
+	}
+}
+
+// failingWriter is an io.Writer that always returns an error, used to test
+// that the runner handles an encode failure on the partial path.
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) { return 0, errors.New("write failed") }
+
+// F24 — a create the server accepts while omitting the id must produce the
+// SAME answer from every single-post command. Before this, identical input
+// gave `search import --post-id` exit 0 with a created_no_id record and
+// `search rewrite --post-id` exit 1 with an empty stdout, while a comment in
+// posts_search.go asserted they agreed.
+//
+// Exit 1 with no record is the worse half: it reads as "nothing happened" and
+// invites a re-run that publishes the post a second time.
+//
+// RED-on-revert: drop the reportCreateNoID call from either runner and that
+// runner returns 1 with no stdout record.
+func TestSinglePostCommands_AgreeOnCreateNoID_F24(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/posts" {
+			w.Write([]byte(`{}`)) // 2xx, no id — the create succeeded, the handle is missing
+			return
+		}
+		w.Write([]byte(`{"id":"7001","texts":[{"text":"t"}],"attachments":[]}`))
+	}))
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name string
+		run  func(out, errOut *bytes.Buffer) int
+	}{
+		{"rewrite", func(out, errOut *bytes.Buffer) int {
+			return runRewriteSearchPost(context.Background(), newStubClient(t, srv), out, errOut,
+				7001, "", "new text", 1, 1, "123", "", "", "", "", false)
+		}},
+		{"copy", func(out, errOut *bytes.Buffer) int {
+			return runCopySearchPost(context.Background(), newStubClient(t, srv), out, errOut,
+				7001, 1, 1, "123", "", "", "", "")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			code := tc.run(&out, &errOut)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 — a create the server accepted is a success with an unaddressable handle, not a failure; exit 1 with no record reads as 'nothing happened' and invites a duplicating re-run.\nstderr: %s", code, errOut.String())
+			}
+			if !strings.Contains(out.String(), "created_no_id") {
+				t.Errorf("stdout must carry the created_no_id record so the operator knows a post probably exists, got:\n%s", out.String())
+			}
+			if !strings.Contains(errOut.String(), "no id") {
+				t.Errorf("stderr should warn that the post cannot be addressed, got:\n%s", errOut.String())
+			}
+		})
 	}
 }

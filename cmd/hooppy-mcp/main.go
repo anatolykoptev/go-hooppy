@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -75,8 +76,9 @@ func registerTools(server *mcp.Server) {
 	registerGetParsingForm(server)
 	registerStartParsing(server)
 	registerStopParsing(server)
-	registerCopySearchPost(server)
 	registerRewriteSearchPost(server)
+	registerImportSearchPost(server)
+	registerCopySearchPost(server)
 }
 
 // --- helpers ---
@@ -1724,10 +1726,10 @@ func stopParsingResult(res *hooppy.StopParsingResult) (*mcp.CallToolResult, erro
 	})
 }
 
-// --- copy_search_post ---
+// --- copy_search_post (DEPRECATED) ---
 
 type copySearchPostInput struct {
-	SearchPostID        int    `json:"search_post_id" jsonschema:"ID of the scraped post (from list_search_posts). REQUIRED."`
+	SearchPostID        int    `json:"search_post_id" jsonschema:"ID of the scraped post (from list_search_posts). REQUIRED. Deprecated: use import_search_post instead."`
 	PublicationWhenType int    `json:"publication_when_type" jsonschema:"1=publish now, 2=at specific time, 3=by schedule."`
 	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default)."`
 	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
@@ -1791,7 +1793,7 @@ func registerCopySearchPost(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_copy_search_post",
-			Description: "Copy a scraped post (from list_search_posts) to your own pages. The server auto-fills text and photos from the scraped post — just provide the scraped post ID and where to publish. UNDOCUMENTED endpoint.",
+			Description: "Deprecated: copy a scraped post (from list_search_posts) to your own pages. Now delegates to resolve+publish (the same path import_search_post uses), preserving text + attachments. Use import_search_post instead. UNDOCUMENTED endpoint.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in copySearchPostInput) (*mcp.CallToolResult, error) {
 			payload, err := buildCopySearchPostPayload(in)
@@ -1804,6 +1806,124 @@ func registerCopySearchPost(server *mcp.Server) {
 			}
 			resp, err := c.CopySearchPost(ctx, payload)
 			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(resp)
+		},
+	)
+}
+
+// --- import_search_post ---
+
+type importSearchPostInput struct {
+	SearchPostID        int    `json:"search_post_id,omitempty" jsonschema:"ID of a single scraped post (from list_search_posts). Mutually exclusive with search_post_ids; pass exactly one."`
+	SearchPostIDs       string `json:"search_post_ids,omitempty" jsonschema:"Comma-separated IDs of scraped posts (from list_search_posts) for a batch import. Mutually exclusive with search_post_id; pass exactly one. Each post is resolved and published independently — text and attachments are preserved per post."`
+	PublicationWhenType int    `json:"publication_when_type" jsonschema:"1=publish now, 2=at specific time, 3=by schedule."`
+	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default, 2=by schedule pages)."`
+	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
+	SchedulesIDs        string `json:"schedules_ids,omitempty" jsonschema:"Comma-separated schedule IDs (for when_type 3). Use list_schedules to get IDs."`
+	PublishDate         string `json:"publish_date,omitempty" jsonschema:"Publication date dd.mm.yyyy (for when_type 2)."`
+	PublishHours        string `json:"publish_hours,omitempty" jsonschema:"Publication hours HH (for when_type 2)."`
+	PublishMinutes      string `json:"publish_minutes,omitempty" jsonschema:"Publication minutes MM (for when_type 2)."`
+	NoAttachments       bool   `json:"no_attachments,omitempty" jsonschema:"Strip all attachments (photos, videos, links) — publish text only."`
+}
+
+// buildImportSearchPostPayload validates an importSearchPostInput and builds
+// the payload — the testable analogue of the CLI buildImportPayload. Extracted
+// from the inline handler so the schedules/when-type contradiction guard
+// (issue #111) and the when-type range guard are reachable from a test: the
+// prior inline form carried NEITHER guard, so schedules_ids with
+// publication_when_type=1 was silently dropped (the post published to pages
+// NOW instead of by schedule) and publication_when_type=0 (the zero value an
+// agent produces by omitting the field) fell through `default:` into the same
+// publish-now branch — the exact irreversible publishes the two siblings refuse
+// (buildCopySearchPostPayload:1752/1768, buildRewriteSearchPostPayload:1937/1952).
+// Mirrors the other two builders' guard order and shape.
+func buildImportSearchPostPayload(in importSearchPostInput) (hooppy.CopySearchPostPayload, error) {
+	if in.SearchPostID != 0 && in.SearchPostIDs != "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id and search_post_ids are mutually exclusive — pass only one")
+	}
+	if in.SearchPostID == 0 && in.SearchPostIDs == "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id or search_post_ids is required (use list_search_posts to find IDs)")
+	}
+	if err := checkPublicationWhenType(in.PublicationWhenType); err != nil {
+		return hooppy.CopySearchPostPayload{}, err
+	}
+	if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
+	}
+	if in.PublicationWhenType == 3 && in.SchedulesIDs == "" {
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("schedules_ids is required for publication_when_type=3 (by schedule) — a schedule-driven import targeted at no schedule publishes to nothing")
+	}
+	// A flag combination that cannot do what the caller asked must fail loudly
+	// before the request (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it (the switch below sets
+	// SchedulesIDs only in case 3). Without this guard, schedules_ids with
+	// when_type 1/2 is silently dropped and the post is published to pages NOW
+	// — an irreversible publish the caller did not ask for.
+	if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
+		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids", "publication_when_type")
+	}
+	payload := hooppy.CopySearchPostPayload{
+		PublicationWhenType: in.PublicationWhenType,
+		PublicationHowType:  in.PublicationHowType,
+	}
+	if in.SearchPostIDs != "" {
+		ids, err := parseOrderedIDListStr(in.SearchPostIDs)
+		if err != nil {
+			return hooppy.CopySearchPostPayload{}, err
+		}
+		payload.SearchPostIDs = ids
+	} else {
+		payload.SearchPostID = in.SearchPostID
+	}
+	switch in.PublicationWhenType {
+	case 3:
+		payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
+	case 2:
+		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
+		payload.PublicationDate = &hooppy.PublicationDate{
+			Date:    in.PublishDate,
+			Hours:   in.PublishHours,
+			Minutes: in.PublishMinutes,
+		}
+	default:
+		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
+	}
+	payload.NoAttachments = in.NoAttachments
+	return payload, nil
+}
+
+func registerImportSearchPost(server *mcp.Server) {
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        "hooppy_import_search_post",
+			Description: "Import one or more scraped posts (from list_search_posts) to your own pages. Each post is resolved (text + attachments) and published independently via POST /posts. Pass a single id via search_post_id, or a batch via search_post_ids (comma-separated). Import keeps each post's original text. UNDOCUMENTED endpoint.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in importSearchPostInput) (*mcp.CallToolResult, error) {
+			payload, err := buildImportSearchPostPayload(in)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			resp, err := c.ImportSearchPost(ctx, payload)
+			if err != nil {
+				var ppe *hooppy.PartialPostError
+				if errors.As(err, &ppe) {
+					// Partial: some posts landed, some failed. Return a
+					// status-discriminated non-error result so an agent can
+					// tell partial from clean success WITHOUT parsing the
+					// error string. A total failure (every post failed) does
+					// NOT reach here — resolvePublishBatch returns a plain
+					// error for it, which falls through to errResult below
+					// (IsError=true), so an agent re-running on ambiguity
+					// does not treat an empty all-failed batch as success and
+					// duplicate it (MAJOR 5).
+					return jsonResult(map[string]interface{}{"status": "partial", "result": resp, "partial_error": ppe.Error()})
+				}
 				return errResult(err.Error())
 			}
 			return jsonResult(resp)
@@ -1824,16 +1944,14 @@ type rewriteSearchPostInput struct {
 	PublishDate         string `json:"publish_date,omitempty" jsonschema:"Publication date dd.mm.yyyy (for when_type 2)."`
 	PublishHours        string `json:"publish_hours,omitempty" jsonschema:"Publication hours HH (for when_type 2)."`
 	PublishMinutes      string `json:"publish_minutes,omitempty" jsonschema:"Publication minutes MM (for when_type 2)."`
+	NoAttachments       bool   `json:"no_attachments,omitempty" jsonschema:"Strip all attachments (photos, videos, links) — publish text only."`
 }
 
 // buildRewriteSearchPostPayload validates a rewriteSearchPostInput and builds
-// the payload — the testable analogue of the CLI buildRewritePayload. It is
-// extracted so the strict-parse call site (search_post_ids) is guarded by a
-// test: reverting the call site to the lenient parseIntListStr left the MCP
-// suite green under the old inline form, because only the parser (not its
-// use) was tested. Mirrors the CLI's form-dependent text rule (finding 4):
-// single-post requires text; batch rejects text and sends an empty Texts
-// slice (the server keeps each post's original text, like import).
+// the payload — the testable analogue of the CLI buildRewritePayload.
+// RewriteSearchPost resolves each post via ResolveSearchPost and publishes via
+// PublishPost; single-post requires text (the override), batch rejects text
+// (each post keeps its own resolved text).
 func buildRewriteSearchPostPayload(in rewriteSearchPostInput) (hooppy.CopySearchPostPayload, error) {
 	if in.SearchPostID != 0 && in.SearchPostIDs != "" {
 		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id and search_post_ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
@@ -1842,13 +1960,10 @@ func buildRewriteSearchPostPayload(in rewriteSearchPostInput) (hooppy.CopySearch
 		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id or search_post_ids is required (use list_search_posts to find IDs)")
 	}
 	batch := in.SearchPostIDs != ""
-	// Batch rewrite cannot express per-post text through this payload shape
-	// (one texts array for N ids is a broadcast or a positional pairing that
-	// blanks posts 2..N). Refuse the combination; batch alone keeps each
-	// post's original text (an empty Texts slice, like import). Single-post
-	// requires text (the override).
+	// Batch rewrite: each post keeps its own resolved text (per-post, from
+	// the resolve step). Single-post: text is the override.
 	if batch && in.Text != "" {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("text is not allowed with search_post_ids — batch rewrite cannot express per-post text through this payload shape (one texts array for N ids is a broadcast or a positional pairing that blanks posts 2..N); omit text to keep each post's original text, or rewrite one post at a time with search_post_id")
+		return hooppy.CopySearchPostPayload{}, fmt.Errorf("text is not allowed with search_post_ids — batch rewrite keeps each post's original text (resolved per post); omit text, or rewrite one post at a time with search_post_id")
 	}
 	if !batch && in.Text == "" {
 		return hooppy.CopySearchPostPayload{}, fmt.Errorf("text is required for search_post_id (rewrite overrides the single post's text)")
@@ -1891,11 +2006,8 @@ func buildRewriteSearchPostPayload(in rewriteSearchPostInput) (hooppy.CopySearch
 	}
 	if batch {
 		payload.SearchPostIDs = batchIDs
-		// Empty (non-nil) slice: RewriteSearchPost only replaces a nil slice,
-		// so this passes through as `[]` on the wire and the server keeps each
-		// post's original text (same shape as batch import). NOT
-		// []PostText{{Text: ""}} — that risks publishing blank across the batch.
-		payload.Texts = []hooppy.PostText{}
+		// Batch: Texts is empty — RewriteSearchPost ignores it and each post
+		// keeps its own resolved text (per-post, from the resolve step).
 	} else {
 		payload.SearchPostID = in.SearchPostID
 		payload.Texts = []hooppy.PostText{{Text: in.Text, SourceID: 0}}
@@ -1913,6 +2025,7 @@ func buildRewriteSearchPostPayload(in rewriteSearchPostInput) (hooppy.CopySearch
 	default:
 		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
 	}
+	payload.NoAttachments = in.NoAttachments
 	return payload, nil
 }
 
@@ -1920,7 +2033,7 @@ func registerRewriteSearchPost(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_rewrite_search_post",
-			Description: "Rewrite one or more scraped posts (from list_search_posts) and publish to your pages. Pass a single id via search_post_id (text overrides the original), or a batch via search_post_ids (comma-separated; the server assigns schedule slots in the given order). Batch rewrite CANNOT override text — the payload shape cannot express per-post text — so text is rejected with search_post_ids and the batch keeps each post's original text (like import_search_post). To keep original photos for a single-post rewrite, use copy_search_post or upload photos via upload_media first. UNDOCUMENTED endpoint.",
+			Description: "Rewrite one or more scraped posts (from list_search_posts) and publish to your pages. Pass a single id via search_post_id (text overrides the original), or a batch via search_post_ids (comma-separated). Each post is resolved and published independently — attachments are preserved per post from the resolve step. Batch rewrite keeps each post's original text (text is rejected with search_post_ids); use search_post_id for a single-post text override. UNDOCUMENTED endpoint.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in rewriteSearchPostInput) (*mcp.CallToolResult, error) {
 			payload, err := buildRewriteSearchPostPayload(in)
@@ -1933,6 +2046,15 @@ func registerRewriteSearchPost(server *mcp.Server) {
 			}
 			resp, err := c.RewriteSearchPost(ctx, payload)
 			if err != nil {
+				var ppe *hooppy.PartialPostError
+				if errors.As(err, &ppe) {
+					// Partial: see registerImportSearchPost for the
+					// status-discriminator rationale. A total failure returns
+					// a plain error → errResult (IsError=true), not this
+					// branch, so an all-failed batch is never reported as a
+					// successful tool call (MAJOR 5).
+					return jsonResult(map[string]interface{}{"status": "partial", "result": resp, "partial_error": ppe.Error()})
+				}
 				return errResult(err.Error())
 			}
 			return jsonResult(resp)

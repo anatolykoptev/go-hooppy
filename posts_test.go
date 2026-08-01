@@ -990,7 +990,7 @@ func TestUpdatePostText_FailClosed_NotBySchedule_EmptySelection_Refuses(t *testi
 // TestUpdatePostText_NullNormalization verifies that UpdatePostText
 // normalizes nil attachments and nil page selections to [] and {} (not
 // null) in the PUT body — matching the three sibling writers
-// (CopySearchPost, RewriteSearchPost, ImportSearchPost) which all open with
+// (RewriteSearchPost, ImportSearchPost) which all open with
 // "Server expects arrays, not null". A text-only post (zero attachments)
 // with an edit response that omits the selected_pages_by_source_ids key
 // yields nil values that encoding/json marshals as null; the server may
