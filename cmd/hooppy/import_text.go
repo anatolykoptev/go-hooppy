@@ -352,12 +352,15 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 		}
 		resp, err := c.PublishPost(ctx, content, target)
 		if err != nil {
-			var cnid *hooppy.CreateNoIDError
-			if errors.As(err, &cnid) {
-				enc := json.NewEncoder(out)
-				enc.SetIndent("", "  ")
-				_ = enc.Encode(map[string]interface{}{"id": 0, "status": "created_no_id", "search_post_id": args.postID})
-				return 0
+			// Through the shared helper, so this arm agrees with the other
+			// two single-post runners on all three details, not just the
+			// exit code: the stdout record, the stderr warning telling the
+			// operator to reconcile before re-running, and treating an
+			// encode failure as an error rather than discarding it. This
+			// was the arm that said least while being the one most likely
+			// reached from a batch workflow.
+			if code, handled := reportCreateNoID(err, out, errOut, args.postID); handled {
+				return code
 			}
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1

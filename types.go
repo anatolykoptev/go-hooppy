@@ -662,6 +662,10 @@ type PostIDResponse struct {
 	// Non-zero means: N posts probably exist on the server and you cannot
 	// address them from this response. Reconcile against the account before
 	// re-running, do not treat the empty IDs as permission to retry.
+	//
+	// Set by the client, never decoded from the wire — PostIDResponse is
+	// also the decode target for POST /posts, and a server field of this
+	// name would silently overwrite a count the client computed.
 	CreatedNoID int `json:"created_no_id,omitempty"`
 }
 

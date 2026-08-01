@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1385,5 +1386,37 @@ func TestRunImport_BatchAllFailed_Exits1(t *testing.T) {
 		if r.Status != "failed" {
 			t.Errorf("per_post[id=%d].status = %q, want \"failed\" (every post failed)", r.SearchPostID, r.Status)
 		}
+	}
+}
+
+// The third single-post runner joins F24's agreement. runImport's arm was the
+// odd one out on the two details reportCreateNoID added — no stderr warning,
+// and a discarded encode error — while being the command most likely reached
+// from a batch workflow, so it was the one saying least.
+//
+// RED-on-revert: inline the old arm back (bare enc.Encode + return 0) and the
+// stderr assertion fails.
+func TestRunImport_SinglePost_CreateNoID_MatchesSiblings(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/posts" {
+			w.Write([]byte(`{}`))
+			return
+		}
+		w.Write([]byte(`{"id":"7001","texts":[{"text":"t"}],"attachments":[]}`))
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	code := runImport(context.Background(), newStubClient(t, srv), &out, &errOut,
+		importArgs{postID: 7001, whenType: 1, howType: 1})
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "created_no_id") {
+		t.Errorf("stdout must carry the created_no_id record, got:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "no id") {
+		t.Errorf("stderr must warn the post cannot be addressed — this arm was silent while its two siblings warned, got:\n%s", errOut.String())
 	}
 }
