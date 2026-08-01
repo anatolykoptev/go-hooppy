@@ -1,82 +1,93 @@
 {
-  "all_pages_ids_by_source_ids": {
-    "1": [
-      0
-    ],
-    "10": [
-      0
-    ],
-    "11": [
-      0
-    ],
-    "13": [
-      0
-    ],
-    "18": [
-      0
-    ],
-    "2": [
-      0
-    ],
-    "3": [
-      0
-    ],
-    "4": [
-      0
-    ],
-    "6": [
-      0
-    ],
-    "7": [
-      0
-    ],
-    "9": [
-      0
-    ]
+  "accounts_for_parsing": {
+    "3": 0
   },
-  "attachments": [
-    {
-      "data": {
-        "file_path": "str",
-        "folder": "str",
-        "id": "str",
-        "name": "str",
-        "text": "str",
-        "type": "str",
-        "updated_date": "str"
-      },
-      "id": 0,
-      "post_id": 0,
-      "type": "str"
-    }
-  ],
-  "created_by": 0,
+  "add_link_to_user": 0,
+  "check_interval": 0,
+  "check_times": [],
+  "check_when_type": 0,
+  "copy_mode": 0,
+  "delete_posts_day": 0,
+  "delete_posts_hour": 0,
+  "determine_best_by": 0,
+  "donut_paid_duration": 0,
+  "download_vk_videos": 0,
+  "expand_clips_title": 0,
   "id": 0,
-  "ord_contracts": [
-    {
-      "action_type": 0,
-      "client_person_id": 0,
-      "contract_date": "str",
-      "contract_price": "str",
-      "contractor_person_id": 0,
-      "creatives_created": 0,
-      "flags": "str",
-      "id": 0,
-      "kktu_code": null,
-      "name": "str",
-      "okved_code": "str",
-      "ord_id": "str",
-      "parent_contract_id": 0,
-      "post_price": "str",
-      "post_price_mode": 0,
-      "posts_published": 0,
-      "serial_number": "str",
-      "status": 0,
-      "subject_type": 0,
-      "type": 0,
-      "user_id": 0
-    }
-  ],
+  "is_comments_disabled": 0,
+  "is_search_started": true,
+  "is_unique_content": 0,
+  "last_check_date": 0,
+  "message_to_channel": 0,
+  "message_to_community": 0,
+  "name": "str",
+  "not_publish_in_videos": 0,
+  "parse_links": 0,
+  "photos_caption": "str",
+  "plan_by_network": 0,
+  "posts_caption": "str",
+  "posts_caption_position_type": 0,
+  "posts_caption_space_type": 0,
+  "posts_comment": "str",
+  "posts_filter": {
+    "must_have": "str",
+    "must_have_logical_union": "str",
+    "photos_amount": 0,
+    "skip_like": "str",
+    "skip_with": "str",
+    "video_duration": 0,
+    "video_size": 0
+  },
+  "posts_hashtags": {
+    "hashtags": "str",
+    "max_amount": "str",
+    "position_type": 0,
+    "selection_type": 0
+  },
+  "posts_links": {
+    "links": "str",
+    "max_amount": 0,
+    "selection_type": 0,
+    "space_type": 0
+  },
+  "posts_location": {
+    "id": "str"
+  },
+  "posts_location_vk": {
+    "id": "str"
+  },
+  "posts_photo": null,
+  "posts_photo_always": 0,
+  "posts_rewrite": {
+    "no_posts_if_no_rewrite": "str",
+    "rewrite_command": "str",
+    "rewrite_for_every_page": "str",
+    "rewrite_state": 0
+  },
+  "posts_text": {
+    "black_list": "str",
+    "carved_list": "str",
+    "text_limit": "str",
+    "white_list": "str"
+  },
+  "posts_text_modification": {
+    "add_link_on": "str",
+    "carved_list": "str",
+    "cut_smiles": "str",
+    "replace_words": "str",
+    "save_markup": "str",
+    "text_rewrite": "str",
+    "text_translate": "str",
+    "tg_buttons": "str",
+    "translate_lang_to": 0
+  },
+  "posts_upgrade": {
+    "add_link_on": "str",
+    "do_not_take": "str",
+    "remove_from": "str",
+    "take_only": "str"
+  },
+  "privacy_level": 0,
   "project_id": 0,
   "projects": [
     {
@@ -143,15 +154,30 @@
       "youtube_category": 0
     }
   ],
-  "publication_date": {
-    "date": "str",
-    "hours": "str",
-    "minutes": "str"
-  },
-  "publication_dates": {},
   "publication_how_type": 0,
+  "publication_interval": 0,
+  "publication_interval_from": 0,
+  "publication_interval_to": 0,
+  "publication_interval_type": 0,
   "publication_when_type": 0,
   "publication_where_type": 0,
+  "publish_as_article": 0,
+  "publish_as_article_by_link": 0,
+  "publish_as_carousel": 0,
+  "publish_as_clips": 0,
+  "publish_as_reels": 0,
+  "publish_as_shorts": 0,
+  "publish_as_story": 0,
+  "publish_as_story_source_ids": "str",
+  "publish_as_user": 0,
+  "publish_by_account": 0,
+  "publish_by_account_source_ids": "str",
+  "publish_comment_by_account": 0,
+  "publish_in_channel": 0,
+  "publish_only_in_videos": 0,
+  "publish_reels_as_trial": 0,
+  "repeat_video": 0,
+  "save_vk_videos_names": 0,
   "schedule_id": 0,
   "schedules": [
     {
@@ -224,8 +250,27 @@
       "youtube_category": 0
     }
   ],
+  "search_comments": 0,
+  "search_likes": 0,
+  "search_mode": 0,
+  "search_mode_direction": 0,
+  "search_reposts": 0,
+  "search_start_date": "str",
+  "search_stop_date": "str",
+  "search_views": 0,
   "selected_albums_by_source_ids": {},
-  "selected_pages_by_source_ids": {},
+  "selected_pages_by_source_ids": {
+    "10": [
+      0
+    ]
+  },
+  "share_channel_to_feed": 0,
+  "share_clips_to_feed": 0,
+  "share_clips_to_feed_if_no_video": 0,
+  "share_clips_to_feed_with_text": 0,
+  "share_reels_to_feed": 0,
+  "share_stories_to_feed": 0,
+  "share_stories_to_feed_source_ids": "str",
   "social_albums_by_pages": [],
   "social_pages_by_accounts": [
     {
@@ -250,12 +295,14 @@
       ]
     }
   ],
-  "texts": [
-    {
-      "id": 0,
-      "post_id": 0,
-      "source_id": 0,
-      "text": "str"
-    }
-  ]
+  "source_resources": [],
+  "source_resources_mode": 0,
+  "take_amount": 0,
+  "tg_buttons": {
+    "list": []
+  },
+  "videos_title": "str",
+  "watermark_id": 0,
+  "watermarks": [],
+  "youtube_category": 0
 }

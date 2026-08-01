@@ -360,6 +360,20 @@ var unmarshalerContracts = map[reflect.Type]unmarshalerContract{
 	reflect.TypeOf(FlexInt{}):          {scalarOnly: true},
 	reflect.TypeOf(Metric{}):           {scalarOnly: true},
 	reflect.TypeOf(PhotoID("")):        {scalarOnly: true},
+	// Cross-posting integer enums (issue #51): accept a JSON number only;
+	// encoding/json itself returns *json.UnmarshalTypeError for a container
+	// passed where an int is expected, so scalarOnly is accurate. The decoded
+	// name lives only on the Go value — the wire value is the raw integer.
+	reflect.TypeOf(SearchMode{}):          {scalarOnly: true},
+	reflect.TypeOf(SearchModeDirection{}): {scalarOnly: true},
+	reflect.TypeOf(DetermineBestBy{}):     {scalarOnly: true},
+	reflect.TypeOf(CheckWhenType{}):       {scalarOnly: true},
+	reflect.TypeOf(CheckInterval{}):       {scalarOnly: true},
+	// CrossPostingEditResponse is no longer leaf-skipped: the diagnostic
+	// uses crossPostingEditWalker (same struct, no UnmarshalJSON) as the
+	// walk target, so the walker descends into it and the unmodelled keys
+	// are tracked in the baseline. The real CrossPostingEditResponse is
+	// not reachable from liveFixtureSpecs, so no contract is needed here.
 }
 
 // walkJSON walks a generic-decoded JSON tree against a target Go struct type
@@ -625,7 +639,29 @@ var liveFixtureSpecs = []fixtureSpec{
 	// whole gate; the total_rows-survives-an-overrun property is asserted
 	// separately, against the raw body.
 	{"schedule_posts_empty.json", "GET /posts/schedules/{id}/posts (empty)", reflect.TypeOf(SchedulePostsResponse{})},
+	// Cross-posting rule engine (the /cross-posting subsystem, #57) — UNDOCUMENTED.
+	{"cross_postings.json", "GET /cross-posting", reflect.TypeOf(CrossPostingsResponse{})},
+	// crossPostingEditWalker is CrossPostingEditResponse WITHOUT the custom
+	// UnmarshalJSON — a named type with the same underlying struct but no
+	// methods, so the walker does NOT leaf-skip it and can see its modelled
+	// vs unmodelled keys. CrossPostingEditResponse.UnmarshalJSON stashes Raw
+	// and decodes typed fields; the walker needs to see the typed fields to
+	// detect a newly-modelled key going stale (F2: remove is_search_started
+	// → the walker reports it as unmodelled → RED). The Raw field (json:"-")
+	// is invisible to the walker; the json.RawMessage fields (PostsHashtags
+	// etc.) are exempt leaves. The ~69 unmodelled keys are in the baseline.
+	{"cross_posting_edit.json", "GET /cross-posting/{id}/edit", reflect.TypeOf(crossPostingEditWalker{})},
+	{"cross_posting_statistics.json", "GET /cross-posting/{id}/statistics", reflect.TypeOf(CrossPostingStatisticsResponse{})},
+	{"cross_posting_statistics_empty.json", "GET /cross-posting/{id}/statistics (empty)", reflect.TypeOf(CrossPostingStatisticsResponse{})},
 }
+
+// crossPostingEditWalker is CrossPostingEditResponse with the custom
+// UnmarshalJSON/MarshalJSON stripped — a named type with the same underlying
+// struct but no methods. The diagnostic walker does NOT leaf-skip it, so it
+// can see which keys the struct models vs which are unmodelled (preserved in
+// Raw). This is what makes F2 possible: remove a modelled field from the
+// struct and the walker reports it as unmodelled → RED.
+type crossPostingEditWalker CrossPostingEditResponse
 
 // unmodelledBaselines is the declared baseline: for each endpoint, the set of
 // JSON keys the fixture carries that the response struct does NOT model,
@@ -858,8 +894,171 @@ var unmodelledBaselines = map[string]map[string]string{
 	},
 	"GET /posts-search/source-resources": {},
 	"GET /posts-search/parsing/form":     {},
-	"GET /proxies":                       {},
-	"GET /watermarks":                    {},
+	// Cross-posting rule engine (the /cross-posting subsystem, #57) — UNDOCUMENTED.
+	// The list row carries 89 keys; CrossPosting models the operator-facing
+	// subset (identity, state, the five enums, the four thresholds,
+	// take_amount, the check schedule, last_check_date and
+	// instagram_last_check_date as FlexInt). The 69 keys below (68 list-row +
+	// filters_plug top-level) are the publication-format toggles, captions,
+	// scheduling knobs, and source metadata the read surface does not need.
+	// The /edit response is walked via crossPostingEditWalker (same struct,
+	// no UnmarshalJSON) so the walker descends into it; 74 keys are
+	// unmodelled (preserved in Raw for the lossless round-trip). Statistics
+	// has 0 unmodelled (6/6 day fields modelled). 2026-07-31 fixtures.
+	"GET /cross-posting": {
+		"filters_plug":                             "array",
+		"list[0].add_link_to_user":                 "null",
+		"list[0].check_step":                       "number",
+		"list[0].check_times":                      "null",
+		"list[0].copy_mode":                        "number",
+		"list[0].delete_posts_day":                 "null",
+		"list[0].delete_posts_hour":                "null",
+		"list[0].donut_paid_duration":              "number",
+		"list[0].download_vk_videos":               "null",
+		"list[0].expand_clips_title":               "null",
+		"list[0].instagram_ready_for_parse":        "number",
+		"list[0].is_comments_disabled":             "null",
+		"list[0].is_unique_content":                "null",
+		"list[0].message_to_channel":               "null",
+		"list[0].message_to_community":             "null",
+		"list[0].not_publish_in_videos":            "null",
+		"list[0].pages":                            "array",
+		"list[0].parse_links":                      "null",
+		"list[0].photos_caption":                   "string",
+		"list[0].plan_by_network":                  "null",
+		"list[0].posts_caption":                    "string",
+		"list[0].posts_caption_position_type":      "number",
+		"list[0].posts_caption_space_type":         "number",
+		"list[0].posts_comment":                    "null",
+		"list[0].posts_location":                   "string",
+		"list[0].posts_location_vk":                "null",
+		"list[0].posts_pagination":                 "null",
+		"list[0].posts_photo":                      "null",
+		"list[0].posts_photo_always":               "null",
+		"list[0].posts_rewrite":                    "null",
+		"list[0].privacy_level":                    "number",
+		"list[0].publication_how_type":             "number",
+		"list[0].publication_interval":             "number",
+		"list[0].publication_interval_from":        "number",
+		"list[0].publication_interval_to":          "number",
+		"list[0].publication_interval_type":        "number",
+		"list[0].publication_when_type":            "number",
+		"list[0].publication_where_type":           "number",
+		"list[0].publish_as_article":               "null",
+		"list[0].publish_as_article_by_link":       "null",
+		"list[0].publish_as_carousel":              "null",
+		"list[0].publish_as_clips":                 "null",
+		"list[0].publish_as_reels":                 "null",
+		"list[0].publish_as_shorts":                "number",
+		"list[0].publish_as_story":                 "null",
+		"list[0].publish_as_story_source_ids":      "string",
+		"list[0].publish_as_user":                  "null",
+		"list[0].publish_by_account":               "null",
+		"list[0].publish_by_account_source_ids":    "string",
+		"list[0].publish_comment_by_account":       "null",
+		"list[0].publish_in_channel":               "null",
+		"list[0].publish_only_in_videos":           "null",
+		"list[0].publish_reels_as_trial":           "null",
+		"list[0].repeat_video":                     "null",
+		"list[0].save_vk_videos_names":             "number",
+		"list[0].search_pagination":                "null",
+		"list[0].search_with_pagination":           "number",
+		"list[0].share_channel_to_feed":            "null",
+		"list[0].share_clips_to_feed":              "null",
+		"list[0].share_clips_to_feed_if_no_video":  "null",
+		"list[0].share_clips_to_feed_with_text":    "null",
+		"list[0].share_reels_to_feed":              "null",
+		"list[0].share_shorts_to_feed":             "null",
+		"list[0].share_stories_to_feed":            "null",
+		"list[0].share_stories_to_feed_source_ids": "string",
+		"list[0].tg_buttons":                       "null",
+		"list[0].videos_title":                     "null",
+		"list[0].watermark_id":                     "number",
+		"list[0].youtube_category":                 "number",
+	},
+	// 74 unmodelled keys (95 fixture - 25 modelled = 74). Walked via
+	// crossPostingEditWalker (same struct, no UnmarshalJSON) so the walker
+	// descends. These keys survive in Raw for the lossless round-trip.
+	"GET /cross-posting/{id}/edit": {
+		"accounts_for_parsing":             "object",
+		"add_link_to_user":                 "number",
+		"check_times":                      "array",
+		"copy_mode":                        "number",
+		"delete_posts_day":                 "number",
+		"delete_posts_hour":                "number",
+		"donut_paid_duration":              "number",
+		"download_vk_videos":               "number",
+		"expand_clips_title":               "number",
+		"is_comments_disabled":             "number",
+		"is_unique_content":                "number",
+		"message_to_channel":               "number",
+		"message_to_community":             "number",
+		"not_publish_in_videos":            "number",
+		"parse_links":                      "number",
+		"photos_caption":                   "string",
+		"plan_by_network":                  "number",
+		"posts_caption":                    "string",
+		"posts_caption_position_type":      "number",
+		"posts_caption_space_type":         "number",
+		"posts_comment":                    "string",
+		"posts_filter":                     "object",
+		"posts_location":                   "object",
+		"posts_location_vk":                "object",
+		"posts_photo":                      "null",
+		"posts_photo_always":               "number",
+		"posts_rewrite":                    "object",
+		"posts_text":                       "object",
+		"posts_upgrade":                    "object",
+		"privacy_level":                    "number",
+		"projects":                         "array",
+		"publication_how_type":             "number",
+		"publication_interval":             "number",
+		"publication_interval_from":        "number",
+		"publication_interval_to":          "number",
+		"publication_interval_type":        "number",
+		"publication_when_type":            "number",
+		"publication_where_type":           "number",
+		"publish_as_article":               "number",
+		"publish_as_article_by_link":       "number",
+		"publish_as_carousel":              "number",
+		"publish_as_clips":                 "number",
+		"publish_as_reels":                 "number",
+		"publish_as_shorts":                "number",
+		"publish_as_story":                 "number",
+		"publish_as_story_source_ids":      "string",
+		"publish_as_user":                  "number",
+		"publish_by_account":               "number",
+		"publish_by_account_source_ids":    "string",
+		"publish_comment_by_account":       "number",
+		"publish_in_channel":               "number",
+		"publish_only_in_videos":           "number",
+		"publish_reels_as_trial":           "number",
+		"repeat_video":                     "number",
+		"save_vk_videos_names":             "number",
+		"schedule_id":                      "number",
+		"schedules":                        "array",
+		"selected_albums_by_source_ids":    "object",
+		"selected_pages_by_source_ids":     "object",
+		"share_channel_to_feed":            "number",
+		"share_clips_to_feed":              "number",
+		"share_clips_to_feed_if_no_video":  "number",
+		"share_clips_to_feed_with_text":    "number",
+		"share_reels_to_feed":              "number",
+		"share_stories_to_feed":            "number",
+		"share_stories_to_feed_source_ids": "string",
+		"social_albums_by_pages":           "array",
+		"social_pages_by_accounts":         "array",
+		"source_resources":                 "array",
+		"tg_buttons":                       "object",
+		"videos_title":                     "string",
+		"watermark_id":                     "number",
+		"watermarks":                       "array",
+		"youtube_category":                 "number",
+	},
+	"GET /cross-posting/{id}/statistics":         {},
+	"GET /cross-posting/{id}/statistics (empty)": {},
+	"GET /proxies":    {},
+	"GET /watermarks": {},
 	"GET /notifications": {
 		"filters_plug":                  "array",
 		"list[0].page":                  "object",

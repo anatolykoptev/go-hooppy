@@ -1931,3 +1931,436 @@ func parseMetricFloat(name, v string) (float64, error) {
 	}
 	return f, nil
 }
+
+// --- Cross-posting rule engine (the /cross-posting subsystem) ---
+//
+// The /cross-posting subsystem is a native server-side rule engine: it
+// collects fresh posts from source publics on a timer, ranks them by
+// engagement, filters by thresholds, deduplicates, and publishes into a
+// project/schedule. The client reached none of it before this task (#57).
+//
+// The API speaks in integer enums. The library decodes them to names AND
+// retains the raw integer (issue #51): an agent or human reads the name, the
+// integer round-trips. An enum value the bundle does not define passes through
+// as its number with Unknown=true and Name="unknown" — never silently mapped
+// to a default (the default_unreachable class this repo has shipped before).
+//
+// UNDOCUMENTED: the /cross-posting endpoints are not in the public OpenAPI
+// spec (v0.1.0). Discovered via API probing + the hooppy.ru Nuxt bundle — may
+// change without notice.
+
+// EnumValue carries both the raw integer (for round-tripping) and the decoded
+// human-readable name (for an agent/human). It is the shared representation
+// for every cross-posting integer enum. The name is a three-way distinction:
+//
+//   - a known integer → its bundle name (Unknown=false);
+//   - an integer the bundle does not define → Name="unknown", Unknown=true,
+//     raw Value preserved (the pass-through contract);
+//   - JSON null → Name="unset", Unknown=false (the feature is not configured
+//     / the server sent null) — distinct from "unknown" so an agent does not
+//     read a null enum as "the bundle does not define this value".
+type EnumValue struct {
+	Value   int    `json:"value"`
+	Name    string `json:"name"`
+	Unknown bool   `json:"unknown,omitempty"`
+}
+
+// enumName is the shared lookup: returns (name, false) for a known value,
+// ("unknown", true) for one the table does not define. Every per-enum decode
+// funnels through here so the pass-through contract has one implementation.
+func enumName(table map[int]string, v int) (string, bool) {
+	name, ok := table[v]
+	if !ok {
+		return "unknown", true
+	}
+	return name, false
+}
+
+// decodeEnumValue is the shared decode for every cross-posting integer enum.
+// It owns the three-way distinction an agent reads off the *_name key:
+//
+//   - JSON null  → (0, "unset", false): the server sent null / the feature is
+//     not configured. Distinct from "unknown" so an agent does not read a
+//     null check_interval as "the bundle does not define this value".
+//   - JSON number → (n, name, unknown) via enumName: a known value decodes to
+//     its name; a value the bundle does not define passes through with
+//     Name="unknown", Unknown=true, and the raw integer preserved.
+//   - A container or non-integer → an error: a shape change is loud, not a
+//     silent coerce to 0 (the same doctrine as FlexInt).
+//
+// Centralising the null/number decode keeps the pass-through contract and the
+// null-vs-unknown distinction in one place rather than copied across five
+// methods.
+func decodeEnumValue(b []byte, table map[int]string, typeName string) (value int, name string, unknown bool, err error) {
+	if bytes.Equal(bytes.TrimSpace(b), []byte("null")) {
+		return 0, "unset", false, nil
+	}
+	var n int
+	if err := json.Unmarshal(b, &n); err != nil {
+		return 0, "", false, fmt.Errorf("%s: %w", typeName, err)
+	}
+	name, unknown = enumName(table, n)
+	return n, name, unknown, nil
+}
+
+// Cross-posting enum tables, read from the hooppy.ru Nuxt bundle (dossier
+// 2026-07-31). Names are the English glosses of the Russian UI labels.
+var (
+	crossPostingSearchModeTable = map[int]string{
+		1: "new",
+		2: "old",
+		3: "best",
+		4: "random",
+	}
+	crossPostingSearchModeDirectionTable = map[int]string{
+		1: "oldest_first",
+		2: "newest_first",
+	}
+	crossPostingDetermineBestByTable = map[int]string{
+		1: "likes",
+		2: "reposts",
+		3: "comments",
+		4: "views",
+	}
+	crossPostingCheckWhenTypeTable = map[int]string{
+		1: "by_interval",
+		2: "at_fixed_times",
+	}
+	crossPostingCheckIntervalTable = map[int]string{
+		1:  "every_30_min",
+		2:  "hourly",
+		3:  "every_2h",
+		4:  "every_3h",
+		5:  "every_4h",
+		6:  "daily",
+		7:  "twice_daily",
+		8:  "three_times_daily",
+		9:  "four_times_daily",
+		10: "weekly",
+		11: "twice_weekly",
+		12: "three_times_weekly",
+	}
+)
+
+// SearchMode is the cross-posting search_mode enum (1 new · 2 old · 3 best · 4
+// random). MarshalJSON emits the raw integer so the value round-trips; the
+// decoded name lives only on the Go value for callers/MCP presentation.
+type SearchMode EnumValue
+
+func (m *SearchMode) UnmarshalJSON(b []byte) error {
+	v, name, unknown, err := decodeEnumValue(b, crossPostingSearchModeTable, "SearchMode")
+	if err != nil {
+		return err
+	}
+	m.Value, m.Name, m.Unknown = v, name, unknown
+	return nil
+}
+
+// MarshalJSON emits the raw integer (round-trip-safe); the name is presentation-only.
+func (m SearchMode) MarshalJSON() ([]byte, error) { return json.Marshal(m.Value) }
+
+// SearchModeDirection is the cross-posting search_mode_direction enum
+// (1 oldest-first · 2 newest-first).
+type SearchModeDirection EnumValue
+
+func (m *SearchModeDirection) UnmarshalJSON(b []byte) error {
+	v, name, unknown, err := decodeEnumValue(b, crossPostingSearchModeDirectionTable, "SearchModeDirection")
+	if err != nil {
+		return err
+	}
+	m.Value, m.Name, m.Unknown = v, name, unknown
+	return nil
+}
+
+func (m SearchModeDirection) MarshalJSON() ([]byte, error) { return json.Marshal(m.Value) }
+
+// DetermineBestBy is the cross-posting determine_best_by enum
+// (1 likes · 2 reposts · 3 comments · 4 views). Only meaningful when
+// search_mode=3 (best).
+type DetermineBestBy EnumValue
+
+func (m *DetermineBestBy) UnmarshalJSON(b []byte) error {
+	v, name, unknown, err := decodeEnumValue(b, crossPostingDetermineBestByTable, "DetermineBestBy")
+	if err != nil {
+		return err
+	}
+	m.Value, m.Name, m.Unknown = v, name, unknown
+	return nil
+}
+
+func (m DetermineBestBy) MarshalJSON() ([]byte, error) { return json.Marshal(m.Value) }
+
+// CheckWhenType is the cross-posting check_when_type enum
+// (1 by interval · 2 at fixed times).
+type CheckWhenType EnumValue
+
+func (m *CheckWhenType) UnmarshalJSON(b []byte) error {
+	v, name, unknown, err := decodeEnumValue(b, crossPostingCheckWhenTypeTable, "CheckWhenType")
+	if err != nil {
+		return err
+	}
+	m.Value, m.Name, m.Unknown = v, name, unknown
+	return nil
+}
+
+func (m CheckWhenType) MarshalJSON() ([]byte, error) { return json.Marshal(m.Value) }
+
+// CheckInterval is the cross-posting check_interval enum
+// (1 every 30 min · 2 hourly · 3 every 2h · ... · 12 three times weekly).
+// Only meaningful when check_when_type=1 (by interval).
+type CheckInterval EnumValue
+
+func (m *CheckInterval) UnmarshalJSON(b []byte) error {
+	v, name, unknown, err := decodeEnumValue(b, crossPostingCheckIntervalTable, "CheckInterval")
+	if err != nil {
+		return err
+	}
+	m.Value, m.Name, m.Unknown = v, name, unknown
+	return nil
+}
+
+func (m CheckInterval) MarshalJSON() ([]byte, error) { return json.Marshal(m.Value) }
+
+// CrossPosting is one row of GET /cross-posting (the connection list). The
+// list row carries 89 keys; this struct models the ones an operator/agent
+// reads — identity, state, the five enums, the four engagement thresholds,
+// take_amount, and the check schedule. The unmodelled keys are recorded in
+// the unknown-field diagnostic baseline (see unknown_field_diagnostic_test.go);
+// the /edit response is the lossless full-state surface (CrossPostingEditResponse).
+//
+// Field names follow the dossier (2026-07-31), NOT the UI i18n labels: the
+// minimum-likes threshold is search_likes, not likes_min.
+type CrossPosting struct {
+	ID                  int                 `json:"id"`
+	Name                string              `json:"name"`
+	State               int                 `json:"state"`
+	UserID              int                 `json:"user_id,omitempty"`
+	Position            int                 `json:"position,omitempty"`
+	SearchMode          SearchMode          `json:"search_mode"`
+	SearchModeDirection SearchModeDirection `json:"search_mode_direction"`
+	DetermineBestBy     DetermineBestBy     `json:"determine_best_by"`
+	CheckWhenType       CheckWhenType       `json:"check_when_type"`
+	CheckInterval       CheckInterval       `json:"check_interval"`
+	// Engagement thresholds — 0 = unset (no floor). The UI labels them
+	// likes_min/reposts_min/etc., but the API field names are search_*.
+	SearchLikes    int `json:"search_likes"`
+	SearchViews    int `json:"search_views"`
+	SearchComments int `json:"search_comments"`
+	SearchReposts  int `json:"search_reposts"`
+	TakeAmount     int `json:"take_amount"`
+	// Check schedule timestamps. next_check_date arrives as a string
+	// ("09.01.2022, 04:10"); last_check_date arrives as a number (unix epoch).
+	// Measured 2026-07-31 from a live authenticated GET: last_check_date was
+	// 0 (number), next_check_date was "str" (string). The prior hand-authored
+	// fixture guessed both as string — that guess caused the decode failure
+	// (cannot unmarshal number into string).
+	//
+	// last_check_date and instagram_last_check_date are nullable timestamps
+	// on an undocumented endpoint whose sibling next_check_date is a
+	// formatted STRING while they are NUMBERS — direct evidence this API
+	// family is heterogeneous on date fields. The repo doctrine (see
+	// PostPhoto.UpdatedDate / ScheduleTimeSlot) is that a nullable timestamp
+	// gets FlexInt because "a stringified numeric has appeared on this API"
+	// and "a bare int64 aborts the whole list decode when it does". FlexInt
+	// has zero references elsewhere on the cross-posting surface, so it was
+	// not applied to the field that caused the outage; it is applied now.
+	//
+	// TRADE, measured — exactly two mutations lost, one per field, and the
+	// mechanism is not the obvious one. The recorded placeholder is a NUMBER
+	// (0), which a bare int and FlexInt BOTH decode with err == nil, so the
+	// mutation the gate can no longer see is the WIDENING FlexInt→int — not a
+	// rejection either type performs. Narrowing mutations are still caught:
+	// FlexInt→string and FlexInt→bool both go RED, and object/array shapes
+	// are rejected with *json.UnmarshalTypeError. null was already accepted
+	// silently by int, so nothing was lost there.
+	//
+	// The second consequence is larger than the lost mutations and is the one
+	// worth knowing. If the server ever sends a stringified numeric here, the
+	// recorder writes "str", and FlexInt then fails with a NON-STRUCTURAL
+	// error ("str" is not an integer). TestLiveFixtureDecodes returns that
+	// first and discards any shape mismatch, so cross_postings.json and
+	// cross_posting_edit.json would each need a fixturesBlindToDecode entry
+	// and the decode oracle would go inert for ALL their modelled fields, not
+	// for one mutation per field.
+	//
+	// That path is loud, not silent: the gate goes RED and names the
+	// mechanism, forcing a deliberate choice rather than a quiet degradation.
+	// The right answer when it happens is the remedy the diagnostic file
+	// already records — make the reducer emit a type-valid placeholder (0)
+	// for FlexInt-typed leaves — NOT to add the fixtures to the blind list,
+	// which is the first suggestion the error offers and the wrong one.
+	//
+	// The live robustness (a stringified numeric does not abort the whole
+	// list decode) is worth that trade.
+	//
+	// search_start_date and search_stop_date are strings: the list row
+	// carries null for them on this account, but the /edit fixture
+	// (cross_posting_edit.json) records both as "str", confirming the type
+	// is string (matching next_check_date's format) — not an unmeasured
+	// guess. A null in the list fixture means "the server sent null on this
+	// account", not "the server always sends null".
+	NextCheckDate          string  `json:"next_check_date,omitempty"`
+	LastCheckDate          FlexInt `json:"last_check_date,omitempty"`
+	InstagramLastCheckDate FlexInt `json:"instagram_last_check_date,omitempty"`
+	SearchStartDate        string  `json:"search_start_date,omitempty"`
+	SearchStopDate         string  `json:"search_stop_date,omitempty"`
+	SourceResourcesMode    int     `json:"source_resources_mode,omitempty"`
+}
+
+// CrossPostingsResponse wraps GET /cross-posting. Same {list, total_rows,
+// is_has_more, rows_limit} envelope the other list endpoints use.
+type CrossPostingsResponse struct {
+	List      []CrossPosting `json:"list"`
+	TotalRows int            `json:"total_rows"`
+	IsHasMore bool           `json:"is_has_more"`
+	RowsLimit int            `json:"rows_limit"`
+}
+
+// CrossPostingEditResponse is returned by GET /cross-posting/{id}/edit. It
+// carries 95 keys — six more than the list row — and additionally embeds
+// source_resources, accounts_for_parsing, projects, schedules, watermarks,
+// social_pages_by_accounts, selected_pages_by_source_ids, plus the three
+// collection-filter blobs posts_filter, posts_text, posts_upgrade.
+//
+// LOSSLESS ROUND-TRIP (issue #117, the class that bit UpdatePostText): a Go
+// struct round-trip drops every key the struct does not model — 95 keys in,
+// only the modelled ones out. The future write path (read-modify-write, the
+// schedules precedent) MUST NOT lose fields. So this struct keeps the raw
+// /edit body alongside the typed view, the way UpdateScheduleFromEdit keeps
+// map[string]json.RawMessage:
+//
+//   - Raw holds the full /edit body verbatim (json:"-"; never on the wire).
+//   - UnmarshalJSON stashes Raw, then decodes the typed fields (identity,
+//     state, the five enums, the four thresholds, take_amount, check
+//     schedule) from it.
+//   - MarshalJSON emits Raw verbatim — byte-identical round-trip. The typed
+//     fields are for Go callers / MCP presentation; the raw bytes are the
+//     round-trip source and the future write path's base.
+//
+// The embedded collection blobs (source_resources, accounts_for_parsing,
+// projects, schedules, watermarks, social_pages_by_accounts,
+// selected_pages_by_source_ids, posts_filter, posts_text, posts_upgrade) are
+// NOT modelled as typed structs here: their element shapes are unmeasured at
+// the depth needed for a safe typed decode, and modelling them would risk a
+// wrong-guess abort on the whole /edit decode. They survive in Raw for the
+// future write path; the diagnostic baseline records them as unmodelled.
+//
+// UNDOCUMENTED: GET /cross-posting/{id}/edit is not in the public OpenAPI
+// spec (v0.1.0). Discovered via API probing — may change without notice.
+type CrossPostingEditResponse struct {
+	Raw json.RawMessage `json:"-"`
+	// Identity + state.
+	ID       int    `json:"id"`
+	Name     string `json:"name"`
+	State    int    `json:"state"`
+	UserID   int    `json:"user_id,omitempty"`
+	Position int    `json:"position,omitempty"`
+	// The five enums — decoded to name + raw integer (issue #51).
+	SearchMode          SearchMode          `json:"search_mode"`
+	SearchModeDirection SearchModeDirection `json:"search_mode_direction"`
+	DetermineBestBy     DetermineBestBy     `json:"determine_best_by"`
+	CheckWhenType       CheckWhenType       `json:"check_when_type"`
+	CheckInterval       CheckInterval       `json:"check_interval"`
+	// Engagement thresholds — 0 = unset.
+	SearchLikes    int `json:"search_likes"`
+	SearchViews    int `json:"search_views"`
+	SearchComments int `json:"search_comments"`
+	SearchReposts  int `json:"search_reposts"`
+	TakeAmount     int `json:"take_amount"`
+	// Check schedule timestamps. next_check_date is a string (absent from the
+	// edit fixture on this account); last_check_date is a number (unix epoch,
+	// measured 2026-07-31) and nullable, so FlexInt — see the CrossPosting
+	// doc for the doctrine and the decode-mutation trade. search_start_date/
+	// search_stop_date are strings (the edit fixture records both as "str").
+	NextCheckDate       string  `json:"next_check_date,omitempty"`
+	LastCheckDate       FlexInt `json:"last_check_date,omitempty"`
+	SearchStartDate     string  `json:"search_start_date,omitempty"`
+	SearchStopDate      string  `json:"search_stop_date,omitempty"`
+	SourceResourcesMode int     `json:"source_resources_mode,omitempty"`
+	// Newly-revealed keys (2026-07-31 recording): absent from the prior
+	// hand-authored fixture entirely, so nothing modelled them and the
+	// diagnostic could not see them.
+	//
+	// IsSearchStarted is a boolean — measured true on this account.
+	// ProjectID is a number — measured 0 on this account.
+	//
+	// PostsHashtags, PostsLinks, PostsTextModification are objects. They are
+	// modelled as json.RawMessage (opaque) because their sub-field shapes,
+	// while visible in the recording, may differ when the feature is fully
+	// configured — the recording is from one account and the sub-field types
+	// are not confirmed across accounts. RawMessage preserves the bytes for
+	// the round-trip without guessing the interior.
+	//
+	// UNMEASURED: posts_photo is null on this account, so its type when
+	// configured is not verified. Other fields that are 0 or "str" in the
+	// recording are measured for THIS account but may carry different
+	// values (not types) when configured — the types are stable, the values
+	// are not.
+	IsSearchStarted       bool            `json:"is_search_started"`
+	ProjectID             int             `json:"project_id"`
+	PostsHashtags         json.RawMessage `json:"posts_hashtags"`
+	PostsLinks            json.RawMessage `json:"posts_links"`
+	PostsTextModification json.RawMessage `json:"posts_text_modification"`
+}
+
+// UnmarshalJSON stashes the raw /edit body (lossless round-trip) then decodes
+// the typed fields. Uses a type alias to decode the typed fields without
+// recursing into this method.
+func (e *CrossPostingEditResponse) UnmarshalJSON(data []byte) error {
+	e.Raw = append(json.RawMessage(nil), data...)
+	type alias CrossPostingEditResponse
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*e = CrossPostingEditResponse(a)
+	// Raw was zeroed by the alias copy; restore it.
+	e.Raw = append(json.RawMessage(nil), data...)
+	return nil
+}
+
+// MarshalJSON emits the raw /edit body verbatim — byte-identical round-trip.
+// The typed fields are presentation-only; the raw bytes are the round-trip
+// source and the future write path's base. If Raw is empty (zero value),
+// emit null rather than an empty invalid JSON token.
+func (e CrossPostingEditResponse) MarshalJSON() ([]byte, error) {
+	if len(e.Raw) == 0 {
+		return []byte("null"), nil
+	}
+	return e.Raw, nil
+}
+
+// CrossPostingDayStats is one day's counters in a connection's statistics.
+// All counters are per-day. A zero counter is a REAL measurement (the engine
+// checked and found nothing); an absent day is not. See
+// CrossPostingStatisticsResponse for the absent-vs-zero distinction.
+type CrossPostingDayStats struct {
+	Date                  string `json:"date"`
+	PostsFoundAmount      int    `json:"posts_found_amount"`
+	PostsFilteredAmount   int    `json:"posts_filtered_amount"`
+	PostsDuplicatesAmount int    `json:"posts_duplicates_amount"`
+	PostsTakenAmount      int    `json:"posts_taken_amount"`
+	Errors                int    `json:"errors"`
+}
+
+// CrossPostingStatisticsResponse wraps GET /cross-posting/{id}/statistics.
+// The response is {"statistics":[{date, posts_found_amount, ...}, ...]}.
+//
+// ABSENT vs ZERO (F4): a non-empty Statistics array with all-zero counters is
+// a REAL measurement — the engine ran and found/filtered/took nothing. An
+// EMPTY Statistics array (or a missing one) is absent data: the engine has
+// not run, or the connection has no statistics yet. The HasData method makes
+// that distinction explicit so a caller cannot mistake "checked, found
+// nothing" for "no data". A connection that is configured but not producing
+// (state=0, all-zero counters across days) is the live state on this account
+// today — that is real data, not absent.
+type CrossPostingStatisticsResponse struct {
+	Statistics []CrossPostingDayStats `json:"statistics"`
+}
+
+// HasData reports whether the response carries any statistics at all. A
+// non-empty Statistics array is real data — even when every counter is zero
+// (the engine ran and measured nothing). An empty/nil array is absent data.
+func (r *CrossPostingStatisticsResponse) HasData() bool {
+	return r != nil && len(r.Statistics) > 0
+}
