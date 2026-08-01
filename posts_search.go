@@ -369,11 +369,12 @@ func (c *Client) ListAllSearchPostsWithFirstAndLastTotal(ctx context.Context, f 
 // is_has_more, rows_limit} envelope (see testdata/live/source_resources.json
 // and issue #98), so it is paged like its siblings; the page parameter is
 // sent verbatim and the server answers.
-func (c *Client) ListSourceResources(ctx context.Context, page int) (*SourceResourcesResponse, error) {
-	params := url.Values{}
-	if page < 0 {
-		return nil, fmt.Errorf("hooppy: ListSourceResources: page must be non-negative (got %d); pass 0 to leave unset", page)
+func (c *Client) ListSourceResources(ctx context.Context, pageOpt ...int) (*SourceResourcesResponse, error) {
+	page, err := optionalPage("ListSourceResources", pageOpt)
+	if err != nil {
+		return nil, err
 	}
+	params := url.Values{}
 	if page > 0 {
 		params.Set("page", strconv.Itoa(page))
 	}
