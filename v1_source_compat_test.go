@@ -75,3 +75,30 @@ func TestV1SourceCompat_ListersAcceptTheV1CallForm(t *testing.T) {
 		}
 	})
 }
+
+// The arity error must name the method the caller actually invoked. The
+// helper serves both listers, and an error is a corrective instruction — one
+// that names a different method than the one the caller typed sends them to
+// the wrong place. Same principle as errSchedulesWithoutWhenType3 naming each
+// surface's own flag.
+//
+// RED-on-revert: hardcode "ListProxies(ctx)" back into the message and a
+// ListSourceResources caller reads an example naming ListProxies.
+func TestV1SourceCompat_ArityErrorNamesTheCallersMethod(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"list":[],"total_rows":0}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	_, err := c.ListSourceResources(context.Background(), 1, 2)
+	if err == nil {
+		t.Fatal("expected an arity error")
+	}
+	if strings.Contains(err.Error(), "ListProxies") {
+		t.Fatalf("the error names ListProxies while the caller used ListSourceResources — a corrective instruction must name what the caller can fix: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ListSourceResources(ctx)") {
+		t.Errorf("the example call form should name this method, got: %v", err)
+	}
+}

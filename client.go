@@ -500,6 +500,13 @@ func (c *Client) doWithRetry(ctx context.Context, buildReq func() (*http.Request
 // time, which is why more than one value is a named error rather than a
 // silently ignored tail: variadic is a compatibility device here, not an
 // invitation to pass a list.
+//
+// TRANSITIONAL. This exists only to preserve a v1 call form, and it can become
+// a required parameter at the next major. It is NOT the house paging style:
+// ListWatermarks, ListNotifications, ListProjects and ListSchedules take a
+// plain `page int` and should keep it — all four already had that signature at
+// v1.1.2, so there is no call form to preserve and no reason to move their
+// arity check from compile time to run time.
 func optionalPage(method string, pageOpt []int) (int, error) {
 	switch len(pageOpt) {
 	case 0:
@@ -510,6 +517,6 @@ func optionalPage(method string, pageOpt []int) (int, error) {
 		}
 		return pageOpt[0], nil
 	default:
-		return 0, fmt.Errorf("hooppy: %s: expected at most one page argument, got %d — the parameter is variadic only to keep the v1 call form ListProxies(ctx) compiling, not to accept a list of pages", method, len(pageOpt))
+		return 0, fmt.Errorf("hooppy: %[1]s: expected at most one page argument, got %[2]d — the parameter is variadic only to keep the v1 call form %[1]s(ctx) compiling, not to accept a list of pages", method, len(pageOpt))
 	}
 }
