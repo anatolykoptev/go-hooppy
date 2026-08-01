@@ -649,6 +649,24 @@ type PostIDResponse struct {
 	ScheduleID      int              `json:"schedule_id,omitempty"`
 	SlotLookupError string           `json:"slot_lookup_error,omitempty"`
 	Slots           []ScheduleSlot   `json:"slots,omitempty"`
+
+	// CreatedNoID counts batch posts the server accepted while omitting the
+	// id (CreateNoIDError). Those posts are NOT in IDs — a zero id flows into
+	// move/update/delete as a real-looking handle (#131) — so without this
+	// field a batch where every post came back id-less is indistinguishable
+	// from a batch that published nothing: err nil, IDs empty, exit 0. A
+	// caller reading that as "nothing happened" re-runs and duplicates every
+	// post, which is the hazard the partial-result contract exists to
+	// prevent, reached from the other side.
+	//
+	// Non-zero means: N posts probably exist on the server and you cannot
+	// address them from this response. Reconcile against the account before
+	// re-running, do not treat the empty IDs as permission to retry.
+	//
+	// Set by the client, never decoded from the wire — PostIDResponse is
+	// also the decode target for POST /posts, and a server field of this
+	// name would silently overwrite a count the client computed.
+	CreatedNoID int `json:"created_no_id,omitempty"`
 }
 
 // ScheduleSlot is one created post's assigned publication slot, used in the
@@ -1742,42 +1760,36 @@ type ParsingStartResponse struct {
 	Success bool `json:"success"`
 }
 
-// CopySearchPostPayload copies or rewrites a scraped post (from GET /posts-search)
-// to the user's own pages. Used by CopySearchPost (PUT /posts/copy),
-// RewriteSearchPost (POST /posts with as_copy=1), and ImportSearchPost
-// (PUT /posts/import).
-//
-// Photo handling: to include photos when rewriting, call GetSearchPostEdit
-// to get the scraped post's attachments, extract photo data, and pass them
-// in Attachments as [{type: "photos", data: [photo objects]}].
+// CopySearchPostPayload carries the parameters for rewriting or importing a
+// scraped post (from GET /posts-search) to the user's own pages. Used by
+// RewriteSearchPost and ImportSearchPost, which are thin compositions over
+// ResolveSearchPost + PublishPost. The Attachments and Texts fields are
+// ignored by Rewrite/Import (the resolve step fills them) — they remain on
+// the struct for backward compatibility with direct PublishPost callers.
 //
 // ID precedence — SearchPostIDs (batch) wins over SearchPostID (single):
-//   - SearchPostIDs non-empty: the slice is comma-joined in CALLER ORDER and
-//     sent as the ids wire field. The server assigns schedule slots in the
-//     order it receives ids, so the caller controls publication order.
-//   - SearchPostIDs empty + SearchPostID non-zero: the scalar is sent as the
-//     sole id (the legacy single-post path).
+//   - SearchPostIDs non-empty: the slice is iterated in CALLER ORDER, each id
+//     resolved and published independently (client-side loop). The caller
+//     controls publication order.
+//   - SearchPostIDs empty + SearchPostID non-zero: the scalar is the sole id
+//     (the single-post path).
 //   - both set: RewriteSearchPost/ImportSearchPost error before any request
 //     (ambiguous intent — pass only one).
 //   - both empty: RewriteSearchPost/ImportSearchPost error before any request
-//     (nothing to copy).
+//     (nothing to publish).
 //
-// CopySearchPost (PUT /posts/copy) uses a different wire shape — it serializes
-// SearchPostID as the singular search_post_id int directly and does NOT send
-// the ids string; the batch slice does not apply to that endpoint.
-//
-// UNDOCUMENTED: PUT /posts/copy, POST /posts with as_copy=1, and
-// PUT /posts/import are not in the public OpenAPI spec.
+// UNDOCUMENTED: POST /posts with as_copy=1 is not in the public OpenAPI spec.
 type CopySearchPostPayload struct {
-	SearchPostID        int              `json:"search_post_id"`             // single scraped post ID (legacy; used by CopySearchPost, and by Rewrite/Import when SearchPostIDs is empty)
-	SearchPostIDs       []int            `json:"search_post_ids,omitempty"`  // batch of scraped post IDs; when non-empty, wins over SearchPostID on Rewrite/Import (comma-joined in caller order). CopySearchPost REFUSES a non-empty slice before any request — PUT /posts/copy takes a singular search_post_id int and silently ignores search_post_ids, so a batch slice on that endpoint is a phantom (it would marshal onto the wire with err == nil); the slice is honoured only by RewriteSearchPost/ImportSearchPost, which join it into the ids wire field.
+	SearchPostID        int              `json:"search_post_id"`             // single scraped post ID (used by Rewrite/Import when SearchPostIDs is empty)
+	SearchPostIDs       []int            `json:"search_post_ids,omitempty"`  // batch of scraped post IDs; when non-empty, wins over SearchPostID on Rewrite/Import (iterated in caller order, each resolved+published independently)
 	PublicationWhenType int              `json:"publication_when_type"`      // 1=now, 2=at specific time, 3=by schedule
 	PublicationHowType  int              `json:"publication_how_type"`       // 1
 	SelectedPagesIDs    []int            `json:"selected_pages_ids"`         // for when_type=1 or 2
 	SchedulesIDs        []int            `json:"schedules_ids"`              // for when_type=3
 	PublicationDate     *PublicationDate `json:"publication_date,omitempty"` // for when_type=2
-	Texts               []PostText       `json:"texts"`                      // custom text to override original
-	Attachments         []Attachment     `json:"attachments"`                // photos from GetSearchPostEdit
+	Texts               []PostText       `json:"texts"`                      // custom text to override original (Rewrite only; ignored by Import)
+	Attachments         []Attachment     `json:"attachments"`                // ignored by Rewrite/Import (resolve step fills attachments); kept for direct PublishPost callers
+	NoAttachments       bool             `json:"-"`                          // control flag, NOT a wire field: when true, Rewrite/Import/Copy strip ALL attachments from the resolved content before publishing (text-only post). PublishPost builds its own anonymous request body and never marshals CopySearchPostPayload, so the prior `json:"no_attachments,omitempty"` tag was vestigial — it serialized only if a caller hand-marshalled the payload, which the library never does. `json:"-"` makes that explicit. The resolve step still runs (attachments are fetched then dropped), so the cost is unchanged.
 }
 
 // SearchPostEditResponse is returned by GET /posts-search/{id}/edit?as_copy=1.

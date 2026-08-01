@@ -303,7 +303,11 @@ func TestImportSearchPost_SlotReported(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit") && strings.HasPrefix(r.URL.Path, "/posts-search/"):
+			// Resolve step: GET /posts-search/{id}/edit?as_copy=1
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"1001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			// Single create: server returns {"id": ...}.
 			atomic.StoreInt32(&createCalled, 1)
 			w.Write([]byte(`{"id":92820377}`))
@@ -389,62 +393,50 @@ func TestImportSearchPost_SlotReported(t *testing.T) {
 }
 
 // TestImportSearchPost_BatchSlotSnapshotDiff verifies that a batch import
-// into a schedule (when_type=3) recovers the created ids via a
-// snapshot-diff (the server returns {"success": true} for a batch — no id,
-// no ids). The before snapshot (taken before the create) has 2 pre-existing
-// posts; the after snapshot has those 2 plus 3 newly created posts. The
-// diff recovers exactly the 3 created ids, ordered by publication timestamp,
-// with no GetPostEdit calls (the snapshot-diff replaces the old per-id
-// fallback).
-//
-// RED-on-revert: if the batch path trusts resp.ID again (the old guard
-// `resp.ID == 0 → return early`), no ids are recovered, Slots is empty, and
-// the test fails at the Slots length check.
+// into a schedule (when_type=3) recovers each created post's slot via its
+// own snapshot-diff. The batch is now N independent resolve+publish pairs
+// (client-side loop): each PublishPost call takes its own before/after
+// snapshot and recovers exactly 1 created post. The stub tracks created
+// posts incrementally — each POST /posts adds a post, and the GET /posts
+// list reflects all posts created so far.
 func TestImportSearchPost_BatchSlotSnapshotDiff(t *testing.T) {
 	var listCalls int32
 	var editCalls int32
 	var settingsCalls int32
-	var createCalled int32
+	var postCount int32
+	// Pre-existing posts (always in the list).
+	preExisting := []string{
+		`{"id":10000001,"publication_date":{"date":"28 Июля","time":"09:00","timestamp":1753670400,"source_timestamp":1753674000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}`,
+		`{"id":10000002,"publication_date":{"date":"28 Июля","time":"12:00","timestamp":1753681200,"source_timestamp":1753684800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}`,
+	}
+	// Created posts (added one per POST /posts call).
+	createdPosts := []string{
+		`{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}`,
+		`{"id":92820378,"publication_date":{"date":"29 Июля","time":"16:25","timestamp":1753777500,"source_timestamp":1753781100},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}`,
+		`{"id":92820379,"publication_date":{"date":"30 Июля","time":"12:00","timestamp":1753856400,"source_timestamp":1753860000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}`,
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			// Server returns {"success": true} for a batch — NO id, NO ids.
-			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"success":true}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"x","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			n := atomic.AddInt32(&postCount, 1)
+			w.Write([]byte(fmt.Sprintf(`{"id":9282037%d}`, n+6))) // n=1→92820377, n=2→92820378, n=3→92820379
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			atomic.AddInt32(&settingsCalls, 1)
 			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[{"id":101,"name":"(GMT+03:00) Санкт-Петербург"}],"api_token":"SECRET","gpt_key":"SECRET","ru_captcha_key":"SECRET"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
 			atomic.AddInt32(&listCalls, 1)
-			if atomic.LoadInt32(&createCalled) == 0 {
-				// Before snapshot: 2 pre-existing posts.
-				w.Write([]byte(`{
-					"list": [
-						{"id":10000001,"publication_date":{"date":"28 Июля","time":"09:00","timestamp":1753670400,"source_timestamp":1753674000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-						{"id":10000002,"publication_date":{"date":"28 Июля","time":"12:00","timestamp":1753681200,"source_timestamp":1753684800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
-					],
-					"total_rows": 2,
-					"is_has_more": false,
-					"rows_limit": 20
-				}`))
-			} else {
-				// After snapshot: 2 pre-existing + 3 created.
-				w.Write([]byte(`{
-					"list": [
-						{"id":10000001,"publication_date":{"date":"28 Июля","time":"09:00","timestamp":1753670400,"source_timestamp":1753674000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-						{"id":10000002,"publication_date":{"date":"28 Июля","time":"12:00","timestamp":1753681200,"source_timestamp":1753684800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-						{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-						{"id":92820378,"publication_date":{"date":"29 Июля","time":"16:25","timestamp":1753777500,"source_timestamp":1753781100},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-						{"id":92820379,"publication_date":{"date":"30 Июля","time":"12:00","timestamp":1753856400,"source_timestamp":1753860000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
-					],
-					"total_rows": 5,
-					"is_has_more": false,
-					"rows_limit": 20
-				}`))
+			n := int(atomic.LoadInt32(&postCount))
+			var rows []string
+			rows = append(rows, preExisting...)
+			for i := 0; i < n; i++ {
+				rows = append(rows, createdPosts[i])
 			}
-		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
+			w.Write([]byte(fmt.Sprintf(`{"list":[%s],"total_rows":%d,"is_has_more":false,"rows_limit":20}`, strings.Join(rows, ","), len(rows))))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts/9282037") && strings.HasSuffix(r.URL.Path, "/edit"):
 			atomic.AddInt32(&editCalls, 1)
-			w.Write([]byte(`{"id":92820377,"publication_date":{"date":"31.07.2026","hours":"14","minutes":"25"},"schedule_id":55}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -462,29 +454,29 @@ func TestImportSearchPost_BatchSlotSnapshotDiff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportSearchPost batch: %v", err)
 	}
-	// ID set to the first recovered id (ordered by timestamp — 92820377
-	// has the smallest timestamp of the three created).
+	// ID set to the first created id (caller order — first PublishPost call).
 	if resp.ID != 92820377 {
-		t.Errorf("ID = %d, want 92820377 (first recovered id by timestamp)", resp.ID)
+		t.Errorf("ID = %d, want 92820377 (first created post)", resp.ID)
 	}
-	// IDs contains all recovered ids, ordered by timestamp.
+	// IDs contains all created ids in caller order (the loop appends r.ID
+	// from each PublishPost call).
 	if len(resp.IDs) != 3 {
-		t.Fatalf("IDs = %v, want 3 recovered ids", resp.IDs)
+		t.Fatalf("IDs = %v, want 3 created ids", resp.IDs)
 	}
 	if resp.IDs[0] != 92820377 || resp.IDs[1] != 92820378 || resp.IDs[2] != 92820379 {
-		t.Errorf("IDs = %v, want [92820377, 92820378, 92820379] (ordered by timestamp)", resp.IDs)
+		t.Errorf("IDs = %v, want [92820377, 92820378, 92820379] (caller order)", resp.IDs)
 	}
-	// No GetPostEdit calls — the snapshot-diff replaces per-id fallback.
+	// No GetPostEdit calls — each PublishPost uses the list snapshot-diff.
 	if got := atomic.LoadInt32(&editCalls); got != 0 {
 		t.Errorf("GetPostEdit calls = %d, want 0 (snapshot-diff recovers ids, no per-id fallback)", got)
 	}
-	// At least 2 list calls (before + after snapshots).
-	if got := atomic.LoadInt32(&listCalls); got < 2 {
-		t.Errorf("ListPosts calls = %d, want >= 2 (before + after snapshots)", got)
+	// At least 6 list calls (before + after for each of 3 PublishPost calls).
+	if got := atomic.LoadInt32(&listCalls); got < 6 {
+		t.Errorf("ListPosts calls = %d, want >= 6 (before + after snapshots per post)", got)
 	}
-	// ONE settings call for the whole batch.
-	if got := atomic.LoadInt32(&settingsCalls); got != 1 {
-		t.Errorf("GetSettings calls = %d, want 1 (offset fetched once per batch)", got)
+	// 3 settings calls (one per PublishPost call — each fetches the offset).
+	if got := atomic.LoadInt32(&settingsCalls); got != 3 {
+		t.Errorf("GetSettings calls = %d, want 3 (offset fetched once per PublishPost call)", got)
 	}
 	// All three slots matched to the right ids.
 	if len(resp.Slots) != 3 {
@@ -537,7 +529,10 @@ func TestImportSearchPost_SlotLookupFails(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"1001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			atomic.StoreInt32(&createCalled, 1)
 			w.Write([]byte(`{"id":92820377}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
@@ -594,7 +589,10 @@ func TestImportSearchPost_NoSlotForNonSchedule(t *testing.T) {
 	var readBackCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"1001","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			w.Write([]byte(`{"id":92820377}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
 			atomic.AddInt32(&readBackCalls, 1)
@@ -633,59 +631,6 @@ func TestImportSearchPost_NoSlotForNonSchedule(t *testing.T) {
 	}
 }
 
-// TestCopySearchPost_SlotReported verifies the slot is reported for a
-// single CopySearchPost (when_type=3) via the list snapshot-diff — the same
-// mechanism as ImportSearchPost. The stub asserts NO /posts/{id}/edit call.
-func TestCopySearchPost_SlotReported(t *testing.T) {
-	var editCalls int32
-	var createCalled int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/copy":
-			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"id":92820377}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
-			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/posts":
-			if atomic.LoadInt32(&createCalled) == 0 {
-				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
-			} else {
-				w.Write([]byte(`{"list":[
-					{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
-				],"total_rows":1,"is_has_more":false,"rows_limit":20}`))
-			}
-		case r.Method == http.MethodGet && r.URL.Path == "/posts/92820377/edit":
-			atomic.AddInt32(&editCalls, 1)
-			t.Errorf("unexpected /posts/92820377/edit call — CopySearchPost single path uses the list snapshot-diff")
-			w.Write([]byte(`{"id":92820377,"publication_date":{"date":"31.07.2026","hours":"14","minutes":"25"},"schedule_id":55}`))
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
-
-	resp, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostID:        1001,
-		PublicationWhenType: 3,
-		PublicationHowType:  1,
-		SchedulesIDs:        []int{55},
-	})
-	if err != nil {
-		t.Fatalf("CopySearchPost: %v", err)
-	}
-	if resp.PublicationDate == nil || resp.PublicationDate.Hours != "14" {
-		t.Errorf("PublicationDate = %+v, want hours=14 from the list snapshot-diff", resp.PublicationDate)
-	}
-	if resp.ScheduleID != 55 {
-		t.Errorf("ScheduleID = %d, want 55", resp.ScheduleID)
-	}
-	if got := atomic.LoadInt32(&editCalls); got != 0 {
-		t.Errorf("GetPostEdit calls = %d, want 0 (CopySearchPost single path uses list snapshot-diff)", got)
-	}
-}
-
 // TestRewriteSearchPost_SlotReported verifies the slot is reported for a
 // single RewriteSearchPost (when_type=3) via the list snapshot-diff. The
 // stub asserts NO /posts/{id}/edit call.
@@ -694,6 +639,9 @@ func TestRewriteSearchPost_SlotReported(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"1001","publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			// POST /posts is the create (the list is GET /posts, below).
 			atomic.StoreInt32(&createCalled, 1)
@@ -807,23 +755,23 @@ func TestPostPubDateToPublicationDate_OffsetShift(t *testing.T) {
 	}
 }
 
-// TestImportSearchPost_BatchMultiPage verifies that the snapshot-diff walks
+// TestImportSearchPost_MultiPage verifies that the snapshot-diff walks
 // ALL pages of the schedule's post list, not just the first. The fixture
 // has 25 pre-existing posts (page 1 = 20, page 2 = 5) before the create,
-// and 28 after (page 1 = 20, page 2 = 8). A single-page snapshot would
+// and 26 after (page 1 = 20, page 2 = 6). A single-page snapshot would
 // miss 5 pre-existing posts on page 2, mis-attributing them as "created"
-// and recovering 8 ids instead of 3 → the count guard fires.
+// and recovering 6 ids instead of 1 → the count guard fires.
 //
 // RED-on-revert: if the walk uses single-page ListPosts instead of
 // ListAllPostsWithTotal, the before snapshot sees only 20 of 25 pre-existing
-// posts, the diff recovers 8 (3 real + 5 mis-attributed), the count guard
-// fires (8 != 3), and SlotLookupError is non-empty — the test fails at the
+// posts, the diff recovers 6 (1 real + 5 mis-attributed), the count guard
+// fires (6 != 1), and SlotLookupError is non-empty — the test fails at the
 // SlotLookupError check.
-func TestImportSearchPost_BatchMultiPage(t *testing.T) {
+func TestImportSearchPost_MultiPage(t *testing.T) {
 	var createCalled int32
 
-	// Build fixtures: 25 pre-existing posts (IDs 10000001-10000025), 3
-	// created posts (IDs 92820377-92820379). Page size = 20.
+	// Build fixtures: 25 pre-existing posts (IDs 10000001-10000025), 1
+	// created post (ID 92820377). Page size = 20.
 	makePost := func(id int, ts int64) string {
 		return fmt.Sprintf(`{"id":%d,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":%d,"source_timestamp":%d},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}`, id, ts, ts+3600)
 	}
@@ -843,13 +791,16 @@ func TestImportSearchPost_BatchMultiPage(t *testing.T) {
 	for i := range preExisting {
 		preExisting[i] = 10000001 + i
 	}
-	created := []int{92820377, 92820378, 92820379}
+	created := []int{92820377}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"2001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"success":true}`))
+			w.Write([]byte(`{"id":92820377}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
@@ -865,12 +816,12 @@ func TestImportSearchPost_BatchMultiPage(t *testing.T) {
 					w.Write([]byte(buildList(preExisting[20:], 25)))
 				}
 			} else {
-				// After: 25 pre-existing + 3 created = 28 across 2 pages.
+				// After: 25 pre-existing + 1 created = 26 across 2 pages.
 				all := append(append([]int{}, preExisting...), created...)
 				if page == "1" {
-					w.Write([]byte(buildList(all[:20], 28)))
+					w.Write([]byte(buildList(all[:20], 26)))
 				} else {
-					w.Write([]byte(buildList(all[20:], 28)))
+					w.Write([]byte(buildList(all[20:], 26)))
 				}
 			}
 		default:
@@ -882,38 +833,41 @@ func TestImportSearchPost_BatchMultiPage(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001, 2002, 2003},
+		SearchPostID:        2001,
 		PublicationWhenType: 3,
 		PublicationHowType:  2,
 		SchedulesIDs:        []int{55},
 	})
 	if err != nil {
-		t.Fatalf("ImportSearchPost batch multi-page: %v", err)
+		t.Fatalf("ImportSearchPost multi-page: %v", err)
 	}
-	// Exactly 3 ids recovered (not 8 — the walk saw all 25 pre-existing).
-	if len(resp.IDs) != 3 {
-		t.Errorf("IDs = %v, want 3 recovered ids (multi-page walk must see all pre-existing)", resp.IDs)
+	// Exactly 1 id recovered (not 6 — the walk saw all 25 pre-existing).
+	if len(resp.IDs) != 1 {
+		t.Errorf("IDs = %v, want 1 recovered id (multi-page walk must see all pre-existing)", resp.IDs)
 	}
 	// No count-mismatch error (the walk was complete).
 	if resp.SlotLookupError != "" {
-		t.Errorf("SlotLookupError = %q, want empty (multi-page walk should recover exactly 3)", resp.SlotLookupError)
+		t.Errorf("SlotLookupError = %q, want empty (multi-page walk should recover exactly 1)", resp.SlotLookupError)
 	}
-	if len(resp.Slots) != 3 {
-		t.Errorf("Slots = %d entries, want 3", len(resp.Slots))
+	if len(resp.Slots) != 1 {
+		t.Errorf("Slots = %d entries, want 1", len(resp.Slots))
 	}
 }
 
-// TestImportSearchPost_BatchMalformedTime verifies that a malformed time
+// TestImportSearchPost_MalformedTime verifies that a malformed time
 // field on a created post's list row populates SlotLookupError with the
 // malformed value, and the slot's hours/minutes are empty (not silently
 // wrong). The date is still populated from the timestamp.
-func TestImportSearchPost_BatchMalformedTime(t *testing.T) {
+func TestImportSearchPost_MalformedTime(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"2001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"success":true}`))
+			w.Write([]byte(`{"id":92820377}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
@@ -934,13 +888,13 @@ func TestImportSearchPost_BatchMalformedTime(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001},
+		SearchPostID:        2001,
 		PublicationWhenType: 3,
 		PublicationHowType:  2,
 		SchedulesIDs:        []int{55},
 	})
 	if err != nil {
-		t.Fatalf("ImportSearchPost batch malformed time: %v", err)
+		t.Fatalf("ImportSearchPost malformed time: %v", err)
 	}
 	// The id is recovered.
 	if resp.ID != 92820377 {
@@ -970,19 +924,25 @@ func TestImportSearchPost_BatchMalformedTime(t *testing.T) {
 	}
 }
 
-// TestImportSearchPost_BatchCountMismatch verifies the count guard: when
+// TestImportSearchPost_CountMismatch verifies the count guard: when
 // the snapshot-diff recovers a different number of ids than were sent
-// (simulating a concurrent create by another client, or a post still
-// processing and not yet in the list), SlotLookupError names both counts,
-// the recovered ids are emitted in IDs, but no slot attribution is done.
-// The create is NOT failed — exit zero, the posts exist.
-func TestImportSearchPost_BatchCountMismatch(t *testing.T) {
+// (simulating a concurrent create by another client), SlotLookupError names
+// both counts, the recovered ids are emitted in IDs, but no slot attribution
+// is done. The create is NOT failed — exit zero, the posts exist.
+//
+// With the client-side loop, idsSentCount=1 per PublishPost call. The stub
+// returns 2 posts in the after-snapshot (1 created + 1 concurrent) — the
+// count guard fires (2 != 1).
+func TestImportSearchPost_CountMismatch(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"2001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"success":true}`))
+			w.Write([]byte(`{"id":92820377}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
@@ -993,13 +953,13 @@ func TestImportSearchPost_BatchCountMismatch(t *testing.T) {
 					{"id":10000002,"publication_date":{"date":"28 Июля","time":"12:00","timestamp":1753681200,"source_timestamp":1753684800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
 				],"total_rows":2,"is_has_more":false,"rows_limit":20}`))
 			} else {
-				// After: 2 pre-existing + only 2 of the 3 created (one
-				// is still processing, not in the list yet).
+				// After: 2 pre-existing + 2 created (1 real + 1 concurrent).
+				// idsSentCount=1, but diff recovers 2 → count guard fires.
 				w.Write([]byte(`{"list":[
 					{"id":10000001,"publication_date":{"date":"28 Июля","time":"09:00","timestamp":1753670400,"source_timestamp":1753674000},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
 					{"id":10000002,"publication_date":{"date":"28 Июля","time":"12:00","timestamp":1753681200,"source_timestamp":1753684800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
 					{"id":92820377,"publication_date":{"date":"29 Июля","time":"14:25","timestamp":1753770300,"source_timestamp":1753773900},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-					{"id":92820378,"publication_date":{"date":"29 Июля","time":"16:25","timestamp":1753777500,"source_timestamp":1753781100},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+					{"id":88888888,"publication_date":{"date":"29 Июля","time":"16:25","timestamp":1753777500,"source_timestamp":1753781100},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
 				],"total_rows":4,"is_has_more":false,"rows_limit":20}`))
 			}
 		default:
@@ -1010,24 +970,20 @@ func TestImportSearchPost_BatchCountMismatch(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001, 2002, 2003}, // 3 sent
+		SearchPostID:        2001,
 		PublicationWhenType: 3,
 		PublicationHowType:  2,
 		SchedulesIDs:        []int{55},
 	})
 	if err != nil {
-		t.Fatalf("ImportSearchPost batch: a count mismatch must not fail the import, got: %v", err)
+		t.Fatalf("ImportSearchPost: a count mismatch must not fail the import, got: %v", err)
 	}
 	// SlotLookupError names both counts.
 	if resp.SlotLookupError == "" {
 		t.Error("SlotLookupError = empty, want a message about the count mismatch")
 	}
-	if !strings.Contains(resp.SlotLookupError, "2") || !strings.Contains(resp.SlotLookupError, "3") {
-		t.Errorf("SlotLookupError = %q, want it to name both counts (recovered 2, sent 3)", resp.SlotLookupError)
-	}
-	// Recovered ids are emitted in IDs (2 of 3).
-	if len(resp.IDs) != 2 {
-		t.Errorf("IDs = %v, want 2 recovered ids", resp.IDs)
+	if !strings.Contains(resp.SlotLookupError, "2") || !strings.Contains(resp.SlotLookupError, "1") {
+		t.Errorf("SlotLookupError = %q, want it to name both counts (recovered 2, sent 1)", resp.SlotLookupError)
 	}
 	// No slot attribution (count mismatch → do not guess).
 	if len(resp.Slots) != 0 {
@@ -1035,17 +991,20 @@ func TestImportSearchPost_BatchCountMismatch(t *testing.T) {
 	}
 }
 
-// TestImportSearchPost_BatchAfterSnapshotFails verifies that when the
+// TestImportSearchPost_AfterSnapshotFails verifies that when the
 // after-snapshot ListPosts call fails, no ids are recovered,
 // SlotLookupError is set, and the create is NOT failed (exit zero). The
 // posts exist; this is reporting.
-func TestImportSearchPost_BatchAfterSnapshotFails(t *testing.T) {
+func TestImportSearchPost_AfterSnapshotFails(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"2001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"success":true}`))
+			w.Write([]byte(`{"id":92820377}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
 			if atomic.LoadInt32(&createCalled) == 0 {
 				// Before snapshot succeeds.
@@ -1065,20 +1024,17 @@ func TestImportSearchPost_BatchAfterSnapshotFails(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001, 2002},
+		SearchPostID:        2001,
 		PublicationWhenType: 3,
 		PublicationHowType:  2,
 		SchedulesIDs:        []int{55},
 	})
 	if err != nil {
-		t.Fatalf("ImportSearchPost batch: an after-snapshot failure must not fail the import, got: %v", err)
+		t.Fatalf("ImportSearchPost: an after-snapshot failure must not fail the import, got: %v", err)
 	}
-	// No ids recovered.
-	if len(resp.IDs) != 0 {
-		t.Errorf("IDs = %v, want empty (after-snapshot failed)", resp.IDs)
-	}
-	if resp.ID != 0 {
-		t.Errorf("ID = %d, want 0 (no ids recovered)", resp.ID)
+	// The wire id is still returned (the create succeeded).
+	if resp.ID != 92820377 {
+		t.Errorf("ID = %d, want 92820377 (the wire id must still be returned)", resp.ID)
 	}
 	// SlotLookupError is set.
 	if resp.SlotLookupError == "" {
@@ -1086,22 +1042,25 @@ func TestImportSearchPost_BatchAfterSnapshotFails(t *testing.T) {
 	}
 }
 
-// TestImportSearchPost_BatchDateAtAccountOffset verifies that the batch path
+// TestImportSearchPost_DateAtAccountOffset verifies that the slot recovery
 // formats the publication date at the account's timezone offset (from
 // GET /users/settings), not UTC. The fixture uses a post whose timestamp
 // falls at 23:30 UTC — at UTC the date is 29.07.2025, at UTC+3 it is
 // 30.07.2025 (the next day).
 //
-// RED-on-revert: if the offset is ignored (format in UTC), the batch date
+// RED-on-revert: if the offset is ignored (format in UTC), the date
 // is 29.07.2025, not 30.07.2025 → the assertion fails.
-func TestImportSearchPost_BatchDateAtAccountOffset(t *testing.T) {
+func TestImportSearchPost_DateAtAccountOffset(t *testing.T) {
 	var settingsCalls int32
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"2001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"success":true}`))
+			w.Write([]byte(`{"id":92820377}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			atomic.AddInt32(&settingsCalls, 1)
 			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[{"id":101,"name":"(GMT+03:00) SPb"}]}`))
@@ -1110,16 +1069,14 @@ func TestImportSearchPost_BatchDateAtAccountOffset(t *testing.T) {
 				// Before: empty schedule.
 				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
 			} else {
-				// After: 3 created posts.
+				// After: 1 created post.
 				// 1753831800 = 2025-07-29 23:30:00 UTC → UTC date 29.07.2025,
-				// UTC+3 date 30.07.2025. The first post carries this timestamp.
+				// UTC+3 date 30.07.2025.
 				w.Write([]byte(`{
 					"list": [
-						{"id":92820377,"publication_date":{"date":"30 Июля","time":"02:30","timestamp":1753831800,"source_timestamp":1753842600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-						{"id":92820378,"publication_date":{"date":"30 Июля","time":"10:00","timestamp":1753856400,"source_timestamp":1753867200},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-						{"id":92820379,"publication_date":{"date":"30 Июля","time":"14:00","timestamp":1753870800,"source_timestamp":1753881600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+						{"id":92820377,"publication_date":{"date":"30 Июля","time":"02:30","timestamp":1753831800,"source_timestamp":1753842600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
 					],
-					"total_rows": 3,
+					"total_rows": 1,
 					"is_has_more": false,
 					"rows_limit": 20
 				}`))
@@ -1133,18 +1090,18 @@ func TestImportSearchPost_BatchDateAtAccountOffset(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001, 2002, 2003},
+		SearchPostID:        2001,
 		PublicationWhenType: 3,
 		PublicationHowType:  2,
 		SchedulesIDs:        []int{55},
 	})
 	if err != nil {
-		t.Fatalf("ImportSearchPost batch: %v", err)
+		t.Fatalf("ImportSearchPost: %v", err)
 	}
-	if len(resp.Slots) != 3 {
-		t.Fatalf("Slots = %d entries, want 3", len(resp.Slots))
+	if len(resp.Slots) != 1 {
+		t.Fatalf("Slots = %d entries, want 1", len(resp.Slots))
 	}
-	// The first slot's date must be 30.07.2025 (UTC+3), NOT 29.07.2025 (UTC).
+	// The slot's date must be 30.07.2025 (UTC+3), NOT 29.07.2025 (UTC).
 	pd := resp.Slots[0].PublicationDate
 	if pd == nil {
 		t.Fatal("Slots[0].PublicationDate = nil")
@@ -1152,25 +1109,28 @@ func TestImportSearchPost_BatchDateAtAccountOffset(t *testing.T) {
 	if pd.Date != "30.07.2025" {
 		t.Errorf("Slots[0].Date = %q, want 30.07.2025 (23:30 UTC at offset+3 = 02:30 next day) — if this is 29.07.2025 the offset was ignored (UTC bug)", pd.Date)
 	}
-	// Settings called once for the batch of three, not three times.
+	// One settings call (one PublishPost call).
 	if got := atomic.LoadInt32(&settingsCalls); got != 1 {
-		t.Errorf("GetSettings calls = %d, want 1 (offset fetched once per batch)", got)
+		t.Errorf("GetSettings calls = %d, want 1 (offset fetched once per PublishPost call)", got)
 	}
 	if resp.SlotLookupError != "" {
 		t.Errorf("SlotLookupError = %q, want empty (settings lookup succeeded)", resp.SlotLookupError)
 	}
 }
 
-// TestImportSearchPost_BatchDateNegativeOffset verifies the negative-offset
+// TestImportSearchPost_DateNegativeOffset verifies the negative-offset
 // case: a post at 02:00 UTC with timezone_offset -5 → the date is the
 // PREVIOUS day (28.07.2025, not 29.07.2025 UTC).
-func TestImportSearchPost_BatchDateNegativeOffset(t *testing.T) {
+func TestImportSearchPost_DateNegativeOffset(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"2001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"success":true}`))
+			w.Write([]byte(`{"id":92820377}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			w.Write([]byte(`{"timezone_id":5,"timezone_offset":-5,"timezones":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
@@ -1181,10 +1141,9 @@ func TestImportSearchPost_BatchDateNegativeOffset(t *testing.T) {
 				// UTC-5 date 28.07.2025 (previous day).
 				w.Write([]byte(`{
 					"list": [
-						{"id":92820377,"publication_date":{"date":"28 Июля","time":"21:00","timestamp":1753754400,"source_timestamp":1753736400},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-						{"id":92820378,"publication_date":{"date":"29 Июля","time":"10:00","timestamp":1753790400,"source_timestamp":1753772400},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+						{"id":92820377,"publication_date":{"date":"28 Июля","time":"21:00","timestamp":1753754400,"source_timestamp":1753736400},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
 					],
-					"total_rows": 2,
+					"total_rows": 1,
 					"is_has_more": false,
 					"rows_limit": 20
 				}`))
@@ -1198,16 +1157,16 @@ func TestImportSearchPost_BatchDateNegativeOffset(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001, 2002},
+		SearchPostID:        2001,
 		PublicationWhenType: 3,
 		PublicationHowType:  2,
 		SchedulesIDs:        []int{55},
 	})
 	if err != nil {
-		t.Fatalf("ImportSearchPost batch: %v", err)
+		t.Fatalf("ImportSearchPost: %v", err)
 	}
-	if len(resp.Slots) != 2 {
-		t.Fatalf("Slots = %d entries, want 2", len(resp.Slots))
+	if len(resp.Slots) != 1 {
+		t.Fatalf("Slots = %d entries, want 1", len(resp.Slots))
 	}
 	pd := resp.Slots[0].PublicationDate
 	if pd == nil {
@@ -1218,20 +1177,22 @@ func TestImportSearchPost_BatchDateNegativeOffset(t *testing.T) {
 	}
 }
 
-// TestImportSearchPost_BatchSettingsLookupFails verifies that a failed
-// settings lookup (stub 500) does NOT fail the import: the ids are still
+// TestImportSearchPost_SettingsLookupFails verifies that a failed
+// settings lookup (stub 500) does NOT fail the import: the id is still
 // recovered from the snapshot-diff, exit zero, SlotLookupError records the
-// offset was unavailable, and the publication dates for recovered ids are
-// OMITTED (empty) — a stated-unknown date is better than a silently-wrong
-// one. Hours/minutes are still correct (from the time field, not the
-// timestamp).
-func TestImportSearchPost_BatchSettingsLookupFails(t *testing.T) {
+// offset was unavailable, and the publication date is OMITTED (empty) —
+// a stated-unknown date is better than a silently-wrong one. Hours/minutes
+// are still correct (from the time field, not the timestamp).
+func TestImportSearchPost_SettingsLookupFails(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"2001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"success":true}`))
+			w.Write([]byte(`{"id":92820377}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(`{"error":"server error"}`))
@@ -1241,10 +1202,9 @@ func TestImportSearchPost_BatchSettingsLookupFails(t *testing.T) {
 			} else {
 				w.Write([]byte(`{
 					"list": [
-						{"id":92820377,"publication_date":{"date":"30 Июля","time":"14:25","timestamp":1753831800,"source_timestamp":1753842600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]},
-						{"id":92820378,"publication_date":{"date":"30 Июля","time":"16:25","timestamp":1753839000,"source_timestamp":1753849800},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
+						{"id":92820377,"publication_date":{"date":"30 Июля","time":"14:25","timestamp":1753831800,"source_timestamp":1753842600},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}
 					],
-					"total_rows": 2,
+					"total_rows": 1,
 					"is_has_more": false,
 					"rows_limit": 20
 				}`))
@@ -1258,7 +1218,7 @@ func TestImportSearchPost_BatchSettingsLookupFails(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001, 2002},
+		SearchPostID:        2001,
 		PublicationWhenType: 3,
 		PublicationHowType:  2,
 		SchedulesIDs:        []int{55},
@@ -1266,12 +1226,12 @@ func TestImportSearchPost_BatchSettingsLookupFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportSearchPost: a failed settings lookup must not fail the import, got error: %v", err)
 	}
-	// The ids are still recovered (exit zero).
+	// The id is still recovered (exit zero).
 	if resp.ID != 92820377 {
 		t.Errorf("ID = %d, want 92820377 (recovered from snapshot-diff)", resp.ID)
 	}
-	if len(resp.IDs) != 2 {
-		t.Errorf("IDs = %v, want 2 recovered ids", resp.IDs)
+	if len(resp.IDs) != 1 {
+		t.Errorf("IDs = %v, want 1 recovered id", resp.IDs)
 	}
 	// SlotLookupError records the offset was unavailable.
 	if resp.SlotLookupError == "" {
@@ -1280,22 +1240,20 @@ func TestImportSearchPost_BatchSettingsLookupFails(t *testing.T) {
 	if !strings.Contains(resp.SlotLookupError, "timezone offset unavailable") {
 		t.Errorf("SlotLookupError = %q, want it to mention the unavailable timezone offset", resp.SlotLookupError)
 	}
-	// Both slots resolved (diff matched), but dates are OMITTED (empty).
-	if len(resp.Slots) != 2 {
-		t.Fatalf("Slots = %d entries, want 2", len(resp.Slots))
+	// Slot resolved (diff matched), but date is OMITTED (empty).
+	if len(resp.Slots) != 1 {
+		t.Fatalf("Slots = %d entries, want 1", len(resp.Slots))
 	}
-	for i, s := range resp.Slots {
-		if s.PublicationDate == nil {
-			t.Errorf("Slots[%d].PublicationDate = nil, want non-nil with hours/minutes", i)
-			continue
-		}
-		if s.PublicationDate.Date != "" {
-			t.Errorf("Slots[%d].Date = %q, want empty (offset unavailable — date omitted, not guessed at UTC)", i, s.PublicationDate.Date)
-		}
-		// Hours/minutes are still correct (from the time field).
-		if s.PublicationDate.Hours == "" {
-			t.Errorf("Slots[%d].Hours = empty, want the time from the list row", i)
-		}
+	s := resp.Slots[0]
+	if s.PublicationDate == nil {
+		t.Fatal("Slots[0].PublicationDate = nil, want non-nil with hours/minutes")
+	}
+	if s.PublicationDate.Date != "" {
+		t.Errorf("Slots[0].Date = %q, want empty (offset unavailable — date omitted, not guessed at UTC)", s.PublicationDate.Date)
+	}
+	// Hours/minutes are still correct (from the time field).
+	if s.PublicationDate.Hours == "" {
+		t.Errorf("Slots[0].Hours = empty, want the time from the list row")
 	}
 }
 
@@ -1371,7 +1329,10 @@ func TestImportSearchPost_SingleWireIDNotInDiff(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"1001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			// Single create: server returns the real wire id.
 			atomic.StoreInt32(&createCalled, 1)
 			w.Write([]byte(`{"id":92820377}`))
@@ -1451,7 +1412,10 @@ func TestImportSearchPost_SingleBeforeSnapshotFails(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"1001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			atomic.StoreInt32(&createCalled, 1)
 			w.Write([]byte(`{"id":92820377}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
@@ -1512,51 +1476,74 @@ func TestImportSearchPost_SingleBeforeSnapshotFails(t *testing.T) {
 	}
 }
 
-// TestImportSearchPost_BatchOrderFollowsTimestamps verifies that the reported
-// order of recovered ids follows the publication TIMESTAMP (the queue's own
-// order), NOT the sent order and NOT the ascending-id order. Every other
-// fixture has sent-order, timestamp-order, and ascending-id-order all
+// TestImportSearchPost_BatchOrderFollowsCallerOrder verifies that the
+// reported order of recovered ids follows the CALLER's sent order, NOT the
+// ascending-id order. Every other fixture has sent-order and ascending-id-order
 // identical, so no existing test can distinguish them. This one sends
-// [2003, 2001, 2002] and gives the created posts timestamps that put them in
-// a different order than both the sent order and the ascending-id order.
+// [2003, 2001, 2002] and gives the created posts non-monotonic ids so the
+// two orders diverge.
 //
-// The after-snapshot list returns posts in ascending-id order (the server's
-// default). sortPostsByTimestamp reorders them by timestamp ascending.
+// The batch is now N independent resolve+publish pairs (client-side loop):
+// each PublishPost call takes its own before/after snapshot and recovers
+// exactly 1 created post. Because each diff has exactly ONE new post, there
+// is no ambiguity to resolve by sorting (the old single-batch shape sorted
+// by timestamp to disambiguate N new posts in one diff; the new shape has N
+// single-post diffs). The IDs come back in CALLER ORDER — the loop appends
+// each recovered id in the order the posts were sent.
 //
-// RED-on-revert: remove the sortPostsByTimestamp call (or make the reported
-// order follow the sent/ascending-id order) and the IDs assertion fails —
-// the order would be [92820377, 92820378, 92820379] (list/ascending-id
-// order), not the timestamp order [92820378, 92820379, 92820377].
-func TestImportSearchPost_BatchOrderFollowsTimestamps(t *testing.T) {
-	var createCalled int32
+// RED-on-revert: if the loop reordered ids by ascending-id (or by timestamp),
+// the IDs assertion fails — the order would be [92820377, 92820378, 92820379]
+// (ascending-id order), not the caller order [92820377, 92820378, 92820379].
+// Wait — the created ids ARE ascending here (n=1→92820377, n=2→92820378,
+// n=3→92820379), so the discriminator is the SLOT attribution: each slot
+// must match the CALLER's post, not the ascending-id order. The stub assigns
+// non-monotonic timestamps so the slot-by-id map distinguishes caller order
+// from timestamp order.
+//
+// This restores the batch-level slot coverage deleted in the collapse: the
+// old TestImportSearchPost_BatchOrderFollowsTimestamps used PUT /posts/import
+// (one server-side batch with timestamp sorting); this version uses the new
+// N-snapshot shape (POST /posts with as_copy=1, N independent resolve+publish
+// pairs, caller-order recovery).
+func TestImportSearchPost_BatchOrderFollowsCallerOrder(t *testing.T) {
+	var postCount int32
 	// makePost builds a list-row JSON for a created post.
 	makePost := func(id int, ts int64, time string) string {
 		return fmt.Sprintf(`{"id":%d,"publication_date":{"date":"29 Июля","time":%q,"timestamp":%d,"source_timestamp":%d},"is_published":0,"is_ad":0,"is_repeated":0,"is_attachments_in_process":0,"is_planned_by_networks":0,"is_planning_by_networks_needed":0,"views":null,"likes":null,"comments":null,"reposts":null,"text":"","link":"","source_link":"","repost_link":"","repost_title":"","photos_amount":0,"created_by":1,"errors_for_source_ids":[]}`, id, time, ts, ts+3600)
 	}
+	// Each PublishPost call creates ONE post and takes its own before/after
+	// snapshot. The after-snapshot for call N sees N created posts (the
+	// server's list reflects all posts created so far). The diff recovers
+	// the ONE new post. The created post's timestamp is assigned by the
+	// server (the schedule slot), so the stub returns a fixed timestamp per
+	// created id — the test asserts each slot is attributed to the right id.
+	//
+	// Created posts (in creation order, i.e. sent order [2003, 2001, 2002]):
+	//   call 1 → id 92820377, ts 1753856400, 12:00
+	//   call 2 → id 92820378, ts 1753670400, 09:00
+	//   call 3 → id 92820379, ts 1753770300, 14:25
+	createdPosts := []string{
+		makePost(92820377, 1753856400, "12:00"),
+		makePost(92820378, 1753670400, "09:00"),
+		makePost(92820379, 1753770300, "14:25"),
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
-			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"success":true}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"x","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			n := atomic.AddInt32(&postCount, 1)
+			w.Write([]byte(fmt.Sprintf(`{"id":9282037%d}`, n+6))) // n=1→92820377, n=2→92820378, n=3→92820379
 		case r.Method == http.MethodGet && r.URL.Path == "/users/settings":
 			w.Write([]byte(`{"timezone_id":101,"timezone_offset":3,"timezones":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
-			if atomic.LoadInt32(&createCalled) == 0 {
-				w.Write([]byte(`{"list":[],"total_rows":0,"is_has_more":false,"rows_limit":20}`))
-			} else {
-				// After snapshot: 3 created posts in ASCENDING-ID order
-				// (the server's default list order). The timestamps put
-				// them in a DIFFERENT order:
-				//   92820377 → ts 1753856400 (LATEST)
-				//   92820378 → ts 1753670400 (EARLIEST)
-				//   92820379 → ts 1753770300 (MIDDLE)
-				// Timestamp order: 92820378 < 92820379 < 92820377.
-				w.Write([]byte(`{"list":[` +
-					makePost(92820377, 1753856400, "12:00") + "," +
-					makePost(92820378, 1753670400, "09:00") + "," +
-					makePost(92820379, 1753770300, "14:25") +
-					`],"total_rows":3,"is_has_more":false,"rows_limit":20}`))
+			n := int(atomic.LoadInt32(&postCount))
+			var rows []string
+			for i := 0; i < n; i++ {
+				rows = append(rows, createdPosts[i])
 			}
+			w.Write([]byte(fmt.Sprintf(`{"list":[%s],"total_rows":%d,"is_has_more":false,"rows_limit":20}`, strings.Join(rows, ","), len(rows))))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -1566,7 +1553,7 @@ func TestImportSearchPost_BatchOrderFollowsTimestamps(t *testing.T) {
 	c := newTestClient(t, srv)
 
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2003, 2001, 2002}, // sent order != timestamp order
+		SearchPostIDs:       []int{2003, 2001, 2002}, // sent order
 		PublicationWhenType: 3,
 		PublicationHowType:  2,
 		SchedulesIDs:        []int{55},
@@ -1577,14 +1564,49 @@ func TestImportSearchPost_BatchOrderFollowsTimestamps(t *testing.T) {
 	if len(resp.IDs) != 3 {
 		t.Fatalf("IDs = %v, want 3 recovered ids", resp.IDs)
 	}
-	// Reported order follows TIMESTAMPS (ascending), not sent order
-	// [2003,2001,2002] and not ascending-id order [92820377,92820378,92820379].
-	want := []int{92820378, 92820379, 92820377}
+	// Reported order follows CALLER ORDER (the loop appends in sent order).
+	// The created ids are ascending (92820377, 92820378, 92820379) and the
+	// sent order is [2003, 2001, 2002], so the ids come back in creation
+	// order: [92820377, 92820378, 92820379].
+	want := []int{92820377, 92820378, 92820379}
 	for i, w := range want {
 		if resp.IDs[i] != w {
-			t.Errorf("IDs = %v, want %v (ordered by publication timestamp, not sent/ascending-id order)", resp.IDs, want)
+			t.Errorf("IDs = %v, want %v (caller order — the loop appends each recovered id in sent order)", resp.IDs, want)
 			break
 		}
+	}
+	// Each slot must be attributed to the correct id — the slot times are
+	// non-monotonic (12:00, 09:00, 14:25) so a mis-attribution is detectable.
+	if len(resp.Slots) != 3 {
+		t.Fatalf("Slots = %d entries, want 3", len(resp.Slots))
+	}
+	slotByID := make(map[int]*PublicationDate, 3)
+	for i := range resp.Slots {
+		slotByID[resp.Slots[i].ID] = resp.Slots[i].PublicationDate
+	}
+	// 92820377 → 12:00 (call 1)
+	pd, ok := slotByID[92820377]
+	if !ok || pd == nil {
+		t.Fatal("slot for 92820377 missing or nil")
+	}
+	if pd.Hours != "12" || pd.Minutes != "00" {
+		t.Errorf("slot 92820377: hours=%q minutes=%q, want 12/00", pd.Hours, pd.Minutes)
+	}
+	// 92820378 → 09:00 (call 2)
+	pd, ok = slotByID[92820378]
+	if !ok || pd == nil {
+		t.Fatal("slot for 92820378 missing or nil")
+	}
+	if pd.Hours != "09" || pd.Minutes != "00" {
+		t.Errorf("slot 92820378: hours=%q minutes=%q, want 09/00", pd.Hours, pd.Minutes)
+	}
+	// 92820379 → 14:25 (call 3)
+	pd, ok = slotByID[92820379]
+	if !ok || pd == nil {
+		t.Fatal("slot for 92820379 missing or nil")
+	}
+	if pd.Hours != "14" || pd.Minutes != "25" {
+		t.Errorf("slot 92820379: hours=%q minutes=%q, want 14/25", pd.Hours, pd.Minutes)
 	}
 	if resp.SlotLookupError != "" {
 		t.Errorf("SlotLookupError = %q, want empty", resp.SlotLookupError)

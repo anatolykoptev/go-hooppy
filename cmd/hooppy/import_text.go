@@ -284,71 +284,26 @@ func detectAdMarkers(text string) []string {
 	return hits
 }
 
-// runImport is the testable core of `hooppy search import`. It validates
-// flags, fetches each source post's text for hygiene warnings (always on),
-// optionally strips VK wiki-link markup, and publishes. Warnings go to errOut
-// (stderr); the JSON result goes to out (stdout). Returns the process exit
-// code (0 on success, 1 on error).
+// runImport is the testable core of `hooppy search import`. It resolves each
+// scraped post via ResolveSearchPost, runs hygiene warnings (always on),
+// optionally strips VK wiki-link markup, and publishes via PublishPost.
+// Warnings go to errOut (stderr); the JSON result goes to out (stdout).
+// Returns the process exit code: 0 on success, 1 on error, 2 on partial
+// (batch where some posts succeeded and some failed).
 //
-// Cost profile (the operator must see this, never hidden):
-//   - SINGLE post (--post-id): one GetSearchPostEdit + one ImportSearchPost,
-//     same as today. Detection runs on the already-fetched edit text at no
-//     extra cost. Stripping is also free here — the single path already sends
-//     client-side text, so the flag changes the text and nothing else.
-//   - BATCH (--post-ids), flag OFF: N GetSearchPostEdit (one per post, for
-//     detection) + ONE batch ImportSearchPost. The N edit fetches are the
-//     cost of always-on detection — the import itself is still a single call.
-//   - BATCH (--post-ids), flag ON: N GetSearchPostEdit + N ImportSearchPost
-//     (one per post, each carrying its own transformed text). This is N import
-//     calls instead of 1 — the flag changes the cost profile, which is why it
-//     is opt-in. Unlike the other paths (which are a single API call and so
-//     atomic), this path is NOT atomic: a failure at post K of N leaves
-//     posts 1..K-1 already live in the queue. runImport therefore continues
-//     past a per-post failure, ALWAYS encodes a per-post result array to
-//     stdout (each post marked "created" with its id or "failed" with its
-//     error), and exits non-zero only AFTER stdout is written. Do NOT
-//     re-simplify this back to an early return — that would hide published
-//     posts from stdout and invite a duplicate-spawning re-run.
+// The batch is N independent resolve+publish pairs (client-side), NOT one
+// server-side batch. This avoids the server's batch-specific defects
+// (form-dependent text/attachment behaviour) and gives each post its own
+// original text. A failure at post K of N leaves posts 1..K-1 already live
+// in the queue — runImport continues past a per-post failure, ALWAYS encodes
+// a per-post result array to stdout (for batch), and exits 2 (partial) only
+// AFTER stdout is written. Do NOT re-simplify this to an early return —
+// that would hide published posts from stdout and invite a duplicate-spawning
+// re-run.
 //
-// Attachment delivery divergence (the operator must see this, never hidden).
-// This is MEASURED, not inferred from the text parallel — the three-row
-// probe below is the grounding, and the explicit-attachment code on the
-// strip path is LOAD-BEARING: sending attachments: [] on the single form
-// produces a post with NO attachments. Someone reading that code as
-// redundant complexity and deleting it would silently publish photo-less
-// posts. The comment is what stops them.
-//
-// Measured against the live endpoint (PUT /posts/import, attachments field
-// inspected on the created post):
-//
-//   - batch (ids "a,b"), attachments []            → 2 photos each (server fetched)
-//   - single (ids "a"),  attachments explicit/edit → 1 photo
-//   - single (ids "a"),  attachments []            → 0 photos
-//
-// So: the BATCH form auto-fetches attachments server-side; the SINGLE form
-// does not, and sends nothing unless the client sends it. The same
-// form-dependent asymmetry already documented for text, now confirmed for
-// attachments.
-//   - BATCH, flag OFF: the batch import sends NO attachments on the wire —
-//     the server downloads photos async from the source ids it receives
-//     (is_attachments_in_process). See buildImportPayload: the batch payload
-//     never sets Attachments.
-//   - BATCH, flag ON: the per-post path MUST use the single-id import form
-//     (SearchPostID, not SearchPostIDs) because the batch form cannot express
-//     per-post text — one texts array for N ids is a broadcast that blanks
-//     posts 2..N (the same constraint buildRewritePayload refuses). The
-//     single-id form does NOT auto-fetch attachments server-side (measured
-//     above), so each per-post request MUST send its attachments explicitly,
-//     read from the edit response (SearchPostEditAttachments). Sending []
-//     instead would publish each post with no photos. So turning on a
-//     TEXT-hygiene flag also changes ATTACHMENT delivery. This is NOT fixable
-//     on the strip path without a per-post-text-capable batch endpoint,
-//     which the API does not offer; the divergence is stated on stderr on
-//     every strip-mode batch so it is never hit unknowingly.
-//   - SINGLE post: both flag-off and flag-on send attachments explicitly from
-//     the edit — the single form does NOT auto-fetch (measured: single +
-//     attachments:[] → 0 photos), so the explicit send is required, not
-//     redundant. No divergence between flag-off and flag-on there.
+// Exit codes (repo convention): 0=complete, 1=error, 2=partial. A batch
+// where some posts failed exits 2; a batch where ALL posts failed exits 1
+// (complete failure, not partial). Each failed post is named on stderr.
 func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, args importArgs) int {
 	// Validate flags via the existing builder (reuses the tested validation).
 	payload, err := buildImportPayload(args.postID, args.postIDs, args.whenType, args.howType, args.schedules)
@@ -358,133 +313,54 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 	}
 	batch := args.postIDs != ""
 
-	// --- BATCH + strip: route each post through the per-post import path ---
-	if batch && args.stripVK {
-		ids, err := parseIntListErr(args.postIDs)
+	// Resolve the id list: single -> [postID], batch -> parsed slice.
+	var ids []int
+	if batch {
+		ids, err = parseIntListErr(args.postIDs)
 		if err != nil {
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(errOut, "warn: --strip-vk-markup: routing %d post(s) through the per-post import path (%d import requests instead of 1 batch call)\n", len(ids), len(ids))
-		// The per-post single-id form cannot express "let the server fetch
-		// attachments from the ids" the way the batch form does, so each
-		// request sends its attachments explicitly from the edit response.
-		// State it on every strip-mode batch so the divergence is never hit
-		// unknowingly — turning on a text-hygiene flag also changes
-		// attachment delivery. See the runImport doc comment for the why.
-		fmt.Fprintf(errOut, "warn: --strip-vk-markup: attachments are sent explicitly per post (read from each edit response), NOT fetched server-side from the source ids as the batch form does — a text-hygiene flag also changes attachment delivery on a batch\n")
-		// This path is NOT atomic: it issues N import calls instead of 1
-		// batch call, so a failure at post K of N leaves posts 1..K-1 already
-		// live in the queue. Returning early before encoding would hide the
-		// published posts from stdout and invite a re-run that duplicates
-		// them. So: continue past any per-post failure, record every outcome
-		// (created with its id, or failed with its error), ALWAYS encode the
-		// full result to stdout, and only THEN exit non-zero if any post
-		// failed. A re-run reads stdout to skip what already landed.
-		results := make([]perPostResult, 0, len(ids))
-		anyFailed := false
-		for _, id := range ids {
-			edit, err := c.GetSearchPostEdit(ctx, id)
-			if err != nil {
-				anyFailed = true
-				fmt.Fprintf(errOut, "error: GetSearchPostEdit(%d): %v\n", id, err)
-				results = append(results, perPostResult{SearchPostID: id, Status: "failed", Error: fmt.Sprintf("GetSearchPostEdit: %v", err)})
-				continue
-			}
-			text := ""
-			if len(edit.Texts) > 0 {
-				text = edit.Texts[0].Text
-			}
-			warnPostHygiene(errOut, id, text, args.stripVK, true)
-			transformed := stripVKMarkup(text)
-			perPostPayload := hooppy.CopySearchPostPayload{
-				SearchPostID:        id,
-				PublicationWhenType: args.whenType,
-				PublicationHowType:  args.howType,
-				SchedulesIDs:        payload.SchedulesIDs,
-				Texts:               []hooppy.PostText{{Text: transformed, SourceID: 0}},
-			}
-			if !args.noAttachments {
-				perPostPayload.Attachments = hooppy.SearchPostEditAttachments(edit.Attachments)
-			}
-			resp, err := c.ImportSearchPost(ctx, perPostPayload)
-			if err != nil {
-				// A *hooppy.CreateNoIDError is a create that SUCCEEDED but
-				// whose id the server did not return — the post exists, its
-				// identity is unknown. The library guard returns this typed
-				// error so a zero id never flows into posts move/update/delete
-				// as a real-looking handle (issue #131). The CLI import path
-				// downgrades it to the "created_no_id" status (exit 0,
-				// post_id:0 present in stdout) instead of "failed", preserving
-				// the dedup-via-stdout design — a re-run can tell a
-				// published-but-unidentified post from a normally created one
-				// and from a real failure. See perPostResult's doc comment.
-				var cnid *hooppy.CreateNoIDError
-				if errors.As(err, &cnid) {
-					results = append(results, perPostResult{SearchPostID: id, Status: "created_no_id", PostID: 0})
-					continue
-				}
-				anyFailed = true
-				fmt.Fprintf(errOut, "error: ImportSearchPost(%d): %v\n", id, err)
-				results = append(results, perPostResult{SearchPostID: id, Status: "failed", Error: fmt.Sprintf("ImportSearchPost: %v", err)})
-				continue
-			}
-			results = append(results, perPostResult{SearchPostID: id, Status: "created", PostID: resp.ID})
-		}
-		// ALWAYS encode the full result, even on partial failure — stdout is
-		// the operator's record of what landed. Exit non-zero only AFTER the
-		// encode, so a caller parsing stdout never loses already-published ids.
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(map[string]interface{}{
-			"strip_vk_markup": true,
-			"per_post":        results,
-		}); err != nil {
-			fmt.Fprintf(errOut, "error encoding output: %v\n", err)
-			return 1
-		}
-		if anyFailed {
-			return 1
-		}
-		return 0
+	} else {
+		ids = []int{args.postID}
 	}
 
-	// --- SINGLE post: fetch edit, detect, optionally strip, one import ---
+	target := hooppy.PublishTarget{
+		PublicationWhenType: args.whenType,
+		PublicationHowType:  args.howType,
+		SchedulesIDs:        payload.SchedulesIDs,
+	}
+
+	// Single post: resolve, warn, optionally strip, publish, emit PostIDResponse.
 	if !batch {
-		edit, err := c.GetSearchPostEdit(ctx, args.postID)
+		content, err := c.ResolveSearchPost(ctx, args.postID)
 		if err != nil {
-			fmt.Fprintf(errOut, "error: GetSearchPostEdit(%d): %v\n", args.postID, err)
+			fmt.Fprintf(errOut, "error: ResolveSearchPost(%d): %v\n", args.postID, err)
 			return 1
 		}
 		text := ""
-		if len(edit.Texts) > 0 {
-			text = edit.Texts[0].Text
+		if len(content.Texts) > 0 {
+			text = content.Texts[0].Text
 		}
-		warnPostHygiene(errOut, args.postID, text, args.stripVK, false)
+		warnPostHygiene(errOut, args.postID, text, args.stripVK)
 		if args.stripVK {
 			text = stripVKMarkup(text)
+			content.Texts = []hooppy.PostText{{Text: text, SourceID: 0}}
 		}
-		payload.Texts = []hooppy.PostText{{Text: text, SourceID: 0}}
-		if !args.noAttachments {
-			payload.Attachments = hooppy.SearchPostEditAttachments(edit.Attachments)
+		if args.noAttachments {
+			content.Attachments = nil
 		}
-		resp, err := c.ImportSearchPost(ctx, payload)
+		resp, err := c.PublishPost(ctx, content, target)
 		if err != nil {
-			// A *hooppy.CreateNoIDError is a create that SUCCEEDED but whose id
-			// the server did not return — the post exists, its identity is
-			// unknown. Map to created_no_id exit 0 (same behaviour as the
-			// strip-batch per-post loop) so a re-run can tell a
-			// published-but-unidentified post from a real failure and does not
-			// blindly re-import it (the duplicate-spawning hazard the strip
-			// path exists to prevent). Round 1 exited 1 here — the single
-			// path is the one that invites the duplicate re-run. See
-			// perPostResult's doc comment.
-			var cnid *hooppy.CreateNoIDError
-			if errors.As(err, &cnid) {
-				enc := json.NewEncoder(out)
-				enc.SetIndent("", "  ")
-				_ = enc.Encode(map[string]interface{}{"id": 0, "status": "created_no_id", "search_post_id": args.postID})
-				return 0
+			// Through the shared helper, so this arm agrees with the other
+			// two single-post runners on all three details, not just the
+			// exit code: the stdout record, the stderr warning telling the
+			// operator to reconcile before re-running, and treating an
+			// encode failure as an error rather than discarding it. This
+			// was the arm that said least while being the one most likely
+			// reached from a batch workflow.
+			if code, handled := reportCreateNoID(err, out, errOut, args.postID); handled {
+				return code
 			}
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
@@ -498,56 +374,66 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 		return 0
 	}
 
-	// --- BATCH, flag OFF: fetch each post for detection, then one batch import ---
-	ids, err := parseIntListErr(args.postIDs)
-	if err != nil {
-		fmt.Fprintf(errOut, "error: %v\n", err)
-		return 1
-	}
+	// Batch: N independent resolve+publish pairs. NOT atomic — a failure at
+	// post K leaves posts 1..K-1 live. Continue past per-post failures,
+	// record every outcome, ALWAYS encode stdout, then exit 2 (partial) if
+	// any failed but not all (exit 1 if all failed).
+	results := make([]perPostResult, 0, len(ids))
+	anyFailed := false
+	anySucceeded := false
 	for _, id := range ids {
-		edit, err := c.GetSearchPostEdit(ctx, id)
+		content, err := c.ResolveSearchPost(ctx, id)
 		if err != nil {
-			// A detection-read failure must NOT abort the import. This GET
-			// exists only to produce a hygiene warning; the import itself
-			// (the single batch call below) does not need it. Before this
-			// path existed the import made zero such calls, so failing the
-			// whole batch on a detection read would turn N optional reads
-			// into N fatal dependencies. Warn on stderr naming the post and
-			// stating it was not scanned, so a silent gap in coverage is not
-			// mistaken for a clean scan — then continue.
-			fmt.Fprintf(errOut, "warn: post %d: detection read failed (%v); post was NOT scanned for VK markup or ad markers, import continues\n", id, err)
+			anyFailed = true
+			fmt.Fprintf(errOut, "error: ResolveSearchPost(%d): %v\n", id, err)
+			results = append(results, perPostResult{SearchPostID: id, Status: "failed", Error: fmt.Sprintf("ResolveSearchPost: %v", err)})
 			continue
 		}
 		text := ""
-		if len(edit.Texts) > 0 {
-			text = edit.Texts[0].Text
+		if len(content.Texts) > 0 {
+			text = content.Texts[0].Text
 		}
-		warnPostHygiene(errOut, id, text, args.stripVK, true)
-	}
-	resp, err := c.ImportSearchPost(ctx, payload)
-	if err != nil {
-		// A *hooppy.CreateNoIDError is a create that SUCCEEDED but whose id
-		// the server did not return — the batch created, its identities are
-		// unknown. Map to created_no_id exit 0 (same behaviour as the
-		// strip-batch per-post loop and the single path) so a re-run can
-		// tell a published-but-unidentified batch from a real failure and
-		// does not blindly re-import it (the duplicate-spawning hazard).
-		// Round 1 exited 1 here. See perPostResult's doc comment.
-		var cnid *hooppy.CreateNoIDError
-		if errors.As(err, &cnid) {
-			enc := json.NewEncoder(out)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{"id": 0, "status": "created_no_id"})
-			return 0
+		warnPostHygiene(errOut, id, text, args.stripVK)
+		if args.stripVK {
+			text = stripVKMarkup(text)
+			content.Texts = []hooppy.PostText{{Text: text, SourceID: 0}}
 		}
-		fmt.Fprintf(errOut, "error: %v\n", err)
-		return 1
+		if args.noAttachments {
+			content.Attachments = nil
+		}
+		resp, err := c.PublishPost(ctx, content, target)
+		if err != nil {
+			var cnid *hooppy.CreateNoIDError
+			if errors.As(err, &cnid) {
+				results = append(results, perPostResult{SearchPostID: id, Status: "created_no_id", PostID: 0})
+				anySucceeded = true
+				continue
+			}
+			anyFailed = true
+			fmt.Fprintf(errOut, "error: PublishPost(%d): %v\n", id, err)
+			results = append(results, perPostResult{SearchPostID: id, Status: "failed", Error: fmt.Sprintf("PublishPost: %v", err)})
+			continue
+		}
+		anySucceeded = true
+		results = append(results, perPostResult{SearchPostID: id, Status: "created", PostID: resp.ID})
 	}
+	// ALWAYS encode the full result, even on partial failure — stdout is
+	// the operator's record of what landed. Exit non-zero only AFTER the
+	// encode, so a caller parsing stdout never loses already-published ids.
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(resp); err != nil {
+	if err := enc.Encode(map[string]interface{}{
+		"strip_vk_markup": args.stripVK,
+		"per_post":        results,
+	}); err != nil {
 		fmt.Fprintf(errOut, "error encoding output: %v\n", err)
 		return 1
+	}
+	if anyFailed && !anySucceeded {
+		return 1 // all failed = error, not partial
+	}
+	if anyFailed {
+		return 2 // partial: some succeeded, some failed
 	}
 	return 0
 }
@@ -555,14 +441,17 @@ func runImport(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, arg
 // warnPostHygiene scans a post's text and writes warnings to errOut (stderr).
 // VK wiki-link markup and advertising-disclosure markers are reported
 // regardless of whether --strip-vk-markup is set. When VK markup is detected
-// but the flag is OFF, the warning names the flag and states the cost so the
-// operator can act without reading the source. The cost message is MODE-AWARE:
-// stripping a SINGLE post costs no extra API call (the single path already
-// sends client-side text), so the warning tells a single-post caller the flag
-// is free; only a BATCH fans out to N import calls, so only the batch warning
-// names the N-calls cost. Telling a single-post caller the flag "costs one API
-// call per post" would discourage a free correctness win.
-func warnPostHygiene(errOut io.Writer, postID int, text string, stripVK, batch bool) {
+// but the flag is OFF, the warning names the flag so the operator can act
+// without reading the source.
+//
+// The flag is FREE in request-count terms: after the resolve+publish collapse,
+// every post (single or batch) is already its own POST /posts call, so
+// stripping VK markup changes nothing about the number of API calls — it
+// only transforms the text client-side before the publish. The prior
+// "N import calls instead of 1 batch call" cost message described a batch
+// shape that no longer exists (there is no server-side batch call; the batch
+// is N client-side resolve+publish pairs).
+func warnPostHygiene(errOut io.Writer, postID int, text string, stripVK bool) {
 	vkHits := detectVKMarkup(text)
 	for _, raw := range vkHits {
 		fmt.Fprintf(errOut, "warn: post %d: VK wiki-link markup found: %s\n", postID, raw)
@@ -572,10 +461,6 @@ func warnPostHygiene(errOut io.Writer, postID int, text string, stripVK, batch b
 		fmt.Fprintf(errOut, "warn: post %d: advertising-disclosure marker found on line: %q\n", postID, line)
 	}
 	if len(vkHits) > 0 && !stripVK {
-		if batch {
-			fmt.Fprintf(errOut, "warn: post %d: %d VK wiki-link marker(s) detected; --strip-vk-markup converts [url|text] to text but routes each post through its own import request (N import calls instead of 1 batch call)\n", postID, len(vkHits))
-		} else {
-			fmt.Fprintf(errOut, "warn: post %d: %d VK wiki-link marker(s) detected; --strip-vk-markup converts [url|text] to text at no extra cost (a single post is already one import call)\n", postID, len(vkHits))
-		}
+		fmt.Fprintf(errOut, "warn: post %d: %d VK wiki-link marker(s) detected; --strip-vk-markup converts [url|text] to text at no extra cost (the text is transformed client-side before the publish; request count is unchanged)\n", postID, len(vkHits))
 	}
 }

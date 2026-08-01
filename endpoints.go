@@ -38,16 +38,13 @@ const (
 	pathPageDisconnect = "/accounts/pages/%d"
 	pathPostUpdate     = "/posts/%d"
 	pathPostsSearch    = "/posts/search"
-	pathPostsCopy      = "/posts/copy"
 	pathPostsSources   = "/posts/sources"
-	pathPostsImport    = "/posts/import"
 	// Posts search (scraping external pages) — UNDOCUMENTED.
 	pathPostsSearchIndex      = "/posts-search"
 	pathPostsSearchSources    = "/posts-search/source-resources"
 	pathPostsSearchParseForm  = "/posts-search/parsing/form"
 	pathPostsSearchParseStart = "/posts-search/parsing/start"
 	pathPostsSearchParseStop  = "/posts-search/parsing/stop"
-	pathPostsRewrite          = "/posts/rewrite"
 	pathPostsSearchEdit       = "/posts-search/%d/edit"
 	pathPostEdit              = "/posts/%d/edit"
 	// Cross-posting rule engine (the /cross-posting subsystem, NOT the

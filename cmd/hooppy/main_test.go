@@ -349,32 +349,8 @@ func findSub(t *testing.T, root *cobra.Command, names ...string) *cobra.Command 
 	return cur
 }
 
-// TestSearchCopy_NoPostIDsFlag verifies the BLOCKER fix: `search copy` does
-// NOT register --post-ids. PUT /posts/copy takes a singular search_post_id
-// int; the batch slice is silently dropped on that endpoint (the server does
-// not read search_post_ids), so --post-ids was a phantom affordance that
-// posted search_post_id:0 with an unread array and no error. Removing the
-// flag makes cobra reject `--post-ids` with a non-zero exit (unknown flag)
-// before any request — the user-observable consequence this test guards.
-//
-// RED-on-revert: reintroduce the --post-ids flag on copyCmd and Lookup
-// returns non-nil → this test fails.
-func TestSearchCopy_NoPostIDsFlag(t *testing.T) {
-	root := newSearchRoot(t)
-	copyCmd := findSub(t, root, "search", "copy")
-	if f := copyCmd.Flags().Lookup("post-ids"); f != nil {
-		t.Fatal("search copy registers --post-ids — PUT /posts/copy takes a single search_post_id; the batch slice is silently dropped (phantom affordance). Use 'search rewrite' or 'search import' for a batch.")
-	}
-	// Sanity: --post-id is still registered (the single-post path is valid).
-	if f := copyCmd.Flags().Lookup("post-id"); f == nil {
-		t.Fatal("search copy is missing --post-id (the single-post flag must remain)")
-	}
-}
-
 // TestSearchRewriteImport_PostIDsFlagRegistered verifies the two endpoints
-// that DO support batch (rewrite POST /posts with as_copy=1, import
-// PUT /posts/import) still expose --post-ids — the fix removed it from copy
-// only, not from the endpoints whose ids wire field accepts a batch.
+// that DO support batch (rewrite and import) still expose --post-ids.
 func TestSearchRewriteImport_PostIDsFlagRegistered(t *testing.T) {
 	root := newSearchRoot(t)
 	for _, sub := range []string{"rewrite", "import"} {
@@ -385,7 +361,7 @@ func TestSearchRewriteImport_PostIDsFlagRegistered(t *testing.T) {
 	}
 }
 
-// TestSearchBuilders_FlagValidation is a table test over the three search
+// TestSearchBuilders_FlagValidation is a table test over the search
 // subcommand builders covering flag validation. Each row asserts the builder
 // returns an error for an invalid flag combination AND that the error names
 // the intended cause (errSub) — a row that only asserted err == nil could
@@ -398,18 +374,6 @@ func TestSearchBuilders_FlagValidation(t *testing.T) {
 		errSub string
 		fn     func() error
 	}{
-		{"copy: --post-id required", "--post-id is required", func() error {
-			_, err := buildCopyPayload(0, 1, 1, "123", "", "", "", "")
-			return err
-		}},
-		{"copy: when-type 2 needs date", "--date, --hours, --minutes are required", func() error {
-			_, err := buildCopyPayload(1001, 2, 1, "123", "", "", "", "")
-			return err
-		}},
-		{"copy: when-type 3 needs schedules", "--schedules is required", func() error {
-			_, err := buildCopyPayload(1001, 3, 1, "", "", "", "", "")
-			return err
-		}},
 		{"rewrite: --post-id and --post-ids mutually exclusive", "mutually exclusive", func() error {
 			_, err := buildRewritePayload(1001, "2001,2002", "x", 1, 1, "123", "", "", "", "")
 			return err
@@ -560,31 +524,16 @@ func flexInt(v int64) hooppy.FlexInt {
 	return f
 }
 
-// TestSearchBuilders_PayloadConstruction is a table test over the three
-// search subcommand builders covering payload construction — the previously
+// TestSearchBuilders_PayloadConstruction is a table test over the search
+// subcommand builders covering payload construction — the previously
 // untested half where findings 1 and 5 lived. Asserts the exact payload
 // fields that reach the wire, not just err == nil.
 func TestSearchBuilders_PayloadConstruction(t *testing.T) {
-	t.Run("copy single-post builds scalar payload", func(t *testing.T) {
-		p, err := buildCopyPayload(1001, 1, 1, "123,456", "", "", "", "")
-		if err != nil {
-			t.Fatalf("buildCopyPayload: %v", err)
-		}
-		if p.SearchPostID != 1001 {
-			t.Errorf("SearchPostID = %d, want 1001", p.SearchPostID)
-		}
-		if len(p.SearchPostIDs) != 0 {
-			t.Errorf("SearchPostIDs = %v, want empty (copy is single-post only)", p.SearchPostIDs)
-		}
-		if got, want := p.SelectedPagesIDs, []int{123, 456}; !reflect.DeepEqual(got, want) {
-			t.Errorf("SelectedPagesIDs = %v, want %v", got, want)
-		}
-	})
-
 	t.Run("rewrite batch builds slice payload in caller order, no text override", func(t *testing.T) {
 		// Finding 4: batch rewrite cannot express per-post text, so --text is
-		// rejected with --post-ids and --post-ids alone sends an empty Texts
-		// slice (the server keeps each post's original text, like import).
+		// rejected with --post-ids and --post-ids alone sends no Texts (each
+		// post's text comes from the resolve step in RewriteSearchPost's
+		// client-side loop, not from the payload).
 		p, err := buildRewritePayload(0, "2003,2001,2002", "", 1, 1, "123", "", "", "", "")
 		if err != nil {
 			t.Fatalf("buildRewritePayload: %v", err)
@@ -595,20 +544,15 @@ func TestSearchBuilders_PayloadConstruction(t *testing.T) {
 		if got, want := p.SearchPostIDs, []int{2003, 2001, 2002}; !reflect.DeepEqual(got, want) {
 			t.Errorf("SearchPostIDs = %v, want %v (caller order preserved)", got, want)
 		}
-		if p.Texts == nil {
-			t.Fatal("Texts = nil, want []PostText{} (empty non-nil) — nil would be normalised by RewriteSearchPost, but the contract is an explicit empty slice so the server keeps original text (finding 4)")
-		}
-		if len(p.Texts) != 0 {
-			t.Errorf("Texts = %v, want [] (batch rewrite sends no text override; NOT [{\"\"}] which risks publishing blank)", p.Texts)
-		}
+		// Texts is nil for batch — RewriteSearchPost ignores it and resolves
+		// each post's text independently via the resolve step.
 	})
 
-	t.Run("import batch sends EMPTY texts slice (keeps original text)", func(t *testing.T) {
-		// Finding 5: batch import must send []PostText{} (empty, non-nil) so
-		// ImportSearchPost's nil-normalisation leaves it as-is and the server
-		// keeps each post's original text. The old code sent
-		// []PostText{{Text: ""}} — an explicit empty-text entry that risks
-		// publishing blank across the whole batch.
+	t.Run("import batch keeps original text (resolve step fills it)", func(t *testing.T) {
+		// ImportSearchPost resolves each post via ResolveSearchPost and
+		// publishes via PublishPost; the payload's Texts field is ignored
+		// (the resolve step fills the text). Only the IDs and publication
+		// target are read.
 		p, err := buildImportPayload(0, "3001,3002", 3, 2, "999")
 		if err != nil {
 			t.Fatalf("buildImportPayload: %v", err)
@@ -616,12 +560,8 @@ func TestSearchBuilders_PayloadConstruction(t *testing.T) {
 		if got, want := p.SearchPostIDs, []int{3001, 3002}; !reflect.DeepEqual(got, want) {
 			t.Errorf("SearchPostIDs = %v, want %v", got, want)
 		}
-		if p.Texts == nil {
-			t.Fatal("Texts = nil, want []PostText{} (empty non-nil) — nil would be normalised by ImportSearchPost, but the contract is an explicit empty slice so the server keeps original text")
-		}
-		if len(p.Texts) != 0 {
-			t.Errorf("Texts = %v, want [] (empty slice, NOT [{\"\"}] — an explicit empty-text entry risks publishing blank)", p.Texts)
-		}
+		// Texts is nil — ImportSearchPost ignores it and resolves each post's
+		// text independently via the resolve step.
 	})
 
 	t.Run("import single-post leaves Texts nil for Run to fill", func(t *testing.T) {

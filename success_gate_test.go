@@ -298,7 +298,7 @@ func TestSuccessGate_F1_SuccessFalseNotRetried(t *testing.T) {
 
 // --- F2: create-shaped id guard ------------------------------------------
 
-// TestSuccessGate_F2_CreateIDGuard drives each of the five create-shaped
+// TestSuccessGate_F2_CreateIDGuard drives each of the four create-shaped
 // methods against a 2xx with the id key ABSENT and with {"id":0}. Both must
 // return an error — a zero id flows into posts move/update/delete as a
 // real-looking handle (issue #131).
@@ -322,6 +322,11 @@ func TestSuccessGate_F2_CreateIDGuard(t *testing.T) {
 	// All create-shaped methods use when_type=1 so fillScheduleSlots is a
 	// no-op (no extra requests); the id guard runs right after decode (or
 	// after the no-op fillScheduleSlots for the search trio).
+	// searchPostEditBody is a minimal valid GET /posts-search/{id}/edit
+	// response so the resolve step in Rewrite/Import succeeds and the
+	// create-shaped POST reaches the gate.
+	searchPostEditBody := `{"id":"1001","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`
+
 	cases := []Case{
 		{
 			name: "CreatePost",
@@ -339,16 +344,6 @@ func TestSuccessGate_F2_CreateIDGuard(t *testing.T) {
 				_, err := c.SearchPosts(context.Background(), PostPublishNowPayload{
 					PublicationWhenType: 1, PublicationHowType: 1,
 					SelectedPagesIDs: []int{1}, Texts: []PostText{{Text: "x"}},
-				})
-				return err
-			},
-		},
-		{
-			name: "CopySearchPost",
-			call: func(c *Client) error {
-				_, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
-					SearchPostID: 1001, PublicationWhenType: 1, PublicationHowType: 1,
-					SelectedPagesIDs: []int{1},
 				})
 				return err
 			},
@@ -379,6 +374,13 @@ func TestSuccessGate_F2_CreateIDGuard(t *testing.T) {
 		for _, b := range bodies {
 			t.Run(tc.name+"/"+b.name, func(t *testing.T) {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					// Rewrite/Import resolve via GET /posts-search/{id}/edit
+					// first — answer with a valid edit response so the POST
+					// reaches the gate and gets b.body.
+					if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit") {
+						w.Write([]byte(searchPostEditBody))
+						return
+					}
 					w.Write([]byte(b.body))
 				}))
 				defer srv.Close()
@@ -412,7 +414,10 @@ func TestSuccessGate_F2_CreateIDGuard_BatchRecoveredIDPasses(t *testing.T) {
 	var createCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"2003","publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			createCalled = true
 			w.Write([]byte(`{"success":true}`)) // batch: no id on the wire
 			return
@@ -460,9 +465,12 @@ func TestSuccessGate_F2_CreateIDGuard_SlotLookupErrorSuppresses(t *testing.T) {
 	var createCalled int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/posts/import":
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"2001","publication_when_type":3,"publication_how_type":2,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
 			atomic.StoreInt32(&createCalled, 1)
-			w.Write([]byte(`{"success":true}`)) // batch: no id on the wire
+			w.Write([]byte(`{"success":true}`)) // no id on the wire
 		case r.Method == http.MethodGet && r.URL.Path == "/posts":
 			if atomic.LoadInt32(&createCalled) == 0 {
 				// Before snapshot: one post.
@@ -479,16 +487,17 @@ func TestSuccessGate_F2_CreateIDGuard_SlotLookupErrorSuppresses(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 	resp, err := c.ImportSearchPost(context.Background(), CopySearchPostPayload{
-		SearchPostIDs:       []int{2001, 2002},
+		SearchPostID:        2001,
 		PublicationWhenType: 3,
 		PublicationHowType:  2,
 		SchedulesIDs:        []int{55},
 	})
 	if err != nil {
-		t.Fatalf("ImportSearchPost batch with after-snapshot failure: expected nil error (create succeeded, only id recovery failed), got %v — the id guard must NOT fire when SlotLookupError is set (recovery was attempted)", err)
+		t.Fatalf("ImportSearchPost with after-snapshot failure: expected nil error (create succeeded, only id recovery failed), got %v — the id guard must NOT fire when SlotLookupError is set (recovery was attempted)", err)
 	}
-	if resp.ID != 0 || len(resp.IDs) != 0 {
-		t.Errorf("ID=%d IDs=%v — want empty (recovery failed)", resp.ID, resp.IDs)
+	// The wire id is 0 (server returned {"success":true} with no id).
+	if resp.ID != 0 {
+		t.Errorf("ID=%d, want 0 (no wire id from {success:true})", resp.ID)
 	}
 	if resp.SlotLookupError == "" {
 		t.Fatal("SlotLookupError is empty — fillScheduleSlots did not record the recovery failure; the guard would have no signal to defer to")
@@ -595,7 +604,7 @@ func TestSuccessGate_F4_CreateWithRealIDPasses(t *testing.T) {
 
 // --- F5: success:false on EVERY create-shaped method (the round-1 hole) -----
 //
-// Round 1 gated the 18 list-A mutation methods but NOT the five create-shaped
+// Round 1 gated the 18 list-A mutation methods but NOT the four create-shaped
 // methods, because PostIDResponse/CreatePostResponse carry no Success field
 // and so do not implement successReporter — checkSuccess returned nil BEFORE
 // re-parsing the raw body. A 2xx {"success":false} on a create was swallowed:
@@ -625,6 +634,11 @@ func TestSuccessGate_F5_SuccessFalseEveryCreateMethod(t *testing.T) {
 	// All create-shaped methods use when_type=1 so fillScheduleSlots is a
 	// no-op (no extra requests); the gate runs in client.do/doWithRetry
 	// before the method's checkCreateID ever sees the response.
+	// searchPostEditBody is a minimal valid GET /posts-search/{id}/edit
+	// response so the resolve step in Rewrite/Import succeeds and the
+	// create-shaped POST reaches the gate.
+	searchPostEditBody := `{"id":"1001","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`
+
 	cases := []Case{
 		{
 			name: "CreatePost",
@@ -642,16 +656,6 @@ func TestSuccessGate_F5_SuccessFalseEveryCreateMethod(t *testing.T) {
 				_, err := c.SearchPosts(context.Background(), PostPublishNowPayload{
 					PublicationWhenType: 1, PublicationHowType: 1,
 					SelectedPagesIDs: []int{1}, Texts: []PostText{{Text: "x"}},
-				})
-				return err
-			},
-		},
-		{
-			name: "CopySearchPost",
-			call: func(c *Client) error {
-				_, err := c.CopySearchPost(context.Background(), CopySearchPostPayload{
-					SearchPostID: 1001, PublicationWhenType: 1, PublicationHowType: 1,
-					SelectedPagesIDs: []int{1},
 				})
 				return err
 			},
@@ -693,11 +697,14 @@ func TestSuccessGate_F5_SuccessFalseEveryCreateMethod(t *testing.T) {
 		for _, b := range bodies {
 			t.Run(tc.name+"/"+b.name, func(t *testing.T) {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.Method != http.MethodGet {
-						w.Write([]byte(b.body))
+					// Rewrite/Import resolve via GET /posts-search/{id}/edit
+					// first — answer with a valid edit response so the POST
+					// reaches the gate and gets b.body.
+					if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit") {
+						w.Write([]byte(searchPostEditBody))
 						return
 					}
-					w.WriteHeader(http.StatusMethodNotAllowed)
+					w.Write([]byte(b.body))
 				}))
 				defer srv.Close()
 				c := newTestClient(t, srv)

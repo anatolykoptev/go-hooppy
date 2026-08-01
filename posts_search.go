@@ -2,10 +2,10 @@ package hooppy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
-	"strings"
 )
 
 // ListSearchPosts returns posts scraped from external social media pages,
@@ -369,11 +369,12 @@ func (c *Client) ListAllSearchPostsWithFirstAndLastTotal(ctx context.Context, f 
 // is_has_more, rows_limit} envelope (see testdata/live/source_resources.json
 // and issue #98), so it is paged like its siblings; the page parameter is
 // sent verbatim and the server answers.
-func (c *Client) ListSourceResources(ctx context.Context, page int) (*SourceResourcesResponse, error) {
-	params := url.Values{}
-	if page < 0 {
-		return nil, fmt.Errorf("hooppy: ListSourceResources: page must be non-negative (got %d); pass 0 to leave unset", page)
+func (c *Client) ListSourceResources(ctx context.Context, pageOpt ...int) (*SourceResourcesResponse, error) {
+	page, err := optionalPage("ListSourceResources", pageOpt)
+	if err != nil {
+		return nil, err
 	}
+	params := url.Values{}
 	if page > 0 {
 		params.Set("page", strconv.Itoa(page))
 	}
@@ -491,91 +492,110 @@ func (c *Client) StartParsing(ctx context.Context, payload ParsingStartPayload) 
 //
 // UNDOCUMENTED: DELETE /posts-search/parsing/stop is not in the public
 // OpenAPI spec.
+//
+// The response body IS read (decoded into a stopResponse) so the universal
+// success gate (checkSuccess, success_gate.go) fires on a 2xx carrying an
+// explicit {"success":false} — the same family as PR #134. The prior form
+// passed out=nil, so client.do returned after the status check without
+// reading the body, and a 2xx success:false was swallowed as a nil error.
+// stopResponse is unexported: it exists only to make client.do read the body
+// so the gate runs; callers who need the OBSERVED state (did the parse
+// actually stop?) use StopParsingAndConfirm, which re-reads the oracle below.
 func (c *Client) StopParsing(ctx context.Context) error {
-	return c.doDELETE(ctx, pathPostsSearchParseStop, nil, true)
+	var resp stopResponse
+	return c.doDELETE(ctx, pathPostsSearchParseStop, &resp, true)
 }
 
-// CopySearchPost copies a scraped post (from GET /posts-search) to the user's
-// own pages. The server auto-fills text and attachments from the scraped post
-// identified by payload.SearchPostID — no need to pass texts/attachments.
+// stopResponse is the decode target for DELETE /posts-search/parsing/stop.
+// It exists so client.do reads the body and the universal success gate
+// (checkSuccess) runs — a 2xx {"success":false} becomes a *SuccessFalseError
+// instead of a swallowed nil. The decoded Success field itself is NOT the
+// evidence the operation happened: the server answers {"success":true} for
+// both the working /stop path and the suffix-less sibling that cancels
+// nothing (measured, issue #94), and a stop is asynchronous server-side
+// (measured ~5s between stop-sent and is_parsing_in_progress going false —
+// see StopParsing's doc comment). So Success:true means only "the server
+// accepted the request", not "the parse is idle". The OBSERVED state comes
+// from GetParsingForm's is_parsing_in_progress via StopParsingAndConfirm.
+type stopResponse struct {
+	Success bool `json:"success"`
+}
+
+// StopParsingResult is the OBSERVED parsing state after a stop request, read
+// from the working oracle (GetParsingForm's is_parsing_in_progress), NOT from
+// the DELETE's own success body. See StopParsingAndConfirm for why the DELETE
+// body is not the evidence.
 //
-// This is the simplest way to re-publish a scraped post: just provide the
-// scraped post ID and where to publish it (page IDs for immediate/scheduled,
-// or schedule IDs for by-schedule mode).
+// IsParsingInProgress is the oracle's value after the DELETE. Stopped (the
+// convenience the CLI/MCP report) is its negation.
 //
-// UNDOCUMENTED: PUT /posts/copy with search_post_id is not in the public OpenAPI spec.
-func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
-	// Server expects arrays, not null — initialize nil slices to empty.
-	if payload.Texts == nil {
-		payload.Texts = []PostText{}
-	}
-	if payload.Attachments == nil {
-		payload.Attachments = []Attachment{}
-	}
-	if payload.SelectedPagesIDs == nil {
-		payload.SelectedPagesIDs = []int{}
-	}
-	if payload.SchedulesIDs == nil {
-		payload.SchedulesIDs = []int{}
-	}
-	// Fail closed: PUT /posts/copy takes a singular search_post_id int and does
-	// NOT read search_post_ids. This method marshals the payload wholesale, so a
-	// library consumer that sets SearchPostIDs would otherwise see the slice on
-	// the wire (json tag "search_post_ids,omitempty") with err == nil — a
-	// phantom batch the server silently ignores. Removing --post-ids from the
-	// CLI closed one caller; this guard closes the published library surface
-	// (the CLI is one of several). The batch-capable endpoints are
-	// RewriteSearchPost (POST /posts with as_copy=1) and ImportSearchPost
-	// (PUT /posts/import), which join SearchPostIDs into the ids wire field.
-	// Refuse here before any request.
-	if len(payload.SearchPostIDs) > 0 {
-		return nil, fmt.Errorf("hooppy: CopySearchPost: SearchPostIDs is not supported on PUT /posts/copy — this endpoint takes a singular search_post_id int and silently ignores search_post_ids (a non-empty slice would marshal onto the wire with err == nil); for a batch use RewriteSearchPost (POST /posts with as_copy=1) or ImportSearchPost (PUT /posts/import), which join SearchPostIDs into the ids wire field")
-	}
-	// Fail closed: a schedule-driven copy (when_type=3) targeted at an empty
-	// schedules list publishes to nothing. Refuse before issuing any request.
-	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
-		return nil, fmt.Errorf("hooppy: CopySearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
-	}
-	// Before snapshot for slot recovery: when when_type=3, snapshot the
-	// schedule's posts BEFORE the create so fillScheduleSlots can diff
-	// after. CopySearchPost is always single (SearchPostIDs is refused
-	// above), so idsSentCount=1 — a single create is a batch of one and
-	// uses the same snapshot-diff path. Walk ALL pages (default page size
-	// is 20); a single-page snapshot would miss pre-existing posts beyond
-	// page 1 and mis-attribute them as "created". See fillScheduleSlots
-	// for WHY the list surface is used instead of GET /posts/{id}/edit.
-	var beforeSnapshot []Post
-	var beforeErr error
-	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) > 0 {
-		beforeSnapshot, _, beforeErr = c.ListAllPostsWithTotal(ctx, ListPostsFilter{ScheduleID: payload.SchedulesIDs[0]})
-		// A failed before snapshot is NOT fatal — the create proceeds,
-		// and fillScheduleSlots reports the failure in SlotLookupError.
-	}
-	var resp PostIDResponse
-	// doPUT retryable=false: PUT /posts/copy CREATES a post (a copy of the
-	// scraped source). Non-idempotent — a 5xx/timeout after the write
-	// committed, retried, would publish a second copy. Same hazard class as
-	// ImportSearchPost (PUT /posts/import) and createPostWithMode (PUT
-	// /posts/{mode}); all create-shaped PUTs pass false. Enforced by
-	// TestRetryPolicySweep and pinned by TestRetryPolicy_CreateNotRetried.
-	if err := c.doPUT(ctx, pathPostsCopy, payload, &resp, false); err != nil {
+// ConfirmErr is non-empty when the DELETE itself succeeded (the stop request
+// was accepted) but the oracle re-read failed — the stop MAY have taken
+// effect, only the confirmation read failed. A caller MUST NOT report success
+// when ConfirmErr is non-empty: claiming the parse stopped without having
+// observed it is exactly the defect StopParsingAndConfirm exists to close
+// (issue #114 — the command announced success without ever reading what the
+// server said). Report "stop accepted, status unconfirmed" instead.
+type StopParsingResult struct {
+	IsParsingInProgress bool   `json:"is_parsing_in_progress"`
+	ConfirmErr          string `json:"confirm_error,omitempty"`
+}
+
+// Stopped reports whether the oracle observed the parse as idle after the
+// stop request. It is false when the parse is still running OR when the
+// confirmation re-read failed (ConfirmErr non-empty) — in both cases the
+// command must not claim the parse stopped.
+func (r *StopParsingResult) Stopped() bool {
+	return !r.IsParsingInProgress && r.ConfirmErr == ""
+}
+
+// StopParsingAndConfirm issues the cancel (DELETE /posts-search/parsing/stop)
+// and then re-reads the working oracle (GetParsingForm) to report the
+// OBSERVED parsing state — not the DELETE's own {"success":true} body.
+//
+// WHY THE ORACLE, NOT THE DELETE BODY (issue #114). StopParsing's doc comment
+// measures that the server answers {"success":true} for a DELETE that cancels
+// nothing (the suffix-less sibling) and that a real stop is asynchronous
+// (~5s between stop-sent and is_parsing_in_progress going false). So a 2xx
+// success:true is "the server accepted the request", not "the parse is idle".
+// The prior CLI/MCP code printed {"success":true} after a nil error from
+// StopParsing(out=nil) — the body was never read, and even when it is read a
+// success:true does not mean the parse stopped. The oracle
+// (is_parsing_in_progress) is the thing that was supposed to change; observing
+// it is the only report that cannot claim more than it knows.
+//
+// THE ASYNC GAP. Because the stop is asynchronous, an immediate re-read after
+// a stop that WILL succeed can still report is_parsing_in_progress=true. This
+// is HONEST, not a false failure: at the moment of the read the parse IS
+// still running. The command reports "stop accepted, still in progress" and
+// the operator re-runs 'search status' to confirm the transition. This is
+// preferred over claiming success on the DELETE body alone, which would
+// announce a stop that never happened when the server's success:true was a
+// lie (the measured suffix-less-sibling case). A polling loop that waited for
+// idle would claim to know the stop will eventually take effect — more than
+// the single read knows — so a single immediate re-read is the chosen shape.
+//
+// ERROR CONTRACT. A non-nil error means the DELETE itself failed (transport
+// error, non-2xx, or a 2xx {"success":false} caught by the universal gate);
+// the stop request did not reach a decided-success state. A nil error with
+// ConfirmErr non-empty means the DELETE succeeded but the oracle re-read
+// failed — the stop may have worked, only confirmation failed; report it as
+// "unconfirmed", never as success. A nil error with ConfirmErr empty means
+// the oracle was read; IsParsingInProgress is the observed state.
+func (c *Client) StopParsingAndConfirm(ctx context.Context) (*StopParsingResult, error) {
+	if err := c.StopParsing(ctx); err != nil {
 		return nil, err
 	}
-	// Report the assigned slot when the post was created into a schedule
-	// (when_type=3). Best-effort: a lookup failure populates
-	// SlotLookupError, not an error return — the post exists. CopySearchPost
-	// is always single, so idsSentCount=1.
-	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs, beforeSnapshot, beforeErr, 1)
-	// A 2xx with no id (id:0 / absent) is a create that produced no handle.
-	// CopySearchPost is always single, so IDs is never populated — the wire
-	// id is the handle. Surface a missing id instead of returning a zero that
-	// flows into posts move/update/delete as a real-looking handle (issue
-	// #131). Runs AFTER fillScheduleSlots so a batch-recovered id (none here,
-	// but kept uniform with Rewrite/Import) would satisfy the guard.
-	if err := checkCreateID("PUT "+pathPostsCopy, resp.ID, resp.IDs, resp.SlotLookupError); err != nil {
-		return nil, err
+	form, err := c.GetParsingForm(ctx)
+	if err != nil {
+		// The DELETE succeeded (StopParsing returned nil above); only the
+		// confirmation re-read failed. Surface this distinctly so the caller
+		// can report "stop accepted, status unconfirmed" instead of either
+		// claiming success or reporting a generic error that implies the
+		// stop itself failed.
+		return &StopParsingResult{ConfirmErr: err.Error()}, nil
 	}
-	return &resp, nil
+	return &StopParsingResult{IsParsingInProgress: form.IsParsingInProgress}, nil
 }
 
 // GetSearchPostEdit returns a scraped post's data in a format suitable for
@@ -600,47 +620,250 @@ func (c *Client) GetSearchPostEdit(ctx context.Context, searchPostID int) (*Sear
 	return &resp, nil
 }
 
-// SearchPostPhotos extracts photo data from a SearchPostEditResponse's
-// attachments and returns them as a single Attachment of type "photos"
-// suitable for passing in CopySearchPostPayload.Attachments.
+// SourceContent is the resolved content of a scraped post, ready to publish
+// via PublishPost. The attachment mapping (read shape → write shape) has
+// already been applied: photos and videos share one {type: "photos"} group
+// with array data. An unknown attachment kind would have errored at resolve
+// time (ResolveSearchPost), so every entry here is a kind the vendor's write
+// switch knows.
 //
-// The edit endpoint returns attachments as [{type: "photo", data: {...}}, ...].
-// The POST /posts endpoint expects [{type: "photos", data: [{...}, ...]}].
-// This helper does the transformation.
-func SearchPostPhotos(edit *SearchPostEditResponse) *Attachment {
-	var photos []interface{}
-	for _, att := range edit.Attachments {
-		if att.Type == "photo" || att.Type == "video" {
-			photos = append(photos, att.Data)
-		}
-	}
-	if len(photos) == 0 {
-		return nil
-	}
-	return &Attachment{
-		Type: "photos",
-		Data: photos,
-	}
+// SearchPostID is carried from the resolve step so PublishPost can send it in
+// the ids wire field — the server uses it to link the created post to its
+// scraped source (the is_used flag on the scraped post, dedup tracking).
+type SourceContent struct {
+	SearchPostID int          // the source scraped post id (for the ids wire field + slot recovery)
+	Texts        []PostText   // the resolved text (from GET /edit?as_copy=1)
+	Attachments  []Attachment // write-shape attachments (plural type, array data for photos)
 }
 
-// SearchPostNonPhotoAttachments extracts all non-photo/video attachments from
-// a SearchPostEditResponse and returns them as Attachment objects suitable for
-// passing in CopySearchPostPayload.Attachments.
+// PublishTarget is where to publish a SourceContent. The targeting and
+// scheduling fields follow the measured contract (spec fact 7):
+//   - SelectedPagesIDs: []int, flat form — the server resolves page→source
+//     itself (a create with [2355344] read back as
+//     selected_pages_by_source_ids: {"3":[2355344]}).
+//   - SchedulesIDs: []int, array on create (NOT the comma-string convention
+//     /posts/batch/move uses). Schedule count is plan-gated: >5 requires VIP
+//     or plan_type=2; hard ceiling 50.
+//   - PublicationDate: nested {date, hours, minutes} for when_type=2.
+//     project_id is required when publication_how_type=2 (not modelled here —
+//     the caller's HowType carries it).
+type PublishTarget struct {
+	PublicationWhenType int
+	PublicationHowType  int
+	SelectedPagesIDs    []int
+	SchedulesIDs        []int
+	PublicationDate     *PublicationDate
+}
+
+// knownReadAttachmentKinds is the set of attachment kinds the READ side
+// (GET /posts-search/{id}/edit?as_copy=1) emits in the attachments array's
+// per-item "type" field. The read side uses SINGULAR type names ("photo",
+// "video", "audio", "document", "link", "copyright", ...) — NOT the plural
+// write-side group names ("photos", "audios", "documents") the vendor's
+// getFormData switch keys on. This map gates the READ-side types that reach
+// mapEditAttachmentsToWriteShape's default branch (everything except
+// "photo"/"video", which are folded into the photos group). A read-side type
+// NOT in this set is an error at resolve time — fact 4 (silently dropped
+// videos) is the whole reason this mapping exists; a mapping that fails open
+// reproduces it.
 //
-// The edit endpoint returns attachments as [{type: "copyright", data: "url"}, ...].
-// These are passed through as-is — the server accepts the same types in POST /posts.
-// Supported types seen in deferred posts: copyright (VK source link), link
-// (external URL). The UI also supports: poll, repost, source, comment, title,
-// telegram_buttons, location, ad, audios, documents, settings.
-func SearchPostNonPhotoAttachments(edit *SearchPostEditResponse) []Attachment {
-	var result []Attachment
-	for _, att := range edit.Attachments {
-		if att.Type == "photo" || att.Type == "video" {
-			continue
+// "copyright" is included — it is the server's name for the VK source link,
+// measured on deferred posts. "photo" and "video" are NOT here because they
+// are handled by the case branch above the default, not by this allowlist.
+var knownReadAttachmentKinds = map[string]bool{
+	"audio":            true,
+	"document":         true,
+	"link":             true,
+	"ad":               true,
+	"poll":             true,
+	"repost":           true,
+	"source":           true,
+	"comment":          true,
+	"title":            true,
+	"telegram_buttons": true,
+	"location":         true,
+	"settings":         true,
+	"copyright":        true,
+}
+
+// mapEditAttachmentsToWriteShape transforms the read shape (one entry per
+// media item, singular type, object data) into the write shape (one entry per
+// group, plural type, array data). Photos and videos share the "photos"
+// group — the vendor's getFormData switches on "photos" with no "videos"
+// case; videos ride inside the photos group and the server sorts them out by
+// each item's own type field (spec fact 4, measured both directions).
+//
+// Other known kinds (link, copyright, poll, etc.) pass through as-is — the
+// server accepts the same singular type in the write body for non-media
+// attachments (measured: copyright and link pass through and survive the
+// round trip).
+//
+// An attachment kind the mapping does not know is an explicit error, never a
+// silent drop — fact 4 is the whole reason this spec exists; a mapping that
+// fails open reproduces the silent video-drop.
+func mapEditAttachmentsToWriteShape(readAttachments []Attachment) ([]Attachment, error) {
+	var photosGroup []interface{}
+	var others []Attachment
+	for _, att := range readAttachments {
+		switch att.Type {
+		case "photo", "video":
+			photosGroup = append(photosGroup, att.Data)
+		default:
+			if !knownReadAttachmentKinds[att.Type] {
+				return nil, fmt.Errorf("attachment kind %q is not a known READ-side attachment type (photo, video, audio, document, link, ad, poll, repost, source, comment, title, telegram_buttons, location, settings, copyright) — refusing to silently drop it (spec fact 4: a mapping that fails open reproduces the silent video-drop)", att.Type)
+			}
+			others = append(others, att)
 		}
-		result = append(result, att)
 	}
-	return result
+	var result []Attachment
+	if len(photosGroup) > 0 {
+		result = append(result, Attachment{Type: "photos", Data: photosGroup})
+	}
+	result = append(result, others...)
+	return result, nil
+}
+
+// ResolveSearchPost fetches the resolved content of a scraped post via
+// GET /posts-search/{id}/edit?as_copy=1 and maps it into the write shape
+// PublishPost expects. This is the GET-side resolver the product uses
+// product-wide (spec fact 1): as_copy=1 is a GET-side resolver, not a
+// server-side copy. The server returns the resolved content; the client is
+// responsible for carrying it into the write.
+//
+// The attachment mapping (read shape → write shape) is applied here:
+// photos and videos are grouped into one {type: "photos"} entry with array
+// data. An unknown attachment kind returns an error — fact 4 (silently
+// dropped videos) is the whole reason this mapping exists.
+//
+// The as_copy=1 query parameter is load-bearing: omitting it is the
+// historical bug that yields empty posts (spec fact 1, F4). GetSearchPostEdit
+// sets it; this function delegates to GetSearchPostEdit.
+func (c *Client) ResolveSearchPost(ctx context.Context, searchPostID int) (SourceContent, error) {
+	edit, err := c.GetSearchPostEdit(ctx, searchPostID)
+	if err != nil {
+		return SourceContent{}, err
+	}
+	attachments, err := mapEditAttachmentsToWriteShape(edit.Attachments)
+	if err != nil {
+		return SourceContent{}, fmt.Errorf("hooppy: ResolveSearchPost(%d): %w", searchPostID, err)
+	}
+	return SourceContent{
+		SearchPostID: searchPostID,
+		Texts:        edit.Texts,
+		Attachments:  attachments,
+	}, nil
+}
+
+// PublishPost creates one post via POST /posts from already-resolved content.
+// This is the single maintained write path (spec fact 2: only POST /posts is
+// maintained; /posts/copy and /posts/import appear zero times in the vendor's
+// 9 MB web bundle). The content MUST come from ResolveSearchPost (which
+// applies the attachment mapping); passing raw edit attachments would send
+// the read shape (singular type, object data) that the write endpoint does
+// not accept.
+//
+// The as_copy=1 field in the POST body is a mode marker (spec fact 1: it
+// instructs nothing — the server does not auto-copy from ids). The resolved
+// content (texts + attachments) is carried in the body; the ids field links
+// the created post to its scraped source.
+//
+// Fail-closed guards (run before any request):
+//   - Empty resolved content (no texts AND no attachments) is refused — the
+//     server would accept it and create an empty post (spec F5).
+//   - A schedule-driven publish (when_type=3) with an empty schedules list
+//     is refused — it would target no schedule.
+//
+// Slot recovery: for when_type=3, the assigned schedule slot is recovered via
+// the same snapshot-diff mechanism the prior Import/Rewrite paths used (see
+// fillScheduleSlots). The before-snapshot is taken inside this method.
+//
+// doPOST never retries (no retryable param) — a create must not be retried
+// after a committed write (issue #87). Enforced by TestRetryPolicySweep.
+// idsWireField builds the ids wire field for POST /posts with as_copy=1.
+// The ids field carries the scraped post ID the new post is copied from.
+// When content.SearchPostID is 0 (a hand-built SourceContent not derived from
+// a resolve step), the ids field is sent EMPTY — sending "0" would reference
+// a non-existent scraped post id 0, which the server may reject or silently
+// mis-attribute. A direct PublishPost caller building SourceContent by hand
+// (not via ResolveSearchPost) should leave SearchPostID at 0; the post is
+// published from the provided texts/attachments alone, with no source link.
+func idsWireField(searchPostID int) string {
+	if searchPostID == 0 {
+		return ""
+	}
+	return strconv.Itoa(searchPostID)
+}
+
+func (c *Client) PublishPost(ctx context.Context, content SourceContent, target PublishTarget) (*PostIDResponse, error) {
+	if len(content.Texts) == 0 && len(content.Attachments) == 0 {
+		return nil, fmt.Errorf("hooppy: PublishPost: resolved content is empty (no texts, no attachments) — refusing to create an empty post (the server would accept it and return a post with no content); the source post may have no text and no media, or the resolve failed silently")
+	}
+	if target.PublicationWhenType == 3 && len(target.SchedulesIDs) == 0 {
+		return nil, fmt.Errorf("hooppy: PublishPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
+	}
+	// Normalize nil slices to empty — the server expects arrays, not null.
+	texts := content.Texts
+	if texts == nil {
+		texts = []PostText{}
+	}
+	attachments := content.Attachments
+	if attachments == nil {
+		attachments = []Attachment{}
+	}
+	pages := target.SelectedPagesIDs
+	if pages == nil {
+		pages = []int{}
+	}
+	schedules := target.SchedulesIDs
+	if schedules == nil {
+		schedules = []int{}
+	}
+	// Before snapshot for slot recovery: when when_type=3, snapshot the
+	// schedule's posts BEFORE the create so fillScheduleSlots can diff
+	// after. PublishPost creates one post, so idsSentCount=1. Walk ALL
+	// pages (default page size is 20); a single-page snapshot would miss
+	// pre-existing posts beyond page 1 and mis-attribute them as "created".
+	// See fillScheduleSlots for WHY the list surface is used instead of
+	// GET /posts/{id}/edit.
+	var beforeSnapshot []Post
+	var beforeErr error
+	if target.PublicationWhenType == 3 && len(schedules) > 0 {
+		beforeSnapshot, _, beforeErr = c.ListAllPostsWithTotal(ctx, ListPostsFilter{ScheduleID: schedules[0]})
+		// A failed before snapshot is NOT fatal — the create proceeds,
+		// and fillScheduleSlots reports the failure in SlotLookupError.
+	}
+	body := struct {
+		AsCopy               int              `json:"as_copy"`
+		PublicationWhenType  int              `json:"publication_when_type"`
+		PublicationHowType   int              `json:"publication_how_type"`
+		PublicationWhereType int              `json:"publication_where_type"`
+		SelectedPagesIDs     []int            `json:"selected_pages_ids"`
+		SchedulesIDs         []int            `json:"schedules_ids"`
+		PublicationDate      *PublicationDate `json:"publication_date,omitempty"`
+		Texts                []PostText       `json:"texts"`
+		Attachments          []Attachment     `json:"attachments"`
+		IDs                  string           `json:"ids"`
+	}{
+		AsCopy:               1,
+		PublicationWhenType:  target.PublicationWhenType,
+		PublicationHowType:   target.PublicationHowType,
+		PublicationWhereType: 1,
+		SelectedPagesIDs:     pages,
+		SchedulesIDs:         schedules,
+		PublicationDate:      target.PublicationDate,
+		Texts:                texts,
+		Attachments:          attachments,
+		IDs:                  idsWireField(content.SearchPostID),
+	}
+	var resp PostIDResponse
+	if err := c.doPOST(ctx, pathPosts, body, &resp); err != nil {
+		return nil, err
+	}
+	c.fillScheduleSlots(ctx, &resp, target.PublicationWhenType, schedules, beforeSnapshot, beforeErr, 1)
+	if err := checkCreateID("POST "+pathPosts, resp.ID, resp.IDs, resp.SlotLookupError); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // LinkAttachment builds a link attachment from a URL string.
@@ -689,181 +912,285 @@ func TelegramButtonsAttachment(buttons []TelegramButton) Attachment {
 	return Attachment{Type: "telegram_buttons", Data: TelegramButtons{List: buttons}}
 }
 
-// copySearchPostIDs resolves the ids wire field shared by RewriteSearchPost
-// and ImportSearchPost. The server's ids field is a comma-separated string of
-// scraped post IDs; the server assigns schedule slots in the order it
-// receives them, so the caller's slice order is preserved on the wire.
-//
-// Precedence (enforced, not just documented — see CopySearchPostPayload doc):
-//   - SearchPostIDs non-empty AND SearchPostID non-zero → error (ambiguous).
-//   - SearchPostIDs non-empty → joined with ',' in caller order (batch).
-//   - SearchPostID non-zero → strconv.Itoa (single, the legacy path).
-//   - both empty → error before any request (nothing to copy).
+// resolveSearchPostIDs resolves the scraped-post id list from a
+// CopySearchPostPayload. Precedence (enforced, not just documented — see
+// CopySearchPostPayload doc):
+//   - SearchPostIDs non-empty AND SearchPostID non-zero -> error (ambiguous).
+//   - SearchPostIDs non-empty -> the slice itself (batch, caller order
+//     preserved).
+//   - SearchPostID non-zero -> []int{SearchPostID} (single, the legacy path).
+//   - both empty -> error before any request (nothing to publish).
 //
 // Validation: every element of SearchPostIDs must be positive (id > 0); a
-// zero or negative id is rejected with the offending index
-// (SearchPostIDs[i] = v — ids must be positive). The scalar path mirrors
-// this: a negative SearchPostID is rejected (a negative scraped-post id is
-// never real); 0 is the unset sentinel, so the both-empty guard handles it.
-// Duplicates are KEPT — the same source post in two schedule slots may be
-// intentional, and the order contract means the caller is authoritative over
-// the ids list. The function reads the slice only; it does NOT mutate
-// payload.SearchPostIDs (no sort, no dedupe, no reorder) — the slice header
-// shares backing storage with the caller's array.
-//
-// CopySearchPost does NOT use this helper — it refuses SearchPostIDs before
-// any request and serializes SearchPostID as the singular search_post_id int
-// (different wire shape, different endpoint).
-func copySearchPostIDs(payload CopySearchPostPayload) (string, error) {
+// zero or negative id is rejected with the offending index. The scalar path
+// mirrors this: a negative SearchPostID is rejected; 0 is the unset
+// sentinel, so the both-empty guard handles it. Duplicates are KEPT — the
+// same source post in two schedule slots may be intentional. The function
+// reads the slice only; it does NOT mutate payload.SearchPostIDs.
+func resolveSearchPostIDs(payload CopySearchPostPayload) ([]int, error) {
 	if len(payload.SearchPostIDs) > 0 && payload.SearchPostID != 0 {
-		return "", fmt.Errorf("hooppy: SearchPostIDs and SearchPostID are mutually exclusive — pass only one (the slice for a batch, the scalar for a single post)")
+		return nil, fmt.Errorf("hooppy: SearchPostIDs and SearchPostID are mutually exclusive — pass only one (the slice for a batch, the scalar for a single post)")
 	}
 	if len(payload.SearchPostIDs) > 0 {
-		parts := make([]string, len(payload.SearchPostIDs))
 		for i, id := range payload.SearchPostIDs {
 			if id <= 0 {
-				return "", fmt.Errorf("hooppy: SearchPostIDs[%d] = %d — ids must be positive", i, id)
+				return nil, fmt.Errorf("hooppy: SearchPostIDs[%d] = %d — ids must be positive", i, id)
 			}
-			parts[i] = strconv.Itoa(id)
 		}
-		return strings.Join(parts, ","), nil
+		return payload.SearchPostIDs, nil
 	}
-	// Scalar path: 0 is the unset sentinel (the both-empty guard below fires
-	// when both fields are 0/empty). A negative is never a real scraped-post id
-	// — reject it before any request, matching the batch arm's positivity
-	// discipline. The old code sent a negative straight onto the wire.
 	if payload.SearchPostID < 0 {
-		return "", fmt.Errorf("hooppy: SearchPostID = %d — must be a positive id (0 means unset; pass a positive scraped-post id)", payload.SearchPostID)
+		return nil, fmt.Errorf("hooppy: SearchPostID = %d — must be a positive id (0 means unset; pass a positive scraped-post id)", payload.SearchPostID)
 	}
 	if payload.SearchPostID != 0 {
-		return strconv.Itoa(payload.SearchPostID), nil
+		return []int{payload.SearchPostID}, nil
 	}
-	return "", fmt.Errorf("hooppy: SearchPostIDs/SearchPostID is required — pass the slice for a batch copy or the scalar for a single post")
+	return nil, fmt.Errorf("hooppy: SearchPostIDs/SearchPostID is required — pass the slice for a batch or the scalar for a single post")
 }
 
-// RewriteSearchPost rewrites one or more scraped posts (from GET /posts-search)
-// and publishes them to the user's own pages. Pass custom text in
-// payload.Texts to override the original(s). To keep the original photos for
-// a single-post rewrite, call GetSearchPostEdit first, use SearchPostPhotos to
-// extract them, and pass the result in payload.Attachments.
+// RewriteSearchPost rewrites one or more scraped posts and publishes them to
+// the user's own pages. Pass custom text in payload.Texts to override the
+// original(s); leave Texts empty to keep the original text (resolved per post
+// via GET /posts-search/{id}/edit?as_copy=1).
 //
-// Uses POST /posts with as_copy=1 (same as the Hooppy UI). The scraped post
-// ID(s) are passed in the ids field: a single id via payload.SearchPostID, or
-// a batch via payload.SearchPostIDs (comma-joined in caller order — the server
-// assigns schedule slots in that order). See CopySearchPostPayload for the
-// precedence and mutual-exclusion rules.
+// This is a thin composition over ResolveSearchPost + PublishPost: for each
+// scraped post ID (scalar SearchPostID or batch SearchPostIDs), it resolves
+// the content, overrides the text if payload.Texts is non-empty, and publishes
+// via POST /posts with as_copy=1. The batch is N independent resolve+publish
+// pairs (client-side), NOT one server-side batch — this avoids the server's
+// batch-specific defects (form-dependent text/attachment behaviour) and
+// allows per-post text (each resolve carries its own original text).
+//
+// payload.Attachments is ignored — the attachments come from the resolve
+// step (the read shape is mapped to the write shape by ResolveSearchPost).
+// Passing attachments manually is no longer needed and no longer honoured;
+// the caller who needs control over the write body should use PublishPost
+// directly.
+//
+// resolvePublishBatch is the shared core of RewriteSearchPost and
+// ImportSearchPost. It iterates the scraped-post id list, resolving and
+// publishing each post independently (client-side loop). overrideTexts, when
+// non-nil, replaces each post's resolved text (the rewrite single-post
+// override); nil keeps the original text (import). callerName prefixes the
+// per-post error wrapping.
+//
+// PARTIAL-RESULT CONTRACT (the reason this helper exists as one place):
+// a per-post failure does NOT discard the posts already created. The helper
+// implements the three documented outcomes (see PartialPostError):
+//   - every post succeeded → (non-nil resp, nil err)
+//   - some succeeded, some failed → (non-nil resp, *PartialPostError) — the
+//     result carries every id that landed, the error carries every failure
+//   - every post failed (batch) → (nil resp, plain error) — NOT
+//     *PartialPostError, so a caller type-asserting *PartialPostError reads
+//     "total failure" not "some succeeded"; the CLI paths exit 1 (error), not
+//     2 (partial)
+//
+// A caller that ignores the error and reads only the result still sees what
+// landed on the partial path; a caller that type-asserts the error gets the
+// failures too. This mirrors runImport's per_post array (CLI) and
+// ListAllSearchPostsWithFirstAndLastTotal's Capped partial-result convention
+// (library) — a partial result is returned populated alongside a typed error,
+// never discarded.
+//
+// The single-post path (len(ids) == 1) does NOT use PartialPostError — a
+// single-post failure returns a plain wrapped error with a nil result,
+// matching the pre-batch contract (one post, one error, nothing to accumulate).
+func (c *Client) resolvePublishBatch(ctx context.Context, ids []int, target PublishTarget, overrideTexts []PostText, noAttachments bool, callerName string) (*PostIDResponse, error) {
+	// Batch+Texts broadcast guard (MAJOR 3): a batch (len(ids) > 1) with a
+	// non-empty overrideTexts would broadcast one text across all N posts,
+	// silently overwriting each post's resolved text with the same string —
+	// the exact thing the MCP error message calls impossible. The guard is a
+	// payload invariant (checkable before any request), so it fires BEFORE
+	// the resolve loop — no GET /edit, no POST /posts. The single-post path
+	// (len(ids) == 1) is the legitimate text-override case and is allowed.
+	// This is the shared invariant the reviewer asked for at the choke point;
+	// resolvePublishBatch is the single place every Rewrite/Import path
+	// passes through, so the guard lives here once, not duplicated per caller.
+	if len(ids) > 1 && len(overrideTexts) > 0 {
+		return nil, fmt.Errorf("hooppy: %s: SearchPostIDs (batch, %d ids) with Texts (non-empty) is a broadcast — one text array overwrites all N posts' resolved text with the same string; for per-post text, call PublishPost per id with each post's own SourceContent.Texts; for a single-post text override, use SearchPostID (scalar) not SearchPostIDs (batch)", callerName, len(ids))
+	}
+	var resp PostIDResponse
+	var failed []PostFailure
+	createdNoID := 0 // batch posts that succeeded but returned no id (CreateNoIDError)
+	for _, id := range ids {
+		content, err := c.ResolveSearchPost(ctx, id)
+		if err != nil {
+			failed = append(failed, PostFailure{SearchPostID: id, Err: fmt.Errorf("hooppy: %s: resolve %d: %w", callerName, id, err)})
+			continue
+		}
+		// Apply the text override only when the caller actually provided
+		// text. The predicate mirrors the batch+Texts broadcast guard above
+		// (len(overrideTexts) > 0): an empty non-nil slice []PostText{} is
+		// the batch idiom (buildRewritePayload / buildRewriteSearchPostPayload
+		// emit it for a batch on main, and the v1.1.2 godoc describes it as
+		// the batch idiom) and MUST NOT wipe the resolved text — testing
+		// `overrideTexts != nil` here would replace the resolved text with an
+		// empty array, silently publishing a text-less post (MAJOR 2).
+		if len(overrideTexts) > 0 {
+			content.Texts = overrideTexts
+		}
+		if noAttachments {
+			content.Attachments = nil
+		}
+		r, err := c.PublishPost(ctx, content, target)
+		if err != nil {
+			var cnid *CreateNoIDError
+			if errors.As(err, &cnid) {
+				// CreateNoIDError means the create SUCCEEDED and the
+				// server omitted the id (success_gate.go:121: "The post
+				// may exist on the server"). For a BATCH, this is a
+				// success-with-unknown-id — a third bucket, not a
+				// failure. Treating it as a failure files every post
+				// under `failed`, trips the all-failed gate, and reports
+				// "no posts were published" which may be FALSE — the
+				// posts may well exist on the server. That wording
+				// invites a duplicate-spawning re-run (the round-1
+				// blocker's exact hazard). Match runImport's
+				// created_no_id status: count it as succeeded, do NOT
+				// add a zero id to resp.IDs (a zero flows into
+				// move/update/delete as a real-looking handle, issue
+				// #131). The single-post path (len(ids) == 1) keeps the
+				// pre-batch contract: return the typed error so the
+				// caller can type-assert *CreateNoIDError (F2), and the
+				// CLI runner maps it to exit 0 the way runImport does.
+				if len(ids) > 1 {
+					createdNoID++
+					continue
+				}
+			}
+			failed = append(failed, PostFailure{SearchPostID: id, Err: fmt.Errorf("hooppy: %s: publish %d: %w", callerName, id, err)})
+			continue
+		}
+		resp.IDs = append(resp.IDs, r.ID)
+		resp.Slots = append(resp.Slots, r.Slots...)
+		// PublicationDate/ScheduleID are taken from the FIRST successful post
+		// only. For a batch (N posts), these fields are MEANINGLESS — each
+		// post has its own publication date (when_type=2) or its own schedule
+		// slot (when_type=3, recoverable from resp.Slots by id). The batch
+		// caller should read resp.Slots (per-post) or resp.IDs (order), not
+		// resp.PublicationDate/ScheduleID (first-post only). The fields are
+		// kept populated for the single-post path, where they are meaningful.
+		if resp.ID == 0 {
+			resp.ID = r.ID
+			resp.PublicationDate = r.PublicationDate
+			resp.ScheduleID = r.ScheduleID
+		}
+		if r.SlotLookupError != "" {
+			if resp.SlotLookupError != "" {
+				resp.SlotLookupError += "; "
+			}
+			resp.SlotLookupError += r.SlotLookupError
+		}
+	}
+	// Single-post path: a failure is a plain error, not a partial — there is
+	// nothing to accumulate. Return the wrapped error with a nil result,
+	// matching the pre-batch contract.
+	// Surface the count BEFORE any return. Counting created-no-id posts and
+	// keeping the number inside this function replaces a false loud signal
+	// ("no posts were published") with a correct silent one: err nil, IDs
+	// empty, exit 0, and N posts that probably exist on the server. A caller
+	// reads a clean success with no ids and re-runs, duplicating every one.
+	//
+	// It sits above every return deliberately: the mixed case (some ids
+	// returned, some omitted) has no failures and leaves through the
+	// len(failed) == 0 branch below, so an assignment placed after that
+	// branch reaches only the partial path and the count silently stays
+	// zero on the very case that most needs it.
+	resp.CreatedNoID = createdNoID
+	if len(ids) == 1 && len(failed) > 0 {
+		return nil, failed[0].Err
+	}
+	if len(failed) == 0 {
+		return &resp, nil
+	}
+	// All-failed batch (len(ids) > 1, every post failed, no created-no-id
+	// successes): return a PLAIN error with a nil result — NOT a
+	// *PartialPostError. The documented three-outcome contract (see
+	// PartialPostError) is:
+	//   - err == nil                  → every post succeeded
+	//   - err is *PartialPostError     → SOME succeeded, some failed (resp non-nil)
+	//   - err is non-nil, not *PartialPostError → EVERY post failed (resp is nil)
+	// Returning *PartialPostError with an empty Result.IDs here would collapse
+	// outcomes 2 and 3: a caller type-asserting *PartialPostError would read
+	// "some succeeded" when nothing did, and the CLI `search rewrite` path
+	// (which maps *PartialPostError to exit 2/partial) would exit 2 on a total
+	// failure — diverging from runImport, which exits 1 on all-failed. A plain
+	// error makes both CLI paths exit 1 (runImport via its own loop, rewrite
+	// via die(err)) and lets a caller distinguish total from partial by type.
+	//
+	// The createdNoID guard: a batch where every post returned 2xx with no id
+	// (CreateNoIDError) is NOT all-failed — those posts succeeded with an
+	// unknown id (MAJOR 1). Without this guard, createdNoID > 0 with empty
+	// resp.IDs would fall into the all-failed branch and report "no posts were
+	// published" which may be false. The wording is softened from "no posts
+	// were published" to "no post ids were returned" because the former is
+	// asserted as fact and may be false when the server omitted ids.
+	if len(resp.IDs) == 0 && createdNoID == 0 {
+		return nil, fmt.Errorf("hooppy: %s: every post in the batch failed (%d/%d); no post ids were returned — first failure: %w", callerName, len(failed), len(ids), failed[0].Err)
+	}
+	// Batch partial: some succeeded, some failed. Return the populated result
+	// alongside the typed error so a caller never loses already-published ids.
+	return &resp, &PartialPostError{Result: &resp, Failed: failed}
+}
+
+// RewriteSearchPost rewrites one or more scraped posts and publishes them to
+// the user's own pages. Pass custom text in payload.Texts to override the
+// original(s); leave Texts empty to keep the original text (resolved per post
+// via GET /posts-search/{id}/edit?as_copy=1).
+//
+// This is a thin composition over ResolveSearchPost + PublishPost: for each
+// scraped post ID (scalar SearchPostID or batch SearchPostIDs), it resolves
+// the content, overrides the text if payload.Texts is non-empty, and publishes
+// via POST /posts with as_copy=1. The batch is N independent resolve+publish
+// pairs (client-side), NOT one server-side batch — this avoids the server's
+// batch-specific defects (form-dependent text/attachment behaviour) and
+// allows per-post text (each resolve carries its own original text).
+//
+// payload.Attachments is ignored — the attachments come from the resolve
+// step (the read shape is mapped to the write shape by ResolveSearchPost).
+// Passing attachments manually is no longer needed and no longer honoured;
+// the caller who needs control over the write body should use PublishPost
+// directly.
+//
+// PARTIAL-RESULT CONTRACT: a batch (SearchPostIDs with >1 element) where some
+// posts succeed and some fail returns a NON-NIL *PostIDResponse (populated
+// with every id that landed) alongside a *PartialPostError. A caller never
+// loses already-published posts from the return value. The single-post path
+// (SearchPostID) returns a plain wrapped error with a nil result on failure,
+// matching the pre-batch contract. See PartialPostError for the three-outcome
+// distinction.
 //
 // UNDOCUMENTED: POST /posts with as_copy=1 + ids is not in the public OpenAPI spec.
 func (c *Client) RewriteSearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
-	ids, err := copySearchPostIDs(payload)
+	ids, err := resolveSearchPostIDs(payload)
 	if err != nil {
 		return nil, err
 	}
-	if payload.Texts == nil {
-		payload.Texts = []PostText{}
+	// Converse guard (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it. RewriteSearchPost carries
+	// payload.SchedulesIDs into the PublishTarget below and PublishPost
+	// marshals it onto POST /posts, so without this guard SchedulesIDs +
+	// when_type!=3 reaches the wire under a publish-now/at-time intent. The
+	// CLI builder guard does not protect an external consumer of this public
+	// module; this is the layer below it.
+	if len(payload.SchedulesIDs) > 0 && payload.PublicationWhenType != 3 {
+		return nil, fmt.Errorf("hooppy: RewriteSearchPost: schedules_ids is set but publication_when_type=%d (not 3) — schedules target the by-schedule queue and are silently dropped or contradicted under other when-types; pass publication_when_type=3 to queue by schedule, or clear schedules_ids to publish as when-type %d intends", payload.PublicationWhenType, payload.PublicationWhenType)
 	}
-	if payload.Attachments == nil {
-		payload.Attachments = []Attachment{}
+	target := PublishTarget{
+		PublicationWhenType: payload.PublicationWhenType,
+		PublicationHowType:  payload.PublicationHowType,
+		SelectedPagesIDs:    payload.SelectedPagesIDs,
+		SchedulesIDs:        payload.SchedulesIDs,
+		PublicationDate:     payload.PublicationDate,
 	}
-	if payload.SelectedPagesIDs == nil {
-		payload.SelectedPagesIDs = []int{}
-	}
-	if payload.SchedulesIDs == nil {
-		payload.SchedulesIDs = []int{}
-	}
-	// Fail closed: a schedule-driven rewrite (when_type=3) targeted at an
-	// empty schedules list publishes to nothing. Refuse before issuing any
-	// request. Fires for the batch form too — a batch of N posts targeted
-	// at no schedule is N times the damage of one.
-	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
-		return nil, fmt.Errorf("hooppy: RewriteSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
-	}
-	// Before snapshot for slot recovery: when when_type=3, snapshot the
-	// schedule's posts BEFORE the create so fillScheduleSlots can diff
-	// after. This fires for BOTH single and batch — a single create is a
-	// batch of one and uses the same snapshot-diff path (the server returns
-	// {"id": ...} for a single, {"success": true} for a batch, but the diff
-	// recovers the created ids from the list either way). Walk ALL pages
-	// (default page size is 20); a single-page snapshot would miss
-	// pre-existing posts beyond page 1, causing them to be mis-attributed
-	// as "created" by the diff. See fillScheduleSlots for WHY the list
-	// surface is used instead of GET /posts/{id}/edit.
-	idsSentCount := len(payload.SearchPostIDs)
-	if idsSentCount == 0 {
-		// Scalar single-post form (SearchPostID).
-		idsSentCount = 1
-	}
-	var beforeSnapshot []Post
-	var beforeErr error
-	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) > 0 {
-		beforeSnapshot, _, beforeErr = c.ListAllPostsWithTotal(ctx, ListPostsFilter{ScheduleID: payload.SchedulesIDs[0]})
-		// A failed before snapshot is NOT fatal — the create proceeds,
-		// and fillScheduleSlots reports the failure in SlotLookupError.
-	}
-	// POST /posts with as_copy=1 — same format the UI uses.
-	body := struct {
-		AsCopy               int              `json:"as_copy"`
-		PublicationWhenType  int              `json:"publication_when_type"`
-		PublicationHowType   int              `json:"publication_how_type"`
-		PublicationWhereType int              `json:"publication_where_type"`
-		SelectedPagesIDs     []int            `json:"selected_pages_ids"`
-		SchedulesIDs         []int            `json:"schedules_ids"`
-		PublicationDate      *PublicationDate `json:"publication_date,omitempty"`
-		Texts                []PostText       `json:"texts"`
-		Attachments          []Attachment     `json:"attachments"`
-		IDs                  string           `json:"ids"`
-	}{
-		AsCopy:               1,
-		PublicationWhenType:  payload.PublicationWhenType,
-		PublicationHowType:   payload.PublicationHowType,
-		PublicationWhereType: 1,
-		SelectedPagesIDs:     payload.SelectedPagesIDs,
-		SchedulesIDs:         payload.SchedulesIDs,
-		PublicationDate:      payload.PublicationDate,
-		Texts:                payload.Texts,
-		Attachments:          payload.Attachments,
-		IDs:                  ids,
-	}
-	var resp PostIDResponse
-	if err := c.doPOST(ctx, pathPosts, body, &resp); err != nil {
-		return nil, err
-	}
-	// Report the assigned slot when the post was created into a schedule
-	// (when_type=3). Best-effort: a lookup failure populates
-	// SlotLookupError, not an error return — the post exists.
-	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs, beforeSnapshot, beforeErr, idsSentCount)
-	// A 2xx with no id (id:0 / absent) is a create that produced no handle.
-	// For a batch the client recovers ids via fillScheduleSlots (sets ID to
-	// the first recovered id, populates IDs); when BOTH are empty the create
-	// produced nothing the caller can act on. Surface it instead of returning
-	// a zero that flows into posts move/update/delete as a real-looking handle
-	// (issue #131). Runs AFTER fillScheduleSlots so a recovered id satisfies
-	// the guard.
-	if err := checkCreateID("POST "+pathPosts, resp.ID, resp.IDs, resp.SlotLookupError); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-// ScrapedPhotoAttachment builds an Attachment from scraped post photos.
-//
-// DEPRECATED: scraped photo IDs (VK owner_id + photo id) cannot be attached
-// to your own post — VK doesn't allow cross-group photo references. Use
-// GetSearchPostEdit + SearchPostPhotos instead to get working attachment data.
-// This helper is kept for reference only.
-func ScrapedPhotoAttachment(photos []SearchPostPhoto) Attachment {
-	items := make([]map[string]interface{}, 0, len(photos))
-	for _, ph := range photos {
-		items = append(items, map[string]interface{}{
-			"id":       strconv.Itoa(ph.ID),
-			"owner_id": ph.OwnerID,
-			"type":     "photo",
-		})
-	}
-	return Attachment{
-		Type: "photos",
-		Data: items,
-	}
+	// Override text if the caller provided one (single-post rewrite with
+	// custom text). For a batch, Texts is empty — each post keeps its own
+	// resolved text (per-post, the whole point of the client-side loop).
+	// The batch+Texts broadcast guard lives in resolvePublishBatch (the
+	// single choke point every Rewrite/Import path passes through) — see
+	// resolvePublishBatch.
+	overrideTexts := payload.Texts
+	return c.resolvePublishBatch(ctx, ids, target, overrideTexts, payload.NoAttachments, "RewriteSearchPost")
 }
 
 // SearchPostEditAttachments builds the attachments array from a scraped post's
@@ -878,6 +1205,11 @@ func ScrapedPhotoAttachment(photos []SearchPostPhoto) Attachment {
 // post — the server's async download (is_attachments_in_process) only triggers
 // for photos with a `url` or `message_id` field inside a {type: "photos"}
 // attachment; videos and other types are stored directly.
+//
+// NOTE: this helper is also used by UpdatePostText (own-post edit), which
+// reads GET /posts/{id}/edit (the SAME singular vocabulary the scraped-post
+// edit endpoint uses — measured across 11 real own-posts). Do not remove it
+// when the scraped-post copy family is refactored.
 func SearchPostEditAttachments(editAttachments []Attachment) []Attachment {
 	var photosAndVideos []interface{}
 	var others []Attachment
@@ -896,137 +1228,188 @@ func SearchPostEditAttachments(editAttachments []Attachment) []Attachment {
 	return result
 }
 
-// ImportSearchPost copies one or more scraped posts via PUT /posts/import.
-// Unlike RewriteSearchPost (POST /posts with as_copy=1), the import endpoint
-// accepts comma-separated search post IDs in its ids field and can copy
-// multiple posts in one request. Pass a single id via payload.SearchPostID or
-// a batch via payload.SearchPostIDs (comma-joined in caller order — the server
-// assigns schedule slots in that order). See CopySearchPostPayload for the
-// precedence and mutual-exclusion rules.
+// ScrapedPhotoAttachment builds a {type: "photos"} attachment from a list of
+// scraped VK photo descriptors (SearchPostPhoto: id + owner_id). It is kept as
+// a Deprecated shim so existing consumers compile; it delegates to
+// SearchPostEditAttachments (the maintained grouping helper) by promoting each
+// SearchPostPhoto to a singular {type: "photo"} read-shape attachment and
+// letting the grouper fold them into one photos group — the same mapping the
+// resolve step applies.
 //
-// The server downloads photos async (is_attachments_in_process=1 → 0) when
-// attachments contain photo objects with a `url` field. Videos are stored as
-// VK video references (no download needed).
+// Deprecated: use ResolveSearchPost + PublishPost instead. The resolve step
+// (GET /posts-search/{id}/edit?as_copy=1) returns attachments already in the
+// read shape, and mapEditAttachmentsToWriteShape maps them to the write shape;
+// building a photos group by hand from VK photo ids is no longer needed.
+func ScrapedPhotoAttachment(photos []SearchPostPhoto) Attachment {
+	atts := make([]Attachment, 0, len(photos))
+	for _, ph := range photos {
+		atts = append(atts, Attachment{Type: "photo", Data: map[string]interface{}{
+			"id":       strconv.Itoa(ph.ID),
+			"owner_id": ph.OwnerID,
+			"type":     "photo",
+		}})
+	}
+	grouped := SearchPostEditAttachments(atts)
+	if len(grouped) == 0 {
+		return Attachment{}
+	}
+	return grouped[0] // the photos group (SearchPostEditAttachments emits it first)
+}
+
+// SearchPostPhotos extracts the photo/video group from a scraped post's edit
+// response as a single *Attachment (the {type: "photos"} group the write
+// endpoint expects), or nil when the post has no photos or videos. It is kept
+// as a Deprecated shim so existing consumers compile; it delegates to
+// SearchPostEditAttachments (the maintained grouping helper).
 //
-// Text handling is FORM-DEPENDENT (measured against the live endpoint, not
-// assumed — see the batch-import text note in CHANGELOG):
-//   - SINGLE-id import (SearchPostID): text must be passed explicitly — the
-//     server does NOT auto-copy text from the original post for the single
-//     form. The CLI `search import --post-id` fills Texts from
-//     GetSearchPostEdit; a library caller that sends an empty/nil Texts gets a
-//     post with no text.
-//   - BATCH import (SearchPostIDs): the server DOES auto-copy each post's
-//     original text. A batch import of two scraped posts with an empty texts
-//     slice was measured to create two posts, each carrying its own source
-//     text. The CLI `search import --post-ids` therefore sends an empty
-//     (non-nil) Texts slice and relies on this auto-copy; do NOT send an
-//     explicit empty-text entry ([]PostText{{Text: ""}}) for a batch — that
-//     risks publishing blank across the whole batch.
+// Deprecated: use ResolveSearchPost, which returns SourceContent.Attachments
+// already mapped to the write shape (the photos group plus any non-photo
+// attachments). This helper returns only the photos group and drops the rest;
+// ResolveSearchPost preserves every attachment.
+func SearchPostPhotos(edit *SearchPostEditResponse) *Attachment {
+	if edit == nil {
+		return nil
+	}
+	for _, att := range SearchPostEditAttachments(edit.Attachments) {
+		if att.Type == "photos" {
+			a := att
+			return &a
+		}
+	}
+	return nil
+}
+
+// SearchPostNonPhotoAttachments extracts every non-photo/video attachment from
+// a scraped post's edit response, passing them through as individual
+// {type, data} entries. It is kept as a Deprecated shim so existing consumers
+// compile; it delegates to SearchPostEditAttachments (the maintained grouping
+// helper) and filters out the photos group.
 //
-// Attachments follow the SAME form-dependent rule (measured, not inferred
-// from the text parallel): the BATCH form auto-fetches attachments
-// server-side from the source ids (send attachments:[] → post gets its
-// photos); the SINGLE form does NOT auto-fetch — send attachments:[] on a
-// single import and the created post has ZERO attachments. So the explicit
-// attachment send on the CLI single-post and strip-batch paths is
-// load-bearing, not redundant. See the runImport doc comment in
-// cmd/hooppy/import_text.go for the three-row probe table.
+// Deprecated: use ResolveSearchPost, which returns SourceContent.Attachments
+// carrying both the photos group and the non-photo attachments in one slice,
+// already in the write shape.
+func SearchPostNonPhotoAttachments(edit *SearchPostEditResponse) []Attachment {
+	if edit == nil {
+		return nil
+	}
+	var others []Attachment
+	for _, att := range SearchPostEditAttachments(edit.Attachments) {
+		if att.Type != "photos" {
+			others = append(others, att)
+		}
+	}
+	return others
+}
+
+// ImportSearchPost imports one or more scraped posts. Unlike
+// RewriteSearchPost (which overrides text), ImportSearchPost keeps each
+// post's original text — the resolve step fetches it via
+// GET /posts-search/{id}/edit?as_copy=1, and PublishPost sends it as-is.
 //
-// UNDOCUMENTED: PUT /posts/import is not in the public OpenAPI spec.
+// This is a thin composition over ResolveSearchPost + PublishPost, identical
+// to RewriteSearchPost except it does NOT override the resolved text with
+// payload.Texts. The batch is N independent resolve+publish pairs
+// (client-side), NOT one server-side batch — this avoids the server's
+// batch-specific defects (form-dependent text/attachment behaviour) and
+// gives each post its own original text.
+//
+// payload.Attachments is ignored — the attachments come from the resolve
+// step. payload.Texts is ignored — the original text from the resolve step
+// is used (import = keep original). The caller who needs text or attachment
+// control should use ResolveSearchPost + PublishPost directly.
+//
+// PARTIAL-RESULT CONTRACT: same as RewriteSearchPost — a batch where some
+// posts succeed and some fail returns a NON-NIL *PostIDResponse (populated
+// with every id that landed) alongside a *PartialPostError. See
+// RewriteSearchPost and PartialPostError.
+//
+// UNDOCUMENTED: POST /posts with as_copy=1 + ids is not in the public OpenAPI spec.
 func (c *Client) ImportSearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
-	ids, err := copySearchPostIDs(payload)
+	ids, err := resolveSearchPostIDs(payload)
 	if err != nil {
 		return nil, err
 	}
-	if payload.Texts == nil {
-		payload.Texts = []PostText{}
+	// Converse guard (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it. Import carries
+	// payload.SchedulesIDs into the PublishTarget below unconditionally, so
+	// without this guard a library consumer calling ImportSearchPost directly
+	// with SchedulesIDs + when_type=1 sends both intents onto the wire and the
+	// server picks one. The CLI builder guard does not protect an external
+	// consumer of this public module; this is the layer below it.
+	if len(payload.SchedulesIDs) > 0 && payload.PublicationWhenType != 3 {
+		return nil, fmt.Errorf("hooppy: ImportSearchPost: schedules_ids is set but publication_when_type=%d (not 3) — schedules target the by-schedule queue and are sent alongside a publish-now/at-time intent, which the server resolves on its own; pass publication_when_type=3 to queue by schedule, or clear schedules_ids to publish as when-type %d intends", payload.PublicationWhenType, payload.PublicationWhenType)
 	}
-	if payload.Attachments == nil {
-		payload.Attachments = []Attachment{}
+	target := PublishTarget{
+		PublicationWhenType: payload.PublicationWhenType,
+		PublicationHowType:  payload.PublicationHowType,
+		SelectedPagesIDs:    payload.SelectedPagesIDs,
+		SchedulesIDs:        payload.SchedulesIDs,
+		PublicationDate:     payload.PublicationDate,
 	}
-	if payload.SelectedPagesIDs == nil {
-		payload.SelectedPagesIDs = []int{}
+	// Import keeps the original text — pass nil so resolvePublishBatch does
+	// NOT override the resolved text (import = keep original).
+	return c.resolvePublishBatch(ctx, ids, target, nil, payload.NoAttachments, "ImportSearchPost")
+}
+
+// CopySearchPost copies a scraped post to the user's own pages. It is a
+// thin deprecated wrapper that delegates to ResolveSearchPost + PublishPost
+// (the same corrected primitives ImportSearchPost uses), preserving the
+// source post's text and attachments (photos, videos, links) from the
+// resolve step.
+//
+// Deprecated: use ImportSearchPost instead. The historical CopySearchPost
+// (PUT /posts/copy) created empty posts — it used a different wire shape
+// (singular search_post_id int) from the maintained path and its endpoint
+// silently ignored the search_post_ids slice. This wrapper keeps the
+// exported symbol so existing consumers compile, but it now DOES what its
+// name always claimed: resolves the scraped post via GET /posts-search/{id}/edit?as_copy=1
+// and publishes via POST /posts with as_copy=1, carrying text + attachments.
+// Use ImportSearchPost for the same behaviour under a non-deprecated name,
+// or RewriteSearchPost to override the text.
+//
+// CopySearchPost is single-post only: SearchPostIDs (batch) is refused
+// before any request — the historical PUT /posts/copy endpoint took a
+// singular search_post_id and silently ignored the batch slice. Use
+// ImportSearchPost or RewriteSearchPost for a batch.
+//
+// Argument change vs the historical CopySearchPost: payload.Texts and
+// payload.Attachments are IGNORED. The historical PUT /posts/copy marshalled
+// both into its request body; this shim delegates to resolvePublishBatch,
+// which resolves the source post's text and attachments via
+// GET /posts-search/{id}/edit?as_copy=1 and carries THOSE into POST /posts.
+// A consumer passing payload.Texts now gets the resolved original text (not
+// the override) with no error — to override text, use RewriteSearchPost; to
+// control attachments, use ResolveSearchPost + PublishPost directly. This
+// matches ImportSearchPost (import = keep original) and is the behaviour the
+// historical endpoint's name always claimed but never delivered.
+//
+// UNDOCUMENTED: POST /posts with as_copy=1 + ids is not in the public OpenAPI spec.
+func (c *Client) CopySearchPost(ctx context.Context, payload CopySearchPostPayload) (*PostIDResponse, error) {
+	if len(payload.SearchPostIDs) > 0 {
+		return nil, fmt.Errorf("hooppy: CopySearchPost: SearchPostIDs (batch) is not supported — the historical PUT /posts/copy endpoint took a singular search_post_id and silently ignored the batch slice; use ImportSearchPost or RewriteSearchPost for a batch (they join SearchPostIDs into the ids wire field on POST /posts with as_copy=1)")
 	}
-	if payload.SchedulesIDs == nil {
-		payload.SchedulesIDs = []int{}
+	if payload.SearchPostID == 0 {
+		return nil, fmt.Errorf("hooppy: CopySearchPost: SearchPostID is required (the scalar scraped post id to copy); use ImportSearchPost for the same behaviour under a non-deprecated name")
 	}
-	// Fail closed: a schedule-driven import (when_type=3) targeted at an
-	// empty schedules list publishes to nothing. Refuse before issuing any
-	// request — the CLI `search import` command defaults to when_type=3
-	// with an empty --schedules, which is exactly this trap. Fires for the
-	// batch form too — a batch of N posts targeted at no schedule is N times
-	// the damage of one.
-	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) == 0 {
-		return nil, fmt.Errorf("hooppy: ImportSearchPost: publication_when_type=3 (by schedule) requires at least one schedule ID in schedules_ids — got an empty list, which would target no schedule")
+	// Converse guard (issue #111): schedules_ids targets the by-schedule
+	// queue; every other when_type ignores it. The shim carries
+	// payload.SchedulesIDs into the PublishTarget below, so without this guard
+	// SchedulesIDs + when_type!=3 reaches POST /posts under a publish-now/
+	// at-time intent — the historical PUT /posts/copy guard, preserved across
+	// the collapse onto resolve+publish. The CLI guard does not protect an
+	// external consumer of this public module; this is the layer below it.
+	if len(payload.SchedulesIDs) > 0 && payload.PublicationWhenType != 3 {
+		return nil, fmt.Errorf("hooppy: CopySearchPost: schedules_ids is set but publication_when_type=%d (not 3) — schedules target the by-schedule queue and are silently dropped or contradicted under other when-types; pass publication_when_type=3 to queue by schedule, or clear schedules_ids to publish as when-type %d intends", payload.PublicationWhenType, payload.PublicationWhenType)
 	}
-	// Before snapshot for slot recovery: when when_type=3, snapshot the
-	// schedule's posts BEFORE the create so fillScheduleSlots can diff
-	// after. This fires for BOTH single and batch — a single create is a
-	// batch of one and uses the same snapshot-diff path (the server returns
-	// {"id": ...} for a single, {"success": true} for a batch, but the diff
-	// recovers the created ids from the list either way). Walk ALL pages
-	// (default page size is 20); a single-page snapshot would miss
-	// pre-existing posts beyond page 1, causing them to be mis-attributed
-	// as "created" by the diff. See fillScheduleSlots for WHY the list
-	// surface is used instead of GET /posts/{id}/edit.
-	idsSentCount := len(payload.SearchPostIDs)
-	if idsSentCount == 0 {
-		// Scalar single-post form (SearchPostID).
-		idsSentCount = 1
+	// Delegate to the same resolve+publish path ImportSearchPost uses. This
+	// is a single-post path (SearchPostID scalar), so resolvePublishBatch
+	// returns a plain wrapped error on failure (not PartialPostError).
+	target := PublishTarget{
+		PublicationWhenType: payload.PublicationWhenType,
+		PublicationHowType:  payload.PublicationHowType,
+		SelectedPagesIDs:    payload.SelectedPagesIDs,
+		SchedulesIDs:        payload.SchedulesIDs,
+		PublicationDate:     payload.PublicationDate,
 	}
-	var beforeSnapshot []Post
-	var beforeErr error
-	if payload.PublicationWhenType == 3 && len(payload.SchedulesIDs) > 0 {
-		beforeSnapshot, _, beforeErr = c.ListAllPostsWithTotal(ctx, ListPostsFilter{ScheduleID: payload.SchedulesIDs[0]})
-		// A failed before snapshot is NOT fatal — the create proceeds,
-		// and fillScheduleSlots reports the failure in SlotLookupError.
-	}
-	body := struct {
-		AsCopy               int              `json:"as_copy"`
-		PublicationWhenType  int              `json:"publication_when_type"`
-		PublicationHowType   int              `json:"publication_how_type"`
-		PublicationWhereType int              `json:"publication_where_type"`
-		SelectedPagesIDs     []int            `json:"selected_pages_ids"`
-		SchedulesIDs         []int            `json:"schedules_ids"`
-		PublicationDate      *PublicationDate `json:"publication_date,omitempty"`
-		Texts                []PostText       `json:"texts"`
-		Attachments          []Attachment     `json:"attachments"`
-		IDs                  string           `json:"ids"`
-	}{
-		AsCopy:               1,
-		PublicationWhenType:  payload.PublicationWhenType,
-		PublicationHowType:   payload.PublicationHowType,
-		PublicationWhereType: 1,
-		SelectedPagesIDs:     payload.SelectedPagesIDs,
-		SchedulesIDs:         payload.SchedulesIDs,
-		PublicationDate:      payload.PublicationDate,
-		Texts:                payload.Texts,
-		Attachments:          payload.Attachments,
-		IDs:                  ids,
-	}
-	var resp PostIDResponse
-	// doPUT retryable=false: PUT /posts/import CREATES posts, so it is
-	// non-idempotent — a 5xx/timeout after the write committed, retried,
-	// would duplicate the created posts in a live publishing queue (issue
-	// #87). The full-state Update* PUTs target a known id and converge on
-	// re-send, so they pass true. Enforced by TestRetryPolicySweep and
-	// pinned by TestRetryPolicy_CreateNotRetried.
-	if err := c.doPUT(ctx, pathPostsImport, body, &resp, false); err != nil {
-		return nil, err
-	}
-	// Report the assigned slot when the post was created into a schedule
-	// (when_type=3). Best-effort: a lookup failure populates
-	// SlotLookupError, not an error return — the post exists.
-	c.fillScheduleSlots(ctx, &resp, payload.PublicationWhenType, payload.SchedulesIDs, beforeSnapshot, beforeErr, idsSentCount)
-	// A 2xx with no id (id:0 / absent) is a create that produced no handle.
-	// For a batch the client recovers ids via fillScheduleSlots (sets ID to
-	// the first recovered id, populates IDs); when BOTH are empty the create
-	// produced nothing the caller can act on. Surface it instead of returning
-	// a zero that flows into posts move/update/delete as a real-looking handle
-	// (issue #131). Runs AFTER fillScheduleSlots so a recovered id satisfies
-	// the guard.
-	if err := checkCreateID("PUT "+pathPostsImport, resp.ID, resp.IDs, resp.SlotLookupError); err != nil {
-		return nil, err
-	}
-	return &resp, nil
+	return c.resolvePublishBatch(ctx, []int{payload.SearchPostID}, target, nil, payload.NoAttachments, "CopySearchPost")
 }

@@ -16,11 +16,12 @@ import (
 // the standard {list, total_rows, is_has_more, rows_limit} envelope (see
 // testdata/live/proxies.json), so it is paged like its siblings; the page
 // parameter is sent verbatim and the server answers.
-func (c *Client) ListProxies(ctx context.Context, page int) (*ProxiesResponse, error) {
-	params := url.Values{}
-	if page < 0 {
-		return nil, fmt.Errorf("hooppy: ListProxies: page must be non-negative (got %d); pass 0 to leave unset", page)
+func (c *Client) ListProxies(ctx context.Context, pageOpt ...int) (*ProxiesResponse, error) {
+	page, err := optionalPage("ListProxies", pageOpt)
+	if err != nil {
+		return nil, err
 	}
+	params := url.Values{}
 	if page > 0 {
 		params.Set("page", strconv.Itoa(page))
 	}

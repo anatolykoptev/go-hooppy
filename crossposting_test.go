@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -675,9 +676,14 @@ var _ = io.Discard
 // timestamp, heterogeneous date family — see the CrossPosting doc), which
 // accepts a number, a numeric string, or null.
 //
-// RED-on-revert: change LastCheckDate back to string in CrossPosting and this
-// test fails — the fixture sends a JSON number, a string field cannot receive
-// it, and json.Unmarshal returns *json.UnmarshalTypeError.
+// NOT falsifiable by reverting the field's type. This test calls .Int64() and
+// .IsSet(), so declaring LastCheckDate as a string makes the package fail to
+// COMPILE, and a compile error falsifies nothing — the binary never runs and
+// no assertion is evaluated. The runtime proof lives in
+// TestCrossPostingFix_F1_WrongDeclarationIsRejected below, which decodes the
+// same fixture into a local mirror carrying the wrong declaration. That is the
+// remedy this repo already adopted for the same problem — see
+// wrongSchedulePostsResponse in unknown_field_diagnostic_test.go.
 func TestCrossPostingFix_F1_LastCheckDateIsNumber(t *testing.T) {
 	fixture := liveFixture(t, "cross_postings.json")
 	var resp CrossPostingsResponse
@@ -763,11 +769,11 @@ func TestCrossPostingFix_F2_ProjectIDModelled(t *testing.T) {
 // (the API starts sending an object where it sent a number) is loud, not a
 // silent coerce to 0 that hides the regression behind a green decode.
 //
-// RED-on-revert: if LastCheckDate is reverted to a bare int, the numeric-string
-// case ("0") STOPS erroring in the opposite direction (int rejects it) — but
-// the object/array cases still error, and the F1 fixture-decode test carries
-// the revert-to-string guard. If FlexInt.UnmarshalJSON is changed to silently
-// accept any input, the object/array cases here pass where they should error.
+// What this IS falsifiable by: change FlexInt.UnmarshalJSON to accept any
+// input and the object/array cases below pass where they must error. What it
+// is NOT falsifiable by: reverting LastCheckDate to a bare int — the .Int64()
+// call sites make that a compile error, which proves nothing. The type-level
+// proof is TestCrossPostingFix_F1_WrongDeclarationIsRejected.
 func TestCrossPostingFix_F3_FlexIntRejectsBadInput(t *testing.T) {
 	// Build a one-row /cross-posting list body and mutate only last_check_date.
 	// A bad shape on the cross-posting field must abort the whole list decode,
@@ -1170,5 +1176,46 @@ func TestEnrichedCrossPostingEditMap_RefusesServerKeyCollision(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "refusing to overwrite") {
 		t.Errorf("error = %q, want it to mention 'refusing to overwrite'", err.Error())
+	}
+}
+
+// TestCrossPostingFix_F1_WrongDeclarationIsRejected is the runtime half of the
+// last_check_date fix, and it exists because the obvious mutation is not a
+// falsification.
+//
+// The natural way to test "the field must not be a string" is to declare it a
+// string and watch the suite go red. It cannot be done here: the assertions in
+// F1 and F3 call .Int64() and .IsSet(), so a reverted declaration fails to
+// COMPILE — zero RED and zero GREEN, nothing evaluated. Two comments in this
+// file used to claim otherwise.
+//
+// So the wrong declaration lives here as a local mirror instead, decoupled
+// from the real struct's methods, and the assertion is that the REAL fixture
+// rejects it. Break the fix — record a fixture whose last_check_date is a
+// string — and this stops erroring. The same device as
+// wrongSchedulePostsResponse in unknown_field_diagnostic_test.go.
+func TestCrossPostingFix_F1_WrongDeclarationIsRejected(t *testing.T) {
+	// Verbatim the declaration that shipped and broke `crossposting list`.
+	type wrongCrossPosting struct {
+		LastCheckDate          string `json:"last_check_date"`
+		InstagramLastCheckDate string `json:"instagram_last_check_date"`
+	}
+	type wrongCrossPostingsResponse struct {
+		List []wrongCrossPosting `json:"list"`
+	}
+
+	fixture := liveFixture(t, "cross_postings.json")
+	var typeErr *json.UnmarshalTypeError
+	err := json.Unmarshal(fixture, &wrongCrossPostingsResponse{})
+	if !errors.As(err, &typeErr) {
+		t.Fatalf("decoding the real fixture into the string declaration gave %v, want a *json.UnmarshalTypeError — the fixture must record last_check_date as a NUMBER; if it records a string again, the live decode breaks exactly as it did before and nothing here would notice", err)
+	}
+	// Either sibling may be the reported field: both are recorded as numbers
+	// and both are declared string in the mirror, so which one the decoder
+	// reaches first is not a property worth pinning. What matters is that the
+	// error names one of the two timestamps rather than something else, which
+	// would mean the fixture broke somewhere this test does not cover.
+	if !strings.Contains(typeErr.Field, "last_check_date") {
+		t.Errorf("UnmarshalTypeError.Field = %q, want one of the last_check_date timestamps — the error must point at a field whose recorded type is wrong", typeErr.Field)
 	}
 }

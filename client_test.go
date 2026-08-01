@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -613,18 +614,31 @@ func TestConfig_HTTPClientOverride(t *testing.T) {
 	}
 }
 
-// TestRetry_ImportSearchPost_NotRetried pins the idempotency fix: PUT
-// /posts/import CREATES posts, so ImportSearchPost must issue exactly one
-// request even with RetryOptions set — a 5xx after the write committed,
-// retried, would duplicate the created posts in a live publishing queue.
-// The 500 surfaces as an error. Asserting the count (not just an error)
-// catches both an unbounded-retry and a single-retry regression.
+// TestRetry_ImportSearchPost_NotRetried pins the idempotency fix: POST
+// /posts CREATES posts, so the PublishPost step inside ImportSearchPost must
+// issue exactly one POST /posts even with RetryOptions set — a 5xx after the
+// write committed, retried, would duplicate the created posts in a live
+// publishing queue. The 500 surfaces as an error. Asserting the count (not
+// just an error) catches both an unbounded-retry and a single-retry
+// regression.
+//
+// The resolve step (GET /posts-search/{id}/edit) is a safe idempotent read
+// and IS retried — the stub lets it succeed so the flow reaches POST /posts.
 func TestRetry_ImportSearchPost_NotRetried(t *testing.T) {
-	var calls atomic.Int64
+	var postCalls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"boom"}`))
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts-search/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			// Resolve step succeeds — flow proceeds to POST /posts.
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"123","publication_when_type":1,"publication_how_type":1,"publication_where_type":1,"created_by":7,"texts":[{"text":"x","source_id":0}],"attachments":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/posts":
+			postCalls.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"boom"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer srv.Close()
 	c, err := NewClient(Config{Token: "x", BaseURL: srv.URL, RetryOptions: fastRetryOpts()})
@@ -632,16 +646,16 @@ func TestRetry_ImportSearchPost_NotRetried(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	// when_type=1 (not schedule-driven) so no before-snapshot fires — only
-	// the PUT /posts/import request reaches the stub.
+	// the resolve + POST /posts requests reach the stub.
 	_, err = c.ImportSearchPost(context.Background(), CopySearchPostPayload{
 		SearchPostID:        123,
 		PublicationWhenType: 1,
 	})
 	if err == nil {
-		t.Fatal("expected error from 500, got nil — import must not retry past a 5xx")
+		t.Fatal("expected error from 500, got nil — POST /posts must not retry past a 5xx")
 	}
-	if got := calls.Load(); got != 1 {
-		t.Errorf("import calls = %d, want 1 (PUT /posts/import creates posts and must not retry)", got)
+	if got := postCalls.Load(); got != 1 {
+		t.Errorf("POST /posts calls = %d, want 1 (POST /posts creates posts and must not retry)", got)
 	}
 }
 
