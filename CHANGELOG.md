@@ -63,6 +63,25 @@
 * **`parseMetricFloat`/`parseMetricInt` silent 1000×-wrong value on a decimal comma** (#65): the accessors stripped commas before `ParseFloat`/`Atoi`, so a decimal-comma string from the vendor's Russian locale (`"0,520"` = the ratio 0.520) silently became `520.0` with `err==nil`, and `"1,2,3"` became `123` on the int path — the exact silent-wrongness class these accessors exist to prevent. The shape is now validated BEFORE stripping: only a plain decimal or a comma-thousands-grouped number is accepted; a leading-zero head followed by a comma (`"0,520"`), non-thousands-grouped commas (`"1,2,3"`, `"3,14"`), and other-locale separators (`"1 234"`, `"1.234,56"`) return an error.
 * **Negative metric thresholds fell through the refusal guard** (#65): the guard used `> 0`, so a caller passing `-1` (directly, or from a computed threshold like `avg-stddev` going negative) took neither branch — no error, no parameter, an unfiltered result while the help stated the flag errors. The guard now fires on `!= 0` for the four ints and the float.
 * **BEHAVIOUR CHANGE — negative page/ID filters now error across all list endpoints** (#65): every list endpoint that took a page or ID filter gated on `> 0` had the same silent-negative hole — a negative took neither branch (no error, no parameter), so the server returned an unfiltered or first-page result that looked filtered. `ListAccounts`, `ListPages`, `ListPosts`, `ListSearchPosts`, `ListProjects`, `ListSchedules`, `ListWatermarks`, and `ListNotifications` now reject negative page/ID values with an error before any request is issued; zero stays the unset sentinel. This is BEHAVIOUR-CHANGING for consumers that previously passed a negative (e.g. `--page -1` via the CLI's signed `IntVar`, or a computed `page-1` that underflowed): they got a result set and now get an error. Under `release-please` this ships as a `fix:` patch bump; callers must pass 0 (or omit) to leave a filter unset.
+## [1.2.0](https://github.com/anatolykoptev/go-hooppy/compare/v1.1.2...v1.2.0) (2026-08-01)
+
+
+### Added
+
+* collapse the copy family onto the one path the vendor maintains ([737a3db](https://github.com/anatolykoptev/go-hooppy/commit/737a3dbb72b6f08a40173e91eaecc4932540fa76))
+* cross-posting rule engine read surface, with fixtures recorded instead of guessed ([f1f2679](https://github.com/anatolykoptev/go-hooppy/commit/f1f2679b5fd3f2165ea2498bd6f13407ad945171))
+* posts move ([#105](https://github.com/anatolykoptev/go-hooppy/issues/105)) + schedules queue ([#106](https://github.com/anatolykoptev/go-hooppy/issues/106)) ([#116](https://github.com/anatolykoptev/go-hooppy/issues/116)) ([96f872a](https://github.com/anatolykoptev/go-hooppy/commit/96f872a642d929ae875104a9497fa22a3e40edaf))
+* refuse the flag combinations that publish irreversibly, and report what stop actually observed ([bb112a2](https://github.com/anatolykoptev/go-hooppy/commit/bb112a288e73f7ca14d1915a5cace90432d0cc77))
+
+
+### Fixed
+
+* --all/--page on every list command, with retry enabled and the ES result-window wall handled ([#126](https://github.com/anatolykoptev/go-hooppy/issues/126)) ([50afcbf](https://github.com/anatolykoptev/go-hooppy/commit/50afcbf344c94eb3d64d1628ee2093748ba205f2))
+* a nil error must mean the operation happened, not that a 2xx decoded ([#134](https://github.com/anatolykoptev/go-hooppy/issues/134)) ([4fea0fc](https://github.com/anatolykoptev/go-hooppy/commit/4fea0fc26d2b76409682605feaaeca0affb51d4a))
+* keep the v1 call form compiling for the two listers that gained a page ([fcf454d](https://github.com/anatolykoptev/go-hooppy/commit/fcf454da6f90a9e849a1a81d323502020df19fb3))
+* point StopParsing at /posts-search/parsing/stop so it actually cancels ([#113](https://github.com/anatolykoptev/go-hooppy/issues/113)) ([4b48c72](https://github.com/anatolykoptev/go-hooppy/commit/4b48c72853dec47fac7d8eb0106bdf565eed2106))
+* posts_by_days is a map of day OBJECTS, and empty arrives as a JSON list ([#119](https://github.com/anatolykoptev/go-hooppy/issues/119)) ([7ce61ed](https://github.com/anatolykoptev/go-hooppy/commit/7ce61ed9809f7591b6761c23745b4b0f25e05eea))
+
 ## [1.1.2](https://github.com/anatolykoptev/go-hooppy/compare/v1.1.1...v1.1.2) (2026-07-30)
 
 
