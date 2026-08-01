@@ -484,3 +484,32 @@ func (c *Client) doWithRetry(ctx context.Context, buildReq func() (*http.Request
 	})
 	return err
 }
+
+// optionalPage resolves the variadic page argument shared by the list methods
+// whose signature would otherwise have broken v1 source compatibility.
+//
+// ListProxies and ListSourceResources took only a context in v1.1.2 and gained
+// a required `page int` in #126. In a Go module that is a compile break for
+// every consumer calling ListProxies(ctx), which post-1.0 semver calls a major
+// — and a major for a Go module means a /v2 module path. The module has no
+// /v2, so a v2.0.0 tag is not fetchable and the release would reach nobody.
+//
+// A variadic parameter keeps ListProxies(ctx) compiling while ListProxies(ctx,
+// 3) selects a page, so paging ships in a minor instead of forcing a path bump
+// for two signatures. The cost is that arity moves from compile time to run
+// time, which is why more than one value is a named error rather than a
+// silently ignored tail: variadic is a compatibility device here, not an
+// invitation to pass a list.
+func optionalPage(method string, pageOpt []int) (int, error) {
+	switch len(pageOpt) {
+	case 0:
+		return 0, nil
+	case 1:
+		if pageOpt[0] < 0 {
+			return 0, fmt.Errorf("hooppy: %s: page must be non-negative (got %d); omit the argument to leave it unset", method, pageOpt[0])
+		}
+		return pageOpt[0], nil
+	default:
+		return 0, fmt.Errorf("hooppy: %s: expected at most one page argument, got %d — the parameter is variadic only to keep the v1 call form ListProxies(ctx) compiling, not to accept a list of pages", method, len(pageOpt))
+	}
+}
