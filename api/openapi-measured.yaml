@@ -8096,7 +8096,7 @@ paths:
         x-provenance: 'code-comment: endpoints.go:50'
     /posts/schedules:
         get:
-            description: Returns the paging envelope. Schedule objects carry 9 fields declared int in the Go payload struct and returned as string by the server (photos_caption, posts_caption, posts_comment, posts_location, posts_photo, publish_as_story_source_ids, publish_by_account_source_ids, share_stories_to_feed_source_ids, videos_title). See x-write-type on each property.
+            description: Returns the paging envelope. The schedule row carries 9 properties annotated x-write-type — declared int somewhere in the Go payload structs, returned as string here (photos_caption, posts_caption, posts_comment, posts_location, posts_photo, publish_as_story_source_ids, publish_by_account_source_ids, share_stories_to_feed_source_ids, videos_title). Only publish_as_story_source_ids and share_stories_to_feed_source_ids are declared on SchedulePayload itself (types.go:121, 129); the other seven are ProjectPayload declarations that the server also returns on this row.
             operationId: getSchedules
             parameters:
                 - description: 1-indexed page number.
@@ -8465,7 +8465,7 @@ x-measured-notes:
     - description: 'A 2xx carrying an explicit {"success":false} is a failure. An absent success key is not a failure signal. Endpoints returning the success field: /posts/batch/delete, /posts/batch/move, /posts-search/parsing/stop, and all create/update/delete operations.'
       provenance: 'code-comment: posts.go:592, posts_search.go:466'
       title: success semantics
-    - description: 'Declared int, returned string: 12 fields on ProjectPayload (posts_caption, photos_caption, tg_buttons, videos_title, posts_comment, posts_rewrite, posts_location, posts_location_vk, posts_photo, publish_as_story_source_ids, share_stories_to_feed_source_ids, publish_by_account_source_ids) and 2 on SchedulePayload (posts_hashtags, posts_links). Marked x-write-type: integer on each property.'
+    - description: 'Declared int on the Go payload struct, returned as string by the server. 12 such fields are declared on ProjectPayload (posts_caption, photos_caption, tg_buttons, videos_title, posts_comment, posts_rewrite, posts_location, posts_location_vk, posts_photo, publish_as_story_source_ids, share_stories_to_feed_source_ids, publish_by_account_source_ids) and 2 on SchedulePayload (publish_as_story_source_ids, share_stories_to_feed_source_ids, types.go:121 and 129) — the two are declared on BOTH. posts_hashtags and posts_links are ProjectPayload fields (types.go:564-565) and are annotated only where a project object is nested, never on a schedule row. Marked x-write-type: integer on each property.'
       provenance: 'code-comment: types.go:513'
       title: Hostile types
     - description: 'GET /accounts returns access_token, access_token_secret, access_web_token, password, bot_token, refresh_token, tw_app_secret, wp_app_password, and more. /accounts/pages returns access_token, access_token_secret. /users/me returns api_token. /proxies returns password. Marked x-sensitive: true. No example values are emitted on these fields.'

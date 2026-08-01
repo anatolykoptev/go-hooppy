@@ -69,23 +69,30 @@ var sensitiveFields = map[string]bool{
 // ============================================================================
 
 var hostileTypeFields = map[string]bool{
-	// ProjectPayload fields (types.go:513-571) — int declared, string returned:
+	// Declared int on the Go payload struct, returned as string by the server.
+	// The key is the JSON field name, so one entry can cover the same field on
+	// more than one struct — the headings say where each is DECLARED, which is
+	// the thing that was measured.
+	//
+	// Shared by ProjectPayload (types.go:513-571) and SchedulePayload
+	// (types.go:104-153); both mark them KNOWN-HOSTILE:
 	"publish_as_story_source_ids":      true,
 	"share_stories_to_feed_source_ids": true,
-	"publish_by_account_source_ids":    true,
-	"posts_caption":                    true,
-	"photos_caption":                   true,
-	"tg_buttons":                       true,
-	"videos_title":                     true,
-	"posts_comment":                    true,
-	"posts_rewrite":                    true,
-	"posts_location":                   true,
-	"posts_location_vk":                true,
-	"posts_photo":                      true,
-	// Also appear in search_post_edit project objects:
+	// ProjectPayload only (types.go:513-571):
+	"publish_by_account_source_ids": true,
+	"posts_caption":                 true,
+	"photos_caption":                true,
+	"tg_buttons":                    true,
+	"videos_title":                  true,
+	"posts_comment":                 true,
+	"posts_rewrite":                 true,
+	"posts_location":                true,
+	"posts_location_vk":             true,
+	"posts_photo":                   true,
+	// ProjectPayload (types.go:564-565); reached only through the project and
+	// schedule objects nested in search_post_edit, never on a schedule row:
 	"posts_hashtags": true,
 	"posts_links":    true,
-	// SchedulePayload fields — int declared, string returned:
 }
 
 // ============================================================================
@@ -279,7 +286,7 @@ func buildPaths() []pathDef {
 				{
 					method: "get", operationID: "getSchedules", tags: []string{"Schedules"},
 					summary:     "List schedules",
-					description: "Returns the paging envelope. Schedule objects carry 9 fields declared int in the Go payload struct and returned as string by the server (photos_caption, posts_caption, posts_comment, posts_location, posts_photo, publish_as_story_source_ids, publish_by_account_source_ids, share_stories_to_feed_source_ids, videos_title). See x-write-type on each property.",
+					description: "Returns the paging envelope. The schedule row carries 9 properties annotated x-write-type — declared int somewhere in the Go payload structs, returned as string here (photos_caption, posts_caption, posts_comment, posts_location, posts_photo, publish_as_story_source_ids, publish_by_account_source_ids, share_stories_to_feed_source_ids, videos_title). Only publish_as_story_source_ids and share_stories_to_feed_source_ids are declared on SchedulePayload itself (types.go:121, 129); the other seven are ProjectPayload declarations that the server also returns on this row.",
 					params: []paramDef{
 						{name: "page", in: "query", schemaType: "integer", description: "1-indexed page number.", provenance: "unverified"},
 						{name: "limit", in: "query", schemaType: "integer", description: "Page size. Response echoes as rows_limit. Server default 20.", provenance: honoured},
@@ -1217,8 +1224,8 @@ func buildOperationMap(op operationDef, p pathDef) map[string]interface{} {
 		//
 		// An endpoint with more than one recorded fixture genuinely returns
 		// more than one shape (a populated body and its empty form), so both
-		// are emitted as a oneOf rather than one being picked and the other
-		// silently dropped.
+		// are emitted rather than one being picked and the other silently
+		// dropped. Which keyword, and why it is not oneOf, is below.
 		if len(resp.fixtures) > 0 {
 			fnames := make([]string, 0, len(resp.fixtures))
 			for fname := range resp.fixtures {
@@ -1292,7 +1299,7 @@ func buildMeasuredNotes() []interface{} {
 		map[string]interface{}{
 			"title":       "Hostile types",
 			"provenance":  "code-comment: types.go:513",
-			"description": "Declared int, returned string: 12 fields on ProjectPayload (posts_caption, photos_caption, tg_buttons, videos_title, posts_comment, posts_rewrite, posts_location, posts_location_vk, posts_photo, publish_as_story_source_ids, share_stories_to_feed_source_ids, publish_by_account_source_ids) and 2 on SchedulePayload (posts_hashtags, posts_links). Marked x-write-type: integer on each property.",
+			"description": "Declared int on the Go payload struct, returned as string by the server. 12 such fields are declared on ProjectPayload (posts_caption, photos_caption, tg_buttons, videos_title, posts_comment, posts_rewrite, posts_location, posts_location_vk, posts_photo, publish_as_story_source_ids, share_stories_to_feed_source_ids, publish_by_account_source_ids) and 2 on SchedulePayload (publish_as_story_source_ids, share_stories_to_feed_source_ids, types.go:121 and 129) — the two are declared on BOTH. posts_hashtags and posts_links are ProjectPayload fields (types.go:564-565) and are annotated only where a project object is nested, never on a schedule row. Marked x-write-type: integer on each property.",
 		},
 		map[string]interface{}{
 			"title":       "Credential-bearing fields",
