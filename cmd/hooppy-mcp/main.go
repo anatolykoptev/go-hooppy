@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/anatolykoptev/go-hooppy"
 	mcpserver "github.com/anatolykoptev/go-mcpserver"
@@ -22,8 +23,10 @@ func main() {
 		Version: version,
 	}
 	cfg := mcpserver.Config{
-		Name:    "hooppy-mcp",
-		Version: version,
+		Name:           "hooppy-mcp",
+		Version:        version,
+		SessionTimeout: 10 * time.Minute,
+		Stateless:      new(bool),
 	}
 
 	err := mcpserver.Serve(impl, cfg, func(server *mcp.Server) {

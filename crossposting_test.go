@@ -1239,7 +1239,18 @@ func TestCrossPostingFix_F1_WrongDeclarationIsRejected(t *testing.T) {
 			if !errors.As(err, &typeErr) {
 				t.Fatalf("decoding the real fixture into the string declaration gave %v, want a *json.UnmarshalTypeError — the fixture must record %s as a NUMBER; if it records a string again the live decode breaks exactly as it did before", err, tc.field)
 			}
-			if typeErr.Field != tc.field {
+			got := typeErr.Field
+			// Go 1.27 reports list indices in UnmarshalTypeError.Field
+			// ("list.0.last_check_date"); earlier versions omit them.
+			// Normalize before comparing or the assertion is toolchain-fragile.
+			segs := strings.Split(got, ".")
+			leaf := segs[:0]
+			for _, s := range segs {
+				if _, aerr := strconv.Atoi(s); aerr != nil {
+					leaf = append(leaf, s)
+				}
+			}
+			if got = strings.Join(leaf, "."); got != tc.field {
 				t.Errorf("UnmarshalTypeError.Field = %q, want %q exactly — an inexact match lets a sibling field's error satisfy this case, which is how the previous version stayed green on every single-field regression", typeErr.Field, tc.field)
 			}
 		})
