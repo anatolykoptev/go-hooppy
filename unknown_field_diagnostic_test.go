@@ -1518,7 +1518,10 @@ func TestLiveFixtureDecodes_DetectsAWrongShape(t *testing.T) {
 	if !errors.As(err, &typeErr) {
 		t.Fatalf("decoding the real fixture into the WRONG shape gave %v, want a *json.UnmarshalTypeError — if a custom unmarshaller's value error is returned first, TestLiveFixtureDecodes is blind on this fixture and a wrong shape ships green", err)
 	}
-	if typeErr.Field != "posts_by_days" {
+	if typeErr.Field != "posts_by_days" && !strings.HasPrefix(typeErr.Field, "posts_by_days.") {
+		// Go 1.27 descends into map keys when reporting Field, so the error
+		// may point below posts_by_days; the dot-boundary prefix keeps the
+		// assertion sibling-precise.
 		t.Errorf("UnmarshalTypeError.Field = %q, want \"posts_by_days\" — the error must point at the field whose shape is wrong", typeErr.Field)
 	}
 
