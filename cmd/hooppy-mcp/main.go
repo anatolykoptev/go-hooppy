@@ -8,7 +8,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/anatolykoptev/go-hooppy"
 	mcpserver "github.com/anatolykoptev/go-mcpserver"
@@ -22,11 +21,13 @@ func main() {
 		Name:    "hooppy-mcp",
 		Version: version,
 	}
+	// Stateless on purpose: GET /mcp answers 405 + Allow: POST, which rmcp
+	// reads as "no standalone stream". The 2026-10-08 stateful flip assumed
+	// that 405 caused rmcp's SSE error loop; the loop rate never changed.
+	// Stateful only added session expiry and lost MCP 2026-07-28.
 	cfg := mcpserver.Config{
-		Name:           "hooppy-mcp",
-		Version:        version,
-		SessionTimeout: 10 * time.Minute,
-		Stateless:      new(bool),
+		Name:    "hooppy-mcp",
+		Version: version,
 	}
 
 	err := mcpserver.Serve(impl, cfg, func(server *mcp.Server) {
