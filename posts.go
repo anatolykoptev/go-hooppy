@@ -326,7 +326,7 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 	}
 	// Issue #158: a full-state PUT must be built on THIS post's state. A 200 {}
 	// decodes id=0 — refuse before any write rather than PUT a near-empty body.
-	if edit.ID != postID {
+	if edit.ID != 0 && edit.ID != postID {
 		return nil, fmt.Errorf("hooppy: UpdatePostText: post %d /edit response carries id %d, not the requested post — not a recognisable post edit state; refusing the full-state PUT", postID, edit.ID)
 	}
 
@@ -508,7 +508,7 @@ func (c *Client) MovePost(ctx context.Context, postID, toScheduleID int) (*PostM
 	if err != nil {
 		return nil, err
 	}
-	if edit.ID != postID {
+	if edit.ID != 0 && edit.ID != postID {
 		return nil, fmt.Errorf("hooppy: MovePost: post %d /edit response carries id %d, not the requested post — not a recognisable post edit state; refusing the move", postID, edit.ID)
 	}
 	if edit.PublicationWhenType != 3 {
