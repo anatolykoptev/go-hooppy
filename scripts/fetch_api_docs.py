@@ -293,6 +293,16 @@ def param(p, where):
     return d
 
 
+def is_group(b):
+    """Documentation-only group heading inside a body field list."""
+    n = b.get("name", "")
+    if b.get("type") == "group" or (n.startswith("[") and n.endswith("]")):
+        return True
+    # Placeholder rows ("…", "is_unique_content, publish_as_story, …") stand
+    # for "the remaining flat fields"; a real JSON key never has these.
+    return "…" in n or "," in n or " " in n
+
+
 def operation(sec, ep):
     op = {"operationId": ep["id"], "summary": ep["title"]}
     if ep.get("description"):
@@ -307,8 +317,14 @@ def operation(sec, ep):
     body = ep.get("body") or []
     if body or ep.get("bodyExample") is not None:
         ct = ep.get("contentType") or "application/json"
-        props, req = {}, []
+        props, req, groups = {}, [], []
         for b in body:
+            if is_group(b):
+                # A group heading ("[настройки публикации]", type "group")
+                # documents a FLAT set of top-level fields. It is not a JSON
+                # key: keep its wording, never make it a property or required.
+                groups.append({"title": b["name"], "description": b.get("description", "")})
+                continue
             s = schema_for(b.get("type"))
             if b.get("description"):
                 s["description"] = b["description"]
@@ -320,6 +336,8 @@ def operation(sec, ep):
         sch = {"type": "object", "properties": props}
         if req:
             sch["required"] = req
+        if groups:
+            sch["x-field-groups"] = groups
         media = {"schema": sch}
         if ep.get("bodyExample") is not None:
             media["example"] = ep["bodyExample"]

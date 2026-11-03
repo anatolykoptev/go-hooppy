@@ -58,6 +58,31 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(sch["properties"]["ids"], {"type": "array", "items": {"type": "integer"}, "description": "x"})
         self.assertEqual(sch["required"], ["ids"])
 
+    def test_group_heading_is_not_a_body_field(self):
+        chunk = (
+            'var N=[{slug:`a`,title:`T`,description:``,endpoints:[{id:`c`,method:`POST`,path:`/p`,title:`t`,'
+            'description:``,auth:!0,body:['
+            '{name:`name`,type:`string`,required:!0,description:`n`},'
+            '{name:`[настройки публикации]`,type:`group`,required:!0,description:`Плоские флаги на верхнем уровне`},'
+            '{name:`publish_as_story`,type:`integer`,required:!1,description:`a`},'
+            '{name:`is_comments_disabled`,type:`integer`,required:!1,description:`b`}],'
+            'bodyExample:{name:`x`},responseExample:{}}]}];'
+        )
+        post = fad.build(fad.extract_sections(chunk))["/p"]["post"]
+        sch = post["requestBody"]["content"]["application/json"]["schema"]
+        self.assertNotIn("[настройки публикации]", sch["properties"])
+        self.assertNotIn("[настройки публикации]", sch["required"])
+        self.assertIn("publish_as_story", sch["properties"])
+        self.assertIn("is_comments_disabled", sch["properties"])
+        self.assertEqual(sch["required"], ["name"])
+        self.assertEqual(sch["x-field-groups"][0]["title"], "[настройки публикации]")
+
+    def test_placeholder_rows_are_not_body_fields(self):
+        for name in ("…", "is_unique_content, publish_as_story, …"):
+            self.assertTrue(fad.is_group({"name": name, "type": "object"}), name)
+        self.assertFalse(fad.is_group({"name": "files[]", "type": "file[]"}))
+        self.assertFalse(fad.is_group({"name": "publish_as_story", "type": "integer"}))
+
     def test_header_records_chunk_and_sha(self):
         out = fad.render(self.secs, "https://hooppy.ru/assets/ApiDocsPage-X.js", "ab" * 32, "2026-11-03", "2026-11-03")
         self.assertIn("# chunk-url: https://hooppy.ru/assets/ApiDocsPage-X.js", out)

@@ -313,17 +313,15 @@ paths:
           schema:
             type: "integer"
       requestBody:
-        required: true
+        required: false
         content:
           "application/json":
             schema:
               type: "object"
-              properties:
-                "…":
-                  type: "object"
+              properties: {}
+              x-field-groups:
+                - title: "…"
                   description: "Те же поля, что в POST /ai-posting."
-              required:
-                - "…"
             example:
               name: "Советы по уходу за растениями"
               posts_amount: 20
@@ -763,10 +761,6 @@ paths:
                     image_model_key: ""
                     reference_photos: []
                     no_posts_if_no_rewrite: ""
-                "is_unique_content, publish_as_story, publish_as_reels, …":
-                  type: "integer"
-                  description: "Плоские флаги «Настроек публикации» (0/1 или CSV ID соцсетей), полный набор как в форме кабинета: is_unique_content, is_comments_disabled, publish_as_story, publish_as_story_source_ids, publish_as_reels, publish_reels_as_trial, publish_as_clips, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_stories_to_feed, share_stories_to_feed_source_ids, share_reels_to_feed, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, share_channel_to_feed, expand_clips_title, publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, plan_by_network, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids, privacy_level, youtube_category, rutube_category, donut_paid_duration, delete_posts_day, delete_posts_hour. Проще всего взять значения из ответа …/edit и передать их обратно."
-                  example: 0
               required:
                 - "name"
                 - "source_resources"
@@ -807,7 +801,9 @@ paths:
                 - "posts_rewrite"
                 - "posts_location"
                 - "posts_location_vk"
-                - "is_unique_content, publish_as_story, publish_as_reels, …"
+              x-field-groups:
+                - title: "is_unique_content, publish_as_story, publish_as_reels, …"
+                  description: "Плоские флаги «Настроек публикации» (0/1 или CSV ID соцсетей), полный набор как в форме кабинета: is_unique_content, is_comments_disabled, publish_as_story, publish_as_story_source_ids, publish_as_reels, publish_reels_as_trial, publish_as_clips, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_stories_to_feed, share_stories_to_feed_source_ids, share_reels_to_feed, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, share_channel_to_feed, expand_clips_title, publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, plan_by_network, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids, privacy_level, youtube_category, rutube_category, donut_paid_duration, delete_posts_day, delete_posts_hour. Проще всего взять значения из ответа …/edit и передать их обратно."
             example:
               name: "Новости из ВК в Telegram"
               source_resources:
@@ -1064,17 +1060,15 @@ paths:
           schema:
             type: "integer"
       requestBody:
-        required: true
+        required: false
         content:
           "application/json":
             schema:
               type: "object"
-              properties:
-                "…":
-                  type: "object"
+              properties: {}
+              x-field-groups:
+                - title: "…"
                   description: "Те же поля, что в POST /cross-posting."
-              required:
-                - "…"
             example:
               name: "Новости из ВК в Telegram (вечер)"
               check_when_type: 2
@@ -2375,19 +2369,14 @@ paths:
                     - 5012
                     - 5013
                     - 7720
-                "[обработка контента]":
-                  type: "string"
-                  x-doc-type: "group"
-                  description: "Блок обработки контента. Это НЕ вложенный объект: все поля ниже передаются на верхнем уровне тела. Набор полей повторяет форму в кабинете (подпись, теги, ссылки, рерайт ИИ, геометки). Сервер читает каждое поле напрямую, поэтому передавайте все, взяв значения по умолчанию из GET …/0/edit."
-                "[настройки публикации]":
-                  type: "string"
-                  x-doc-type: "group"
-                  description: "Плоские флаги публикации (0/1, если не сказано иначе), тоже на верхнем уровне тела. Полный список повторяет окно «Другие настройки» в кабинете: кроме перечисленных ниже, это publish_as_reels, publish_reels_as_trial, share_reels_to_feed, publish_as_clips, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, expand_clips_title, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_channel_to_feed, share_stories_to_feed, share_stories_to_feed_source_ids (строка), publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids (строка), privacy_level (0–3), youtube_category, rutube_category, donut_paid_duration (0–8)."
               required:
                 - "name"
                 - "publication_where_type"
-                - "[обработка контента]"
-                - "[настройки публикации]"
+              x-field-groups:
+                - title: "[обработка контента]"
+                  description: "Блок обработки контента. Это НЕ вложенный объект: все поля ниже передаются на верхнем уровне тела. Набор полей повторяет форму в кабинете (подпись, теги, ссылки, рерайт ИИ, геометки). Сервер читает каждое поле напрямую, поэтому передавайте все, взяв значения по умолчанию из GET …/0/edit."
+                - title: "[настройки публикации]"
+                  description: "Плоские флаги публикации (0/1, если не сказано иначе), тоже на верхнем уровне тела. Полный список повторяет окно «Другие настройки» в кабинете: кроме перечисленных ниже, это publish_as_reels, publish_reels_as_trial, share_reels_to_feed, publish_as_clips, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, expand_clips_title, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_channel_to_feed, share_stories_to_feed, share_stories_to_feed_source_ids (строка), publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids (строка), privacy_level (0–3), youtube_category, rutube_category, donut_paid_duration (0–8)."
             example:
               name: "Выпечка: ВК и Телеграм"
               publication_where_type: 1
@@ -2630,19 +2619,14 @@ paths:
                     - 5012
                     - 5013
                     - 7720
-                "[обработка контента]":
-                  type: "string"
-                  x-doc-type: "group"
-                  description: "Блок обработки контента. Это НЕ вложенный объект: все поля ниже передаются на верхнем уровне тела. Набор полей повторяет форму в кабинете (подпись, теги, ссылки, рерайт ИИ, геометки). Сервер читает каждое поле напрямую, поэтому передавайте все, взяв значения по умолчанию из GET …/0/edit."
-                "[настройки публикации]":
-                  type: "string"
-                  x-doc-type: "group"
-                  description: "Плоские флаги публикации (0/1, если не сказано иначе), тоже на верхнем уровне тела. Полный список повторяет окно «Другие настройки» в кабинете: кроме перечисленных ниже, это publish_as_reels, publish_reels_as_trial, share_reels_to_feed, publish_as_clips, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, expand_clips_title, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_channel_to_feed, share_stories_to_feed, share_stories_to_feed_source_ids (строка), publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids (строка), privacy_level (0–3), youtube_category, rutube_category, donut_paid_duration (0–8)."
               required:
                 - "name"
                 - "publication_where_type"
-                - "[обработка контента]"
-                - "[настройки публикации]"
+              x-field-groups:
+                - title: "[обработка контента]"
+                  description: "Блок обработки контента. Это НЕ вложенный объект: все поля ниже передаются на верхнем уровне тела. Набор полей повторяет форму в кабинете (подпись, теги, ссылки, рерайт ИИ, геометки). Сервер читает каждое поле напрямую, поэтому передавайте все, взяв значения по умолчанию из GET …/0/edit."
+                - title: "[настройки публикации]"
+                  description: "Плоские флаги публикации (0/1, если не сказано иначе), тоже на верхнем уровне тела. Полный список повторяет окно «Другие настройки» в кабинете: кроме перечисленных ниже, это publish_as_reels, publish_reels_as_trial, share_reels_to_feed, publish_as_clips, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, expand_clips_title, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_channel_to_feed, share_stories_to_feed, share_stories_to_feed_source_ids (строка), publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids (строка), privacy_level (0–3), youtube_category, rutube_category, donut_paid_duration (0–8)."
             example:
               name: "Выпечка: ВК и Телеграм"
               publication_where_type: 1
@@ -2986,14 +2970,6 @@ paths:
                     - 5012
                     - 5013
                     - 7720
-                "[обработка контента]":
-                  type: "string"
-                  x-doc-type: "group"
-                  description: "Блок обработки контента. Это НЕ вложенный объект: все поля ниже передаются на верхнем уровне тела. Набор полей повторяет форму в кабинете (подпись, теги, ссылки, рерайт ИИ, геометки). Сервер читает каждое поле напрямую, поэтому передавайте все, взяв значения по умолчанию из GET …/0/edit."
-                "[настройки публикации]":
-                  type: "string"
-                  x-doc-type: "group"
-                  description: "Плоские флаги публикации (0/1, если не сказано иначе), тоже на верхнем уровне тела. Полный список повторяет окно «Другие настройки» в кабинете: кроме перечисленных ниже, это publish_as_reels, publish_reels_as_trial, share_reels_to_feed, publish_as_clips, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, expand_clips_title, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_channel_to_feed, share_stories_to_feed, share_stories_to_feed_source_ids (строка), publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids (строка), privacy_level (0–3), youtube_category, rutube_category, donut_paid_duration (0–8)."
                 schedule_id_to_copy_posts_from:
                   type: "integer"
                   description: "Только при создании: ID расписания, из которого скопировать неопубликованные посты в новое. Доступно на тарифах Pro и выше."
@@ -3004,8 +2980,11 @@ paths:
                 - "state"
                 - "publication_how_type"
                 - "publication_where_type"
-                - "[обработка контента]"
-                - "[настройки публикации]"
+              x-field-groups:
+                - title: "[обработка контента]"
+                  description: "Блок обработки контента. Это НЕ вложенный объект: все поля ниже передаются на верхнем уровне тела. Набор полей повторяет форму в кабинете (подпись, теги, ссылки, рерайт ИИ, геометки). Сервер читает каждое поле напрямую, поэтому передавайте все, взяв значения по умолчанию из GET …/0/edit."
+                - title: "[настройки публикации]"
+                  description: "Плоские флаги публикации (0/1, если не сказано иначе), тоже на верхнем уровне тела. Полный список повторяет окно «Другие настройки» в кабинете: кроме перечисленных ниже, это publish_as_reels, publish_reels_as_trial, share_reels_to_feed, publish_as_clips, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, expand_clips_title, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_channel_to_feed, share_stories_to_feed, share_stories_to_feed_source_ids (строка), publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids (строка), privacy_level (0–3), youtube_category, rutube_category, donut_paid_duration (0–8)."
             example:
               name: "Советы дня"
               times:
@@ -3505,22 +3484,17 @@ paths:
                     - 5012
                     - 5013
                     - 7720
-                "[обработка контента]":
-                  type: "string"
-                  x-doc-type: "group"
-                  description: "Блок обработки контента. Это НЕ вложенный объект: все поля ниже передаются на верхнем уровне тела. Набор полей повторяет форму в кабинете (подпись, теги, ссылки, рерайт ИИ, геометки). Сервер читает каждое поле напрямую, поэтому передавайте все, взяв значения по умолчанию из GET …/0/edit."
-                "[настройки публикации]":
-                  type: "string"
-                  x-doc-type: "group"
-                  description: "Плоские флаги публикации (0/1, если не сказано иначе), тоже на верхнем уровне тела. Полный список повторяет окно «Другие настройки» в кабинете: кроме перечисленных ниже, это publish_as_reels, publish_reels_as_trial, share_reels_to_feed, publish_as_clips, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, expand_clips_title, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_channel_to_feed, share_stories_to_feed, share_stories_to_feed_source_ids (строка), publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids (строка), privacy_level (0–3), youtube_category, rutube_category, donut_paid_duration (0–8)."
               required:
                 - "name"
                 - "times"
                 - "state"
                 - "publication_how_type"
                 - "publication_where_type"
-                - "[обработка контента]"
-                - "[настройки публикации]"
+              x-field-groups:
+                - title: "[обработка контента]"
+                  description: "Блок обработки контента. Это НЕ вложенный объект: все поля ниже передаются на верхнем уровне тела. Набор полей повторяет форму в кабинете (подпись, теги, ссылки, рерайт ИИ, геометки). Сервер читает каждое поле напрямую, поэтому передавайте все, взяв значения по умолчанию из GET …/0/edit."
+                - title: "[настройки публикации]"
+                  description: "Плоские флаги публикации (0/1, если не сказано иначе), тоже на верхнем уровне тела. Полный список повторяет окно «Другие настройки» в кабинете: кроме перечисленных ниже, это publish_as_reels, publish_reels_as_trial, share_reels_to_feed, publish_as_clips, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, expand_clips_title, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_channel_to_feed, share_stories_to_feed, share_stories_to_feed_source_ids (строка), publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids (строка), privacy_level (0–3), youtube_category, rutube_category, donut_paid_duration (0–8)."
             example:
               name: "Советы дня"
               times:
@@ -4504,10 +4478,6 @@ paths:
                   type: "integer"
                   description: "1 — добавлять ссылку на статью в комментарий."
                   example: 0
-                "is_unique_content, publish_as_story, publish_as_reels, …":
-                  type: "integer"
-                  description: "Плоские флаги «Настроек публикации» (0/1 или CSV ID соцсетей), полный набор как в форме кабинета: is_unique_content, is_comments_disabled, publish_as_story, publish_as_story_source_ids, publish_as_reels, publish_reels_as_trial, publish_as_clips, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_stories_to_feed, share_stories_to_feed_source_ids, share_reels_to_feed, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, share_channel_to_feed, expand_clips_title, publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, plan_by_network, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids, privacy_level, youtube_category, rutube_category, donut_paid_duration, delete_posts_day, delete_posts_hour. Проще всего взять значения из ответа …/edit и передать их обратно."
-                  example: 0
               required:
                 - "name"
                 - "link"
@@ -4538,7 +4508,9 @@ paths:
                 - "crop_text_type"
                 - "crop_text_limit"
                 - "add_link_to_post_in_comment"
-                - "is_unique_content, publish_as_story, publish_as_reels, …"
+              x-field-groups:
+                - title: "is_unique_content, publish_as_story, publish_as_reels, …"
+                  description: "Плоские флаги «Настроек публикации» (0/1 или CSV ID соцсетей), полный набор как в форме кабинета: is_unique_content, is_comments_disabled, publish_as_story, publish_as_story_source_ids, publish_as_reels, publish_reels_as_trial, publish_as_clips, publish_as_shorts, publish_as_article, publish_as_article_by_link, publish_in_channel, share_stories_to_feed, share_stories_to_feed_source_ids, share_reels_to_feed, share_clips_to_feed, share_clips_to_feed_with_text, share_clips_to_feed_if_no_video, share_channel_to_feed, expand_clips_title, publish_as_user, add_link_to_user, message_to_community, message_to_channel, download_vk_videos, save_vk_videos_names, plan_by_network, publish_as_carousel, publish_only_in_videos, not_publish_in_videos, repeat_video, parse_links, publish_by_account, publish_by_account_source_ids, privacy_level, youtube_category, rutube_category, donut_paid_duration, delete_posts_day, delete_posts_hour. Проще всего взять значения из ответа …/edit и передать их обратно."
             example:
               name: "Блог компании"
               link: "https://example.ru/feed.xml"
@@ -4717,17 +4689,15 @@ paths:
           schema:
             type: "integer"
       requestBody:
-        required: true
+        required: false
         content:
           "application/json":
             schema:
               type: "object"
-              properties:
-                "…":
-                  type: "object"
+              properties: {}
+              x-field-groups:
+                - title: "…"
                   description: "Те же поля, что в POST /rss-import."
-              required:
-                - "…"
             example:
               name: "Блог компании"
               check_interval: 7
