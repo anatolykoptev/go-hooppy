@@ -234,9 +234,9 @@ func TestUpdateScheduleTool_WireBodyPreservesUnmodelledFields(t *testing.T) {
 }
 
 // TestUpdateScheduleTool_NoOverridesRefused verifies the handler refuses a
-// no-op call (neither name nor state set) locally rather than sending a
-// request — UpdateScheduleFromEdit itself refuses empty overrides, but the
-// handler should fail before constructing a client.
+// no-op call (no update field given) locally rather than sending a
+// request — ops.UpdateSchedule itself refuses empty input, and the refusal
+// must name every settable field.
 func TestUpdateScheduleTool_NoOverridesRefused(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request: %s %s — a no-op update must be refused locally", r.Method, r.URL.Path)
@@ -258,7 +258,136 @@ func TestUpdateScheduleTool_NoOverridesRefused(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("expected error result for no-op update, got success")
 	}
-	if !strings.Contains(toolResultText(res), "at least one of name or state") {
-		t.Errorf("error must name the requirement, got: %s", toolResultText(res))
+	if !strings.Contains(toolResultText(res), "at least one of --name, --state, --delete-after-days or --delete-after-hours") {
+		t.Errorf("error must name every settable field, got: %s", toolResultText(res))
+	}
+}
+
+// updateScheduleDeleteAfterFixture is a repeating schedule's /edit response:
+// is_posts_repeated=1, delete_posts_hour=5, plus the structural keys
+// UpdateScheduleFromEdit's recognisable-schedule guard requires.
+const updateScheduleDeleteAfterFixture = `{
+	"id": 57793,
+	"name": "Repeating",
+	"state": 1,
+	"publication_how_type": 1,
+	"is_posts_repeated": 1,
+	"delete_posts_day": 0,
+	"delete_posts_hour": 5,
+	"posts_caption": 0,
+	"times": [[{"hours":12,"minutes":25}],[],[],[],[],[],[]],
+	"selected_pages_by_source_ids": {"1": [100]}
+}`
+
+// TestUpdateScheduleTool_DeletePostsDay_PreservesFields is the F1 journey
+// test: an agent sets auto-delete through MCP —
+// hooppy_update_schedule {id:57793, delete_posts_day:30} must reach the PUT
+// body as delete_posts_day=30 with every other schedule field preserved,
+// including delete_posts_hour=5 (not sent, because the input pointer is
+// nil — a key travels only when explicitly given). This is the #157 feature
+// that was unreachable for agents before the ops migration (audit F-2).
+//
+// F1 mutation: in ops.UpdateSchedule, drop the DeletePostsDay override →
+// the delete_posts_day=30 assertion goes RED.
+func TestUpdateScheduleTool_DeletePostsDay_PreservesFields(t *testing.T) {
+	var putBody []byte
+	var putReceived bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/posts/schedules/57793/edit":
+			w.Write([]byte(updateScheduleDeleteAfterFixture))
+		case r.Method == http.MethodPut && r.URL.Path == "/posts/schedules/57793":
+			putReceived = true
+			putBody, _ = io.ReadAll(r.Body)
+			w.Write([]byte(`{"schedules":[{"id":57793}]}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+	cs := newMCPClientSession(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "hooppy_update_schedule",
+		Arguments: map[string]any{
+			"id":               57793,
+			"delete_posts_day": 30,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %s", toolResultText(res))
+	}
+	if !putReceived {
+		t.Fatal("PUT /posts/schedules/57793 was never issued")
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(putBody, &body); err != nil {
+		t.Fatalf("decode PUT body: %v", err)
+	}
+	assertJSONNumber := func(key string, want float64) {
+		t.Helper()
+		raw, ok := body[key]
+		if !ok {
+			t.Errorf("PUT body is missing %q — the read-modify-write must carry every /edit key back", key)
+			return
+		}
+		var got float64
+		if err := json.Unmarshal(raw, &got); err != nil || got != want {
+			t.Errorf("PUT body %s = %s, want %v", key, string(raw), want)
+		}
+	}
+	assertJSONNumber("delete_posts_day", 30)
+	assertJSONNumber("delete_posts_hour", 5)
+	assertJSONNumber("is_posts_repeated", 1)
+	var name string
+	if err := json.Unmarshal(body["name"], &name); err != nil || name != "Repeating" {
+		t.Errorf("PUT body name = %s, want \"Repeating\"", string(body["name"]))
+	}
+}
+
+// TestUpdateScheduleTool_StateZeroRefused is the F4 journey test: state=0
+// via MCP must be refused with a clear error naming the real values —
+// NOT silently ignored (the F-1 defect: the schema documented "0=paused"
+// while the handler treated 0 as unset, so an agent's "pause this schedule"
+// call kept it running).
+//
+// Mutation: remove the state range check in ops.UpdateSchedule → state=0
+// flows into the overrides and the refusal assertions go RED.
+func TestUpdateScheduleTool_StateZeroRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s — state=0 must be refused locally", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+	cs := newMCPClientSession(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "hooppy_update_schedule",
+		Arguments: map[string]any{
+			"id":    42,
+			"state": 0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("state=0 returned success — an out-of-range state must be refused, not silently ignored")
+	}
+	if !strings.Contains(toolResultText(res), "state") {
+		t.Errorf("error must name the state field, got: %s", toolResultText(res))
+	}
+	for _, v := range []string{"1", "2", "3"} {
+		if !strings.Contains(toolResultText(res), v) {
+			t.Errorf("error must name the valid state values {1,2,3} (missing %q), got: %s", v, toolResultText(res))
+		}
 	}
 }

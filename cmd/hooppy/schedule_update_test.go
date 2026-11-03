@@ -11,7 +11,12 @@ import (
 	"testing"
 
 	"github.com/anatolykoptev/go-hooppy"
+	"github.com/anatolykoptev/go-hooppy/ops"
 )
+
+// pint/pstr build explicit-presence pointers for ops input structs.
+func pint(v int) *int       { return &v }
+func pstr(v string) *string { return &v }
 
 // TestRunScheduleUpdate_NoOverridesRefused is the RED-on-revert test for the
 // CLI `schedules update` no-op refusal. The MCP equivalent
@@ -36,11 +41,7 @@ func TestRunScheduleUpdate_NoOverridesRefused(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	code := runScheduleUpdate(context.Background(), c, &out, &errOut, scheduleUpdateArgs{
-		id:    42,
-		name:  "",
-		state: 0,
-	})
+	code := runScheduleUpdate(context.Background(), c, &out, &errOut, 42, ops.UpdateScheduleInput{})
 	if code == 0 {
 		t.Fatalf("runScheduleUpdate exit code = 0, want 1 (a no-op update must be refused); stdout=%s stderr=%s", out.String(), errOut.String())
 	}
@@ -87,11 +88,7 @@ func TestRunScheduleUpdate_NameOnly_PreservesFields(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	code := runScheduleUpdate(context.Background(), c, &out, &errOut, scheduleUpdateArgs{
-		id:    42,
-		name:  "New Name",
-		state: 0,
-	})
+	code := runScheduleUpdate(context.Background(), c, &out, &errOut, 42, ops.UpdateScheduleInput{Name: pstr("New Name")})
 	if code != 0 {
 		t.Fatalf("runScheduleUpdate exit %d; stderr=%s", code, errOut.String())
 	}
@@ -166,11 +163,7 @@ func TestRunScheduleUpdate_DeleteAfterDays_PreservesAllFields(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	code := runScheduleUpdate(context.Background(), c, &out, &errOut, scheduleUpdateArgs{
-		id:                 57793,
-		deleteAfterDays:    30,
-		deleteAfterDaysSet: true,
-	})
+	code := runScheduleUpdate(context.Background(), c, &out, &errOut, 57793, ops.UpdateScheduleInput{DeletePostsDay: pint(30)})
 	if code != 0 {
 		t.Fatalf("runScheduleUpdate exit %d; stderr=%s", code, errOut.String())
 	}
@@ -216,11 +209,7 @@ func TestRunScheduleUpdate_DeleteAfterHours_SetsHour(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	code := runScheduleUpdate(context.Background(), c, &out, &errOut, scheduleUpdateArgs{
-		id:                  57793,
-		deleteAfterHours:    9,
-		deleteAfterHoursSet: true,
-	})
+	code := runScheduleUpdate(context.Background(), c, &out, &errOut, 57793, ops.UpdateScheduleInput{DeletePostsHour: pint(9)})
 	if code != 0 {
 		t.Fatalf("runScheduleUpdate exit %d; stderr=%s", code, errOut.String())
 	}
@@ -274,11 +263,7 @@ func TestRunScheduleUpdate_EmptyEditResponse_NoPUT(t *testing.T) {
 			}
 
 			var out, errOut bytes.Buffer
-			code := runScheduleUpdate(context.Background(), c, &out, &errOut, scheduleUpdateArgs{
-				id:                 57793,
-				deleteAfterDays:    30,
-				deleteAfterDaysSet: true,
-			})
+			code := runScheduleUpdate(context.Background(), c, &out, &errOut, 57793, ops.UpdateScheduleInput{DeletePostsDay: pint(30)})
 			if code != 1 {
 				t.Fatalf("runScheduleUpdate exit %d, want 1 — a bad /edit state must refuse before the PUT; stdout=%s", code, out.String())
 			}
@@ -297,12 +282,12 @@ func TestRunScheduleUpdate_EmptyEditResponse_NoPUT(t *testing.T) {
 func TestRunScheduleUpdate_DeleteAfterValidationRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		args    scheduleUpdateArgs
+		in      ops.UpdateScheduleInput
 		wantMsg string
 	}{
-		{"negative days", scheduleUpdateArgs{id: 42, deleteAfterDays: -1, deleteAfterDaysSet: true}, "--delete-after-days"},
-		{"hours 24", scheduleUpdateArgs{id: 42, deleteAfterHours: 24, deleteAfterHoursSet: true}, "--delete-after-hours"},
-		{"negative hours", scheduleUpdateArgs{id: 42, deleteAfterHours: -1, deleteAfterHoursSet: true}, "--delete-after-hours"},
+		{"negative days", ops.UpdateScheduleInput{DeletePostsDay: pint(-1)}, "--delete-after-days"},
+		{"hours 24", ops.UpdateScheduleInput{DeletePostsHour: pint(24)}, "--delete-after-hours"},
+		{"negative hours", ops.UpdateScheduleInput{DeletePostsHour: pint(-1)}, "--delete-after-hours"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +299,7 @@ func TestRunScheduleUpdate_DeleteAfterValidationRefused(t *testing.T) {
 				t.Fatalf("NewClient: %v", err)
 			}
 			var out, errOut bytes.Buffer
-			code := runScheduleUpdate(context.Background(), c, &out, &errOut, tc.args)
+			code := runScheduleUpdate(context.Background(), c, &out, &errOut, 42, tc.in)
 			if code == 0 {
 				t.Fatalf("exit code = 0, want 1; stdout=%s stderr=%s", out.String(), errOut.String())
 			}

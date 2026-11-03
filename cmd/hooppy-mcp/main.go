@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/anatolykoptev/go-hooppy"
+	"github.com/anatolykoptev/go-hooppy/ops"
 	mcpserver "github.com/anatolykoptev/go-mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -941,14 +942,19 @@ func registerUpdateProject(server *mcp.Server) {
 
 // --- update_schedule (undocumented) ---
 
+// updateScheduleInput is the typed tool input: the shared ops input struct
+// (single source of the parameter set, embedded so its fields promote into
+// the tool's input schema) plus the schedule id, which stays an explicit
+// field on this surface like the CLI's positional <id> argument.
 type updateScheduleInput struct {
-	ID    int    `json:"id" jsonschema:"Schedule ID to update."`
-	Name  string `json:"name,omitempty" jsonschema:"Schedule name. Optional, but at least one of name or state must be set."`
-	State int    `json:"state,omitempty" jsonschema:"State: 1=active (default), 0=paused. Optional, but at least one of name or state must be set."`
+	ID int `json:"id" jsonschema:"Schedule ID to update."`
+	ops.UpdateScheduleInput
 }
 
-// registerUpdateSchedule wires the schedule-safe update path. It delegates to
-// hooppy.UpdateScheduleFromEdit, which fetches the full schedule state via
+// registerUpdateSchedule wires the schedule-safe update path. It is a thin
+// adapter over ops.UpdateSchedule — the shared layer that owns validation,
+// presence semantics and override building, and routes through
+// hooppy.UpdateScheduleFromEdit: fetches the full schedule state via
 // GET /posts/schedules/{id}/edit (72 keys on the wire) and PUTs the complete
 // object back with only the caller's overrides applied — preserving every
 // field the tool does not expose as an input.
@@ -961,42 +967,23 @@ type updateScheduleInput struct {
 // UTM tags, and the two story/reels source-id lists — on an object that
 // decides where everything publishes. An LLM asked to "change the posting
 // time on that schedule" would match this tool's intent and wipe the
-// schedule. The sibling CLI `schedules update` was already routed through
-// UpdateScheduleFromEdit; the MCP handler is the worse surface (the client is
-// an LLM) and must not lag behind it.
+// schedule.
 func registerUpdateSchedule(server *mcp.Server) {
+	entry := ops.MustEntry("UpdateSchedule")
 	mcpserver.AddTool(server,
 		&mcp.Tool{
-			Name:        "hooppy_update_schedule",
-			Description: "Update a publication schedule on Hooppy by ID. Performs a read-modify-write: fetches the schedule's full editable state, applies only the fields you specify (name, state), and sends the complete object back — preserving every other field the API carries (posting times, page targets, captions, comments, buttons, start/stop dates, watermark, UTM tags, story/reels source-id lists, and ~50 more the tool does not expose as inputs). Do NOT expect a partial update: changing only the name through a partial writer would silently wipe the schedule's posting times and page selection. UNDOCUMENTED endpoint — may change without notice.",
+			Name:        entry.MCPTool,
+			Description: "Update a publication schedule on Hooppy by ID. Performs a read-modify-write: fetches the schedule's full editable state, applies only the fields you specify (name, state, delete_posts_day, delete_posts_hour), and sends the complete object back — preserving every other field the API carries (posting times, page targets, captions, comments, buttons, start/stop dates, watermark, UTM tags, story/reels source-id lists, and ~50 more the tool does not expose as inputs). Do NOT expect a partial update: changing only the name through a partial writer would silently wipe the schedule's posting times and page selection. UNDOCUMENTED endpoint — may change without notice.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in updateScheduleInput) (*mcp.CallToolResult, error) {
 			if in.ID == 0 {
 				return errResult("id is required (use list_schedules to find IDs)")
 			}
-			if in.Name == "" && in.State == 0 {
-				return errResult("at least one of name or state is required")
-			}
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			overrides := map[string]json.RawMessage{}
-			if in.Name != "" {
-				b, err := json.Marshal(in.Name)
-				if err != nil {
-					return errResult(fmt.Sprintf("marshal name: %v", err))
-				}
-				overrides["name"] = b
-			}
-			if in.State != 0 {
-				b, err := json.Marshal(in.State)
-				if err != nil {
-					return errResult(fmt.Sprintf("marshal state: %v", err))
-				}
-				overrides["state"] = b
-			}
-			resp, err := c.UpdateScheduleFromEdit(ctx, in.ID, overrides)
+			resp, err := ops.UpdateSchedule(ctx, c, in.ID, in.UpdateScheduleInput)
 			if err != nil {
 				return errResult(err.Error())
 			}
