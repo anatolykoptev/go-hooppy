@@ -76,6 +76,7 @@ func registerTools(server *mcp.Server) {
 	registerUpdatePostText(server)
 	registerMovePost(server)
 	registerBatchMovePosts(server)
+	registerPostWhere(server)
 	// Posts search (scraping external pages) — UNDOCUMENTED
 	registerListSearchPosts(server)
 	registerListSourceResources(server)
@@ -938,6 +939,37 @@ func registerUpdateProject(server *mcp.Server) {
 				return errResult(err.Error())
 			}
 			return jsonResult(resp)
+		},
+	)
+}
+
+// --- post_where ---
+
+// postWhereInput is the typed tool input: the shared ops input struct
+// (embedded so its fields promote into the tool's input schema) plus the post
+// id, an explicit field on this surface like the CLI's positional <post-id>.
+type postWhereInput struct {
+	ID int `json:"id" jsonschema:"Post ID to look up (from list_posts)."`
+	ops.PostWhereInput
+}
+
+func registerPostWhere(server *mcp.Server) {
+	entry := ops.MustEntry("PostWhere")
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        entry.MCPTool,
+			Description: "Show where a post is published: for ONE social network (source_id, default 1=VK) returns every page the post goes to, the public URL of the already-published copy on each page (published_url, empty until published), the page's own URL, the scheduled-by-network marker (planned) and the last publish errors. Use it to find every VK copy of a queued post. The API answers per network, so call once per source_id. A post with no pages in that network returns an empty pages list with a note. Documented in the official API reference.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in postWhereInput) (*mcp.CallToolResult, error) {
+			c, err := client()
+			if err != nil {
+				return errResult(err.Error())
+			}
+			res, err := ops.PostWhere(ctx, c, in.ID, in.PostWhereInput)
+			if err != nil {
+				return errResult(err.Error())
+			}
+			return jsonResult(res)
 		},
 	)
 }

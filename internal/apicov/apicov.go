@@ -460,7 +460,16 @@ func subcommandName(arg ast.Expr, entryVars map[string]string, entries map[strin
 		if k, ok := kv.Key.(*ast.Ident); !ok || k.Name != "Name" {
 			continue
 		}
-		switch v := kv.Value.(type) {
+		val := kv.Value
+		// `entry.CLILeaf() + " <post-id>"`: the name is the leftmost operand.
+		for {
+			be, ok := val.(*ast.BinaryExpr)
+			if !ok || be.Op != token.ADD {
+				break
+			}
+			val = be.X
+		}
+		switch v := val.(type) {
 		case *ast.BasicLit:
 			// cobra takes the first word of Use as the name; the rest is
 			// the argument synopsis ("show <schedule-id>").

@@ -46,6 +46,10 @@ const (
 	pathPostsSearchParseStop  = "/posts-search/parsing/stop"
 	pathPostsSearchEdit       = "/posts-search/%d/edit"
 	pathPostEdit              = "/posts/%d/edit"
+	// GET /items/social/pages — "where is this post published" (documented as
+	// «Где опубликован пост»). NOT /posts/social, which the reference
+	// documents as the VK/OK post IMPORT-by-URL endpoint.
+	pathItemsSocialPages = "/items/social/pages"
 	// Cross-posting rule engine (the /cross-posting subsystem, NOT the
 	// /posts/{mode} cross-post dispatcher in crosspost.go). Documented in the
 	// official API reference (the /posts/{mode} dispatcher is not). The read surface is

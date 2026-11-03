@@ -28,6 +28,12 @@ var Registry = []Entry{
 		MCPTool: "hooppy_update_schedule",
 		Input:   reflect.TypeOf(UpdateScheduleInput{}),
 	},
+	{
+		Name:    "PostWhere",
+		CLIPath: "posts where",
+		MCPTool: "hooppy_post_where",
+		Input:   reflect.TypeOf(PostWhereInput{}),
+	},
 }
 
 // CLILeaf returns the last word of the entry's CLI path — the subcommand

@@ -267,6 +267,26 @@ func registerPosts(root *cobra.Command) {
 		printJSON(resp)
 	}
 
+	// posts where — per page, where a post is published and its public URL.
+	// Command name, flag set and input type come from the ops.Registry entry;
+	// the Run closure parses the positional id and adapts I/O.
+	whereEntry := ops.MustEntry("PostWhere")
+	whereCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
+		Name:  whereEntry.CLILeaf() + " <post-id>",
+		Short: "Show the pages a post publishes to in one network, with the public URL of each published copy",
+	})
+	whereCmd.Args = cobra.ExactArgs(1)
+	if err := RegisterOpFlags(whereCmd, whereEntry.Input); err != nil {
+		panic(err)
+	}
+	whereCmd.Run = func(_ *cobra.Command, args []string) {
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		var in ops.PostWhereInput
+		die(FillOpInput(whereCmd, &in))
+		os.Exit(runPostsWhere(context.Background(), mustClient(), os.Stdout, os.Stderr, id, in))
+	}
+
 	// posts move — move a post (or batch) to another schedule.
 	// A move re-slots the post to the TAIL of the target queue; the server
 	// assigns the new publication_date, which is reported per post (moving
