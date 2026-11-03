@@ -19,8 +19,7 @@ import (
 // 20 rows per page; pass page (1-indexed, 0 = first page) to paginate, or
 // ListAllCrossPostings to walk every page.
 //
-// UNDOCUMENTED: GET /cross-posting is not in the public OpenAPI spec (v0.1.0).
-// Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): GET /cross-posting.
 func (c *Client) ListCrossPostings(ctx context.Context, page int) (*CrossPostingsResponse, error) {
 	params := url.Values{}
 	// Reject negatives before any request: the old `> 0` guard let a
@@ -101,8 +100,7 @@ func (c *Client) ListAllCrossPostingsWithTotal(ctx context.Context) ([]CrossPost
 // There is no direct GET /cross-posting/{id} (405, same shape as
 // /posts-search/{id} and /posts/schedules/{id}); /edit is the full-state read.
 //
-// UNDOCUMENTED: GET /cross-posting/{id}/edit is not in the public OpenAPI
-// spec (v0.1.0). Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): GET /cross-posting/{id}/edit.
 func (c *Client) GetCrossPostingEdit(ctx context.Context, id int) (*CrossPostingEditResponse, error) {
 	if id <= 0 {
 		return nil, fmt.Errorf("hooppy: GetCrossPostingEdit: id must be a positive integer (got %d); a zero or negative id builds an invalid path (/cross-posting/%d/edit) and the server cannot resolve it", id, id)
@@ -141,8 +139,7 @@ func (c *Client) GetCrossPostingEdit(ctx context.Context, id int) (*CrossPosting
 // counters across days) is the live state on this account today and is real
 // data, not absent.
 //
-// UNDOCUMENTED: GET /cross-posting/{id}/statistics is not in the public
-// OpenAPI spec (v0.1.0). Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): GET /cross-posting/{id}/statistics.
 func (c *Client) GetCrossPostingStatistics(ctx context.Context, id int) (*CrossPostingStatisticsResponse, error) {
 	if id <= 0 {
 		return nil, fmt.Errorf("hooppy: GetCrossPostingStatistics: id must be a positive integer (got %d); a zero or negative id builds an invalid path (/cross-posting/%d/statistics) and the server cannot resolve it", id, id)

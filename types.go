@@ -106,8 +106,9 @@ type Schedule struct {
 // (int 0 vs. the original string). Use UpdateScheduleFromEdit for round-trip
 // preservation; do not "fix" these types without a separate measurement PR.
 //
-// UNDOCUMENTED: these fields are not in the public OpenAPI spec (v0.1.0).
-// The API may change without notice.
+// The endpoints (POST /posts/schedules, PUT /posts/schedules/{id}) are in the
+// official API reference (openapi.yaml); the field list below was measured
+// live and is a subset of what the server carries.
 type SchedulePayload struct {
 	Name                 string `json:"name"`
 	State                int    `json:"state"`                  // measured: 1=active (Активно), 2=deferred launch (Отложенный запуск), 3=stopped (Остановлено); 0 not observed on the live account. Labels from the Hooppy Nuxt web bundle.
@@ -271,8 +272,8 @@ type ScheduleTimeSlot struct {
 //     guessing a struct that would abort the decode once a non-empty
 //     response arrives.
 //
-// UNDOCUMENTED: GET /posts/schedules/{id}/edit is not in the public OpenAPI
-// spec (v0.1.0). Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): GET
+// /posts/schedules/{id}/edit.
 type ScheduleEditResponse struct {
 	ID   int    `json:"id"`
 	Name string `json:"name"`
@@ -526,7 +527,8 @@ type NotificationsResponse struct {
 // iterative 500-error probing). Use NewProjectPayload(name, pageID) to
 // get a payload with sensible defaults.
 //
-// UNDOCUMENTED: not in the public OpenAPI spec (v0.1.0).
+// Documented in the official API reference (openapi.yaml): POST
+// /posts/projects.
 type ProjectPayload struct {
 	Name                        string `json:"name"`
 	PublicationWhereType        int    `json:"publication_where_type"`
@@ -1962,9 +1964,9 @@ func parseMetricFloat(name, v string) (float64, error) {
 // as its number with Unknown=true and Name="unknown" — never silently mapped
 // to a default (the default_unreachable class this repo has shipped before).
 //
-// UNDOCUMENTED: the /cross-posting endpoints are not in the public OpenAPI
-// spec (v0.1.0). Discovered via API probing + the hooppy.ru Nuxt bundle — may
-// change without notice.
+// The /cross-posting endpoints are in the official API reference
+// (openapi.yaml); the field decoding here was measured live and from the
+// hooppy.ru Nuxt bundle.
 
 // EnumValue carries both the raw integer (for round-tripping) and the decoded
 // human-readable name (for an agent/human). It is the shared representation
@@ -2262,8 +2264,8 @@ type CrossPostingsResponse struct {
 // wrong-guess abort on the whole /edit decode. They survive in Raw for the
 // future write path; the diagnostic baseline records them as unmodelled.
 //
-// UNDOCUMENTED: GET /cross-posting/{id}/edit is not in the public OpenAPI
-// spec (v0.1.0). Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): GET
+// /cross-posting/{id}/edit.
 type CrossPostingEditResponse struct {
 	Raw json.RawMessage `json:"-"`
 	// Identity + state.

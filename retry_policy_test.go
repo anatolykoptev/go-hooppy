@@ -163,6 +163,12 @@ var retryPolicies = map[string]struct {
 	// are retryAllowed but happen after the POST commits, so they do not
 	// change the create classification (creates=false).
 	"BatchMovePosts": {retryNever, false},
+	// GetPostPublishedPages is a GET read but declared retryNever: its
+	// answers for "no pages in this network" and an unknown type are
+	// DEFINITIVE HTTP 500s ("No pages for this object."), so a retry only
+	// repeats the same answer for the whole backoff window before ops.PostWhere
+	// turns it into an empty result.
+	"GetPostPublishedPages": {retryNever, false},
 	// ListSchedulePosts is a GET read — retryAllowed.
 	"ListSchedulePosts": {retryAllowed, false},
 	// --- notifications ---

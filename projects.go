@@ -34,8 +34,7 @@ func (c *Client) ListProjects(ctx context.Context, page int) (*ProjectsResponse,
 
 // UpdateProject updates a project's name via PUT /posts/projects/{id}.
 //
-// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
-// Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): PUT /posts/projects/{id}.
 func (c *Client) UpdateProject(ctx context.Context, id int, name string) (*DeleteResponse, error) {
 	var resp DeleteResponse
 	if err := c.doPUT(ctx, fmt.Sprintf(pathProjectDelete, id), map[string]string{"name": name}, &resp, true); err != nil {
@@ -48,8 +47,7 @@ func (c *Client) UpdateProject(ctx context.Context, id int, name string) (*Delet
 // Use NewProjectPayload(name, pageID) to get a payload with sensible
 // defaults, then override fields as needed.
 //
-// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
-// Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): POST /posts/projects.
 func (c *Client) CreateProject(ctx context.Context, payload ProjectPayload) (*ProjectResponse, error) {
 	var resp ProjectResponse
 	if err := c.doPOST(ctx, pathProjects, payload, &resp); err != nil {
@@ -60,8 +58,7 @@ func (c *Client) CreateProject(ctx context.Context, payload ProjectPayload) (*Pr
 
 // DeleteProject deletes a project via DELETE /posts/projects/{id}.
 //
-// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
-// Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): DELETE /posts/projects/{id}.
 func (c *Client) DeleteProject(ctx context.Context, id int) (*DeleteResponse, error) {
 	var resp DeleteResponse
 	if err := c.doDELETE(ctx, fmt.Sprintf(pathProjectDelete, id), &resp, true); err != nil {
@@ -376,8 +373,7 @@ func NewCappedAllListEnvelope[T any](list []T, totalRows int) AllListEnvelope {
 // kept for callers who can supply the full field set, but the honest default
 // (NewSchedulePayload) fails Validate() until the caller completes it.
 //
-// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
-// Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): POST /posts/schedules.
 func (c *Client) CreateSchedule(ctx context.Context, payload SchedulePayload) (*ScheduleResponse, error) {
 	if err := payload.Validate(); err != nil {
 		return nil, err
@@ -415,8 +411,7 @@ func (c *Client) CreateSchedule(ctx context.Context, payload SchedulePayload) (*
 // they have already satisfied. If you are not certain you have a full payload,
 // use UpdateScheduleFromEdit.
 //
-// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
-// Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): PUT /posts/schedules/{id}.
 func (c *Client) UpdateSchedule(ctx context.Context, id int, payload SchedulePayload) (*ScheduleResponse, error) {
 	var resp ScheduleResponse
 	if err := c.doPUT(ctx, fmt.Sprintf(pathScheduleDelete, id), payload, &resp, true); err != nil {
@@ -455,8 +450,7 @@ func (c *Client) UpdateSchedule(ctx context.Context, id int, payload SchedulePay
 //	stateBytes, _ := json.Marshal(1)
 //	overrides["state"] = stateBytes
 //
-// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
-// Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): PUT /posts/schedules/{id}.
 func (c *Client) UpdateScheduleFromEdit(ctx context.Context, id int, overrides map[string]json.RawMessage) (*ScheduleResponse, error) {
 	if id == 0 {
 		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: id is required (got 0)")
@@ -552,8 +546,7 @@ func ScheduleOverride(key string, value interface{}) (map[string]json.RawMessage
 
 // DeleteSchedule deletes a schedule via DELETE /posts/schedules/{id}.
 //
-// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
-// Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): DELETE /posts/schedules/{id}.
 func (c *Client) DeleteSchedule(ctx context.Context, id int) (*ScheduleResponse, error) {
 	var resp ScheduleResponse
 	if err := c.doDELETE(ctx, fmt.Sprintf(pathScheduleDelete, id), &resp, true); err != nil {
@@ -569,8 +562,7 @@ func (c *Client) DeleteSchedule(ctx context.Context, id int) (*ScheduleResponse,
 // response never returns. See ScheduleEditResponse for the modelled fields
 // and the evidence behind each type choice.
 //
-// UNDOCUMENTED: GET /posts/schedules/{id}/edit is not in the public OpenAPI
-// spec (v0.1.0). Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): GET /posts/schedules/{id}/edit.
 func (c *Client) GetScheduleEdit(ctx context.Context, id int) (*ScheduleEditResponse, error) {
 	if id <= 0 {
 		return nil, fmt.Errorf("hooppy: GetScheduleEdit: id must be a positive integer (got %d); a zero or negative id builds an invalid path (/posts/schedules/%d/edit) and the server cannot resolve it", id, id)
@@ -630,8 +622,7 @@ type ListSchedulePostsFilter struct {
 // names the expected format. Same shape as validateDDMMYYYY on StartParsing
 // (issue #61); the validator is shared, not duplicated.
 //
-// UNDOCUMENTED: GET /posts/schedules/{id}/posts is not in the public OpenAPI
-// spec. Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): GET /posts/schedules/{id}/posts.
 func (c *Client) ListSchedulePosts(ctx context.Context, f ListSchedulePostsFilter) (*SchedulePostsResponse, error) {
 	if f.ScheduleID == 0 {
 		return nil, fmt.Errorf("hooppy: ListSchedulePosts: scheduleID is required (got 0)")

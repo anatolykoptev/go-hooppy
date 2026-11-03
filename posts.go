@@ -201,8 +201,7 @@ func (c *Client) CreatePost(ctx context.Context, payload interface{}) (*CreatePo
 // UpdatePost updates an existing post via PUT /posts/{id}. The payload must
 // be one of the PostPublish*Payload types (same as CreatePost).
 //
-// UNDOCUMENTED: this endpoint is not in the public OpenAPI spec (v0.1.0).
-// Discovered via API probing — may change without notice.
+// Documented in the official API reference (openapi.yaml): PUT /posts/{id}.
 func (c *Client) UpdatePost(ctx context.Context, id int, payload interface{}) (*DeletePostResponse, error) {
 	var resp DeletePostResponse
 	if err := c.doPUT(ctx, fmt.Sprintf(pathPostUpdate, id), payload, &resp, true); err != nil {
@@ -252,7 +251,7 @@ type PostEditResponse struct {
 // GetSearchPostEdit (which is for scraped posts), this returns schedule_id
 // and project_id for the existing post.
 //
-// UNDOCUMENTED: GET /posts/{id}/edit is not in the public OpenAPI spec.
+// Documented in the official API reference (openapi.yaml): GET /posts/{id}/edit.
 func (c *Client) GetPostEdit(ctx context.Context, postID int) (*PostEditResponse, error) {
 	if postID <= 0 {
 		return nil, fmt.Errorf("hooppy: GetPostEdit: postID must be a positive integer (got %d); a zero or negative id builds an invalid path (/posts/%d/edit) and the server cannot resolve it", postID, postID)
@@ -492,8 +491,8 @@ func buildPostUpdatePayload(op string, postID int, edit *PostEditResponse, texts
 // post is rejected by the server, which still answers {"success":true} and
 // keeps its own computed slot.
 //
-// UNDOCUMENTED: POST /posts/batch/move and GET /posts/{id}/edit are not in
-// the public OpenAPI spec.
+// Documented in the official API reference (openapi.yaml): POST
+// /posts/batch/move and GET /posts/{id}/edit.
 func (c *Client) MovePost(ctx context.Context, postID, toScheduleID int) (*PostMoveResult, error) {
 	if postID <= 0 {
 		return nil, fmt.Errorf("hooppy: MovePost: postID must be a positive id (got %d) — an impossible id is accepted by the server and fabricates a success entry; pass a real post id", postID)
@@ -635,7 +634,7 @@ const MaxBatchMoveIDs = 1000
 // behaviour. If doPOST gained a retryable param, idempotency would make this
 // retryAllowed.
 //
-// UNDOCUMENTED: POST /posts/batch/move is not in the public OpenAPI spec.
+// Documented in the official API reference (openapi.yaml): POST /posts/batch/move.
 func (c *Client) BatchMovePosts(ctx context.Context, ids []int, toScheduleID int) (*BatchMovePostsResult, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("hooppy: BatchMovePosts requires at least one ID")
