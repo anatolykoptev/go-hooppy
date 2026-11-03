@@ -297,6 +297,32 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 
 > **Note — `hooppy_copy_search_post` is deprecated.** The historical `CopySearchPost` (PUT /posts/copy) created empty posts; the restored shim now delegates to resolve+publish (the same path `hooppy_import_search_post` uses), preserving text + attachments. Use `hooppy_import_search_post` for the non-deprecated name, or `hooppy_rewrite_search_post` for a text override. Batch import is fully exposed via MCP (`hooppy_import_search_post` with `search_post_ids`).
 
+## The ops layer (for contributors)
+
+The CLI (`cmd/hooppy`) and the MCP server (`cmd/hooppy-mcp`) share one
+operation layer in `ops/`. A capability belongs there — not duplicated per
+surface — so both surfaces get it from a single change:
+
+1. `ops/<op>.go` — one exported function per operation
+   (`ops.UpdateSchedule(ctx, client, id, in)`), owning all validation,
+   presence semantics and request building. Optional input fields are
+   pointers: `nil` = not given, pointed-at zero = a real value.
+2. The input struct is the single source of the parameter set. Field tags:
+   `json` (wire/MCP property), `jsonschema` (tool description),
+   `flag` + `flagusage` (CLI flag). `flag:"-"` opts a field out of the CLI.
+3. `ops.Registry` — one entry per migrated op (`CLIPath`, `MCPTool`,
+   `Input` type). The CLI command binds its flags from the Input type via
+   `RegisterOpFlags`/`FillOpInput`; the MCP tool uses the Input type as its
+   `AddTool` schema. Both register **from** the registry entry.
+4. Parity tests (`TestOpsRegistry_*` in both `cmd/` packages) derive from
+   the registry and the real registrations: an entry missing on either
+   surface, or a field without a `flag` tag / schema property, fails the
+   gate. The `*BacklogReport` tests log how many commands/tools are not yet
+   migrated — adding one to the registry shrinks the count.
+
+Piloted on `schedules update` / `hooppy_update_schedule`. Everything else
+still lives per-surface and is migrated one op at a time.
+
 ## Social network source IDs
 
 | ID | Network | ID | Network |

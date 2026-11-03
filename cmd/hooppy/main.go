@@ -12,13 +12,18 @@ import (
 	"time"
 
 	"github.com/anatolykoptev/go-hooppy"
+	"github.com/anatolykoptev/go-hooppy/ops"
 	"github.com/anatolykoptev/go-kit/cli"
 	"github.com/spf13/cobra"
 )
 
 var version = "dev"
 
-func main() {
+// buildRootCommand builds the full command tree the binary executes. It is
+// a function (not inlined in main) so the parity test can walk the same
+// tree the real binary uses — a command registered anywhere else would be
+// invisible to it.
+func buildRootCommand() *cobra.Command {
 	root := cli.NewRoot(cli.RootConfig{
 		Use:     "hooppy",
 		Short:   "Hooppy API CLI — manage social media posts via hooppy.ru",
@@ -39,8 +44,11 @@ func main() {
 	registerMCPConfig(root)
 	registerDoctor(root)
 	registerCrossPostings(root)
+	return root
+}
 
-	if err := root.Execute(); err != nil {
+func main() {
+	if err := buildRootCommand().Execute(); err != nil {
 		os.Exit(1)
 	}
 }
@@ -522,35 +530,31 @@ func registerSchedules(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// schedules update (undocumented)
-	// Routes through UpdateScheduleFromEdit (read-modify-write) — NOT the
-	// raw UpdateSchedule partial writer, which drops 36 of 72 fields the
-	// server carries on /edit and would silently destroy the schedule's
-	// times, page selection, and project binding on a name-only change.
+	// schedules update (undocumented) — the pilot op on the shared ops
+	// layer. Command name, flag set and input type all come from the
+	// ops.Registry entry; the Run closure only parses the positional id and
+	// adapts I/O. Routes through ops.UpdateSchedule → UpdateScheduleFromEdit
+	// (read-modify-write) — NOT the raw UpdateSchedule partial writer,
+	// which drops 36 of 72 fields the server carries on /edit and would
+	// silently destroy the schedule's times, page selection, and project
+	// binding on a name-only change.
+	schedUpdateEntry := ops.MustEntry("UpdateSchedule")
 	schedUpdateCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
-		Name:  "update",
+		Name:  schedUpdateEntry.CLILeaf(),
 		Short: "Update a schedule by ID, preserving all fields (read-modify-write, undocumented endpoint)",
 	})
 	schedUpdateCmd.Args = cobra.ExactArgs(1)
-	var schedUpdName string
-	var schedUpdState int
-	var schedUpdDelDays, schedUpdDelHours int
-	schedUpdateCmd.Flags().StringVar(&schedUpdName, "name", "", "schedule name (applied via read-modify-write; all other fields preserved)")
-	schedUpdateCmd.Flags().IntVar(&schedUpdState, "state", 0, "state override: 1=active, 2=deferred, 3=stopped (0 = leave unchanged)")
-	schedUpdateCmd.Flags().IntVar(&schedUpdDelDays, "delete-after-days", 0, "auto-delete posts this many days after publication (0 = disable; only sent when the flag is given)")
-	schedUpdateCmd.Flags().IntVar(&schedUpdDelHours, "delete-after-hours", 0, "auto-delete hour within the day, 0..23 (only sent when the flag is given)")
+	if err := RegisterOpFlags(schedUpdateCmd, schedUpdateEntry.Input); err != nil {
+		// A registry/tag drift that breaks flag binding is a build-time
+		// bug — fail loudly at startup, not silently with a missing flag.
+		panic(err)
+	}
 	schedUpdateCmd.Run = func(_ *cobra.Command, args []string) {
 		id, err := strconv.Atoi(args[0])
 		die(err)
-		os.Exit(runScheduleUpdate(context.Background(), mustClient(), os.Stdout, os.Stderr, scheduleUpdateArgs{
-			id:                  id,
-			name:                schedUpdName,
-			state:               schedUpdState,
-			deleteAfterDays:     schedUpdDelDays,
-			deleteAfterDaysSet:  schedUpdateCmd.Flags().Changed("delete-after-days"),
-			deleteAfterHours:    schedUpdDelHours,
-			deleteAfterHoursSet: schedUpdateCmd.Flags().Changed("delete-after-hours"),
-		}))
+		var in ops.UpdateScheduleInput
+		die(FillOpInput(schedUpdateCmd, &in))
+		os.Exit(runScheduleUpdate(context.Background(), mustClient(), os.Stdout, os.Stderr, id, in))
 	}
 
 	// schedules show — print the schedule's state and auto-delete flags
