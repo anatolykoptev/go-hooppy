@@ -479,10 +479,15 @@ func registerSchedules(root *cobra.Command) {
 	listCmd.Args = cobra.NoArgs
 	var schedPage int
 	var schedAll bool
+	var schedRepeated bool
 	listCmd.Flags().IntVar(&schedPage, "page", 0, "page number, 1-indexed (0 or omit = first page)")
 	listCmd.Flags().BoolVar(&schedAll, "all", false, "fetch all pages (walks until is_has_more is false)")
+	listCmd.Flags().BoolVar(&schedRepeated, "repeated", false, "only schedules with is_posts_repeated=1, as summary rows (fetches every schedule's /edit state; ignores --page/--all)")
 	listCmd.Run = func(_ *cobra.Command, _ []string) {
 		c := mustClient()
+		if schedRepeated {
+			os.Exit(runListSchedulesRepeated(context.Background(), c, os.Stdout, os.Stderr))
+		}
 		os.Exit(runListSchedules(context.Background(), c, os.Stdout, os.Stderr, schedPage, schedAll))
 	}
 
@@ -529,16 +534,37 @@ func registerSchedules(root *cobra.Command) {
 	schedUpdateCmd.Args = cobra.ExactArgs(1)
 	var schedUpdName string
 	var schedUpdState int
+	var schedUpdDelDays, schedUpdDelHours int
 	schedUpdateCmd.Flags().StringVar(&schedUpdName, "name", "", "schedule name (applied via read-modify-write; all other fields preserved)")
 	schedUpdateCmd.Flags().IntVar(&schedUpdState, "state", 0, "state override: 1=active, 2=deferred, 3=stopped (0 = leave unchanged)")
+	schedUpdateCmd.Flags().IntVar(&schedUpdDelDays, "delete-after-days", 0, "auto-delete posts this many days after publication (0 = disable; only sent when the flag is given)")
+	schedUpdateCmd.Flags().IntVar(&schedUpdDelHours, "delete-after-hours", 0, "auto-delete hour within the day, 0..23 (only sent when the flag is given)")
 	schedUpdateCmd.Run = func(_ *cobra.Command, args []string) {
 		id, err := strconv.Atoi(args[0])
 		die(err)
 		os.Exit(runScheduleUpdate(context.Background(), mustClient(), os.Stdout, os.Stderr, scheduleUpdateArgs{
-			id:    id,
-			name:  schedUpdName,
-			state: schedUpdState,
+			id:                  id,
+			name:                schedUpdName,
+			state:               schedUpdState,
+			deleteAfterDays:     schedUpdDelDays,
+			deleteAfterDaysSet:  schedUpdateCmd.Flags().Changed("delete-after-days"),
+			deleteAfterHours:    schedUpdDelHours,
+			deleteAfterHoursSet: schedUpdateCmd.Flags().Changed("delete-after-hours"),
 		}))
+	}
+
+	// schedules show — print the schedule's state and auto-delete flags
+	// (is_posts_repeated, delete_posts_day, delete_posts_hour) as JSON.
+	showCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
+		Name:  "show <schedule-id>",
+		Short: "Show a schedule's state and auto-delete flags as JSON (undocumented endpoint)",
+	})
+	showCmd.Args = cobra.ExactArgs(1)
+	showCmd.Run = func(_ *cobra.Command, args []string) {
+		id, err := strconv.Atoi(args[0])
+		die(err)
+		c := mustClient()
+		os.Exit(runScheduleShow(context.Background(), c, os.Stdout, os.Stderr, id))
 	}
 
 	// schedules times — print a schedule's posting slots per weekday

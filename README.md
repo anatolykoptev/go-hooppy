@@ -150,7 +150,10 @@ hooppy projects delete <project-id>
 
 # Create / update / delete schedules (undocumented)
 hooppy schedules create --name "Daily 09:00"
+hooppy schedules show <schedule-id>            # state, is_posts_repeated, delete_posts_day/hour as JSON
 hooppy schedules update <schedule-id> --name "Renamed" --state 0
+hooppy schedules update <schedule-id> --delete-after-days 30 [--delete-after-hours 9]  # auto-delete posts N days after publication
+hooppy schedules list --repeated               # only schedules with is_posts_repeated=1 (reads each schedule's /edit state)
 hooppy schedules delete <schedule-id>
 
 # Update an existing post (undocumented)
