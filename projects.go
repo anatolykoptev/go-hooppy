@@ -512,6 +512,15 @@ func (c *Client) UpdateScheduleFromEdit(ctx context.Context, id int, overrides m
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: /edit response is not a recognisable schedule (got %d key(s), missing structural key(s) %v) — refusing to use a truncated/empty state as the base of a full-state write that would destroy every field not in the overrides", len(fullState), missing)
 	}
+	//    Issue #158: key presence is not enough — the fetched state must
+	//    carry the REQUESTED id before any PUT. An id that decodes to a
+	//    different number (or 0 / non-numeric) means the server answered about
+	//    a different schedule; a read-modify-write PUT built on it would wipe
+	//    the live schedule.
+	var editID int64
+	if err := json.Unmarshal(fullState["id"], &editID); err != nil || editID != int64(id) {
+		return nil, fmt.Errorf("hooppy: UpdateScheduleFromEdit: /edit response is not a recognisable schedule (id %s does not match the requested schedule id %d) — refusing to use a wrong/truncated state as the base of a full-state write that would destroy every field not in the overrides", string(fullState["id"]), id)
+	}
 	// 4. Apply overrides — replace the RawMessage for each overridden key.
 	for key, val := range overrides {
 		if len(val) == 0 {
@@ -563,9 +572,18 @@ func (c *Client) DeleteSchedule(ctx context.Context, id int) (*ScheduleResponse,
 // UNDOCUMENTED: GET /posts/schedules/{id}/edit is not in the public OpenAPI
 // spec (v0.1.0). Discovered via API probing — may change without notice.
 func (c *Client) GetScheduleEdit(ctx context.Context, id int) (*ScheduleEditResponse, error) {
+	if id <= 0 {
+		return nil, fmt.Errorf("hooppy: GetScheduleEdit: id must be a positive integer (got %d); a zero or negative id builds an invalid path (/posts/schedules/%d/edit) and the server cannot resolve it", id, id)
+	}
 	var resp ScheduleEditResponse
 	if err := c.doGET(ctx, fmt.Sprintf(pathScheduleEdit, id), nil, &resp, true); err != nil {
 		return nil, err
+	}
+	// Issue #158: a 200 {} unmarshals cleanly into a zero-valued struct —
+	// refuse it and any response naming a DIFFERENT schedule before a
+	// caller prints zero values or acts on them.
+	if resp.ID != id {
+		return nil, fmt.Errorf("hooppy: GetScheduleEdit: /edit response id %d does not match the requested schedule id %d — the payload is not this schedule's state (a 200 {} decodes id=0); refusing to report zero or wrong-schedule values", resp.ID, id)
 	}
 	return &resp, nil
 }

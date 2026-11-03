@@ -301,20 +301,19 @@ func runListSchedules(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 }
 
 // runListSchedulesRepeated is the testable core of `hooppy schedules list
-// --repeated`: only schedules whose /edit state carries is_posts_repeated=1,
+// --repeated`: only schedules whose LIST row carries is_posts_repeated=1,
 // emitted as a JSON array of scheduleSummary rows (id, name, state,
 // is_posts_repeated, delete_posts_day, delete_posts_hour).
 //
-// The list response does not model is_posts_repeated (the Schedule type is
-// narrow by convention), so the command does one /edit read per schedule.
-// The walk still runs through ListAllSchedulesWithTotal + NewAllListEnvelope
-// so a truncated collection fails loud rather than filtering a partial set.
+// The list endpoint already returns the flag and the delete_posts_* values
+// per row (testdata/live/schedules.json), so the command issues NO /edit
+// reads: one list request, zero extra round trips, and no dependence on
+// the /edit payload — a 200 {} there used to decode is_posts_repeated=0
+// and silently drop the schedule (issue #158). The walk still runs through
+// ListAllSchedulesWithTotal + NewAllListEnvelope so a truncated collection
+// fails loud rather than filtering a partial set.
 //
-// A failed /edit read aborts the whole command (exit 1) — silently skipping
-// that schedule would report a repeated schedule's absence as fact. The
-// client's retry/backoff handles transient 429/5xx on the ~55 sequential
-// reads. Ordering follows the list order; an empty result is `[]`, never
-// null.
+// Ordering follows the list order; an empty result is `[]`, never null.
 func runListSchedulesRepeated(ctx context.Context, c *hooppy.Client, out, errOut io.Writer) int {
 	list, total, err := c.ListAllSchedulesWithTotal(ctx)
 	if err != nil {
@@ -327,13 +326,8 @@ func runListSchedulesRepeated(ctx context.Context, c *hooppy.Client, out, errOut
 	}
 	rows := make([]scheduleSummary, 0, len(list))
 	for _, s := range list {
-		edit, err := c.GetScheduleEdit(ctx, s.ID)
-		if err != nil {
-			fmt.Fprintf(errOut, "error: schedules list --repeated: read /edit for schedule %d: %v\n", s.ID, err)
-			return 1
-		}
-		if edit.IsPostsRepeated == 1 {
-			rows = append(rows, scheduleSummaryFromEdit(edit))
+		if s.IsPostsRepeated == 1 {
+			rows = append(rows, scheduleSummaryFromList(s))
 		}
 	}
 	enc := json.NewEncoder(out)

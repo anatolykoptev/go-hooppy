@@ -1256,3 +1256,47 @@ func TestCrossPostingFix_F1_WrongDeclarationIsRejected(t *testing.T) {
 		})
 	}
 }
+
+// TestGetCrossPostingEdit_RefusesUnrecognisableOrMismatchedEdit is the
+// sibling-path guard applying the issue-#158 invariant to cross-posting
+// edits — the lossless read feeding `crossposting show` and the future
+// read-modify-write the Raw field exists for. A 200 {} carries no id key at
+// all (not a recognisable edit state — the wire always has one), and a
+// nonzero id naming a DIFFERENT connection is a provable mismatch. Both
+// must error; an id key decoded to 0 (a value the fixture scrubbing also
+// produces) is tolerated — only a PROVABLE mismatch refuses.
+//
+// RED-on-revert (mutation: crossposting.go — drop the guard in
+// GetCrossPostingEdit): each refusal case returns nil error → the err==nil
+// assertions fail.
+func TestGetCrossPostingEdit_RefusesUnrecognisableOrMismatchedEdit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{"empty_object", `{}`, "not a recognisable"},
+		{"different_id", `{"id":42,"name":"x","state":1}`, "does not match"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/cross-posting/2899/edit" {
+					w.Write([]byte(tc.body))
+					return
+				}
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+
+			_, err := c.GetCrossPostingEdit(context.Background(), 2899)
+			if err == nil {
+				t.Fatal("GetCrossPostingEdit: expected an error on the poisoned /edit body, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}

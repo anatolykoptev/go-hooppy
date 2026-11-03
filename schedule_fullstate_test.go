@@ -585,3 +585,61 @@ func TestUpdateScheduleFromEdit_RecognisableScheduleGuard(t *testing.T) {
 		}
 	})
 }
+
+// --- Edit-state identity/completeness guard (issue #158) ---
+
+// TestUpdateScheduleFromEdit_EditIdentityGuard is the F2 RED-on-revert test
+// for issue #158: a read-modify-write PUT must never be built on an /edit
+// state that is not the requested schedule's real state. Structural-key
+// presence is not enough — the fetched state must carry the REQUESTED id
+// BEFORE any PUT. An id that does not match means the server answered about
+// a different schedule — the PUT would overwrite the wrong state.
+//
+// F2 RED-on-revert (mutation: projects.go — drop the id check
+// added beside the structural-key guard in UpdateScheduleFromEdit): each
+// case issues a PUT → putCalls=1 fails the "want 0 PUTs" assertion.
+func TestUpdateScheduleFromEdit_EditIdentityGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{"id_mismatch", `{"id":43,"name":"A","publication_how_type":1,"times":[[{"hours":1,"minutes":2}]]}`, "does not match"},
+		{"id_zero", `{"id":0,"name":"A","publication_how_type":1,"times":[]}`, "does not match"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			putCalls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/posts/schedules/42/edit":
+					w.Header().Set("Content-Type", "application/json")
+					w.Write([]byte(tc.body))
+				case r.Method == http.MethodPut && r.URL.Path == "/posts/schedules/42":
+					putCalls++
+					t.Errorf("PUT /posts/schedules/42 was issued on a poisoned /edit state — a read-modify-write built on it would wipe the schedule")
+					w.Write([]byte(`{"schedules":[{"id":42}]}`))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+
+			overrides, err := ScheduleOverride("delete_posts_day", 30)
+			if err != nil {
+				t.Fatalf("ScheduleOverride: %v", err)
+			}
+			_, err = c.UpdateScheduleFromEdit(context.Background(), 42, overrides)
+			if err == nil {
+				t.Fatal("UpdateScheduleFromEdit: expected an error on the poisoned /edit state, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.wantErr)
+			}
+			if putCalls != 0 {
+				t.Errorf("PUT issued %d time(s), want 0 — the refusal must happen BEFORE the PUT", putCalls)
+			}
+		})
+	}
+}

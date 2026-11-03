@@ -254,6 +254,9 @@ type PostEditResponse struct {
 //
 // UNDOCUMENTED: GET /posts/{id}/edit is not in the public OpenAPI spec.
 func (c *Client) GetPostEdit(ctx context.Context, postID int) (*PostEditResponse, error) {
+	if postID <= 0 {
+		return nil, fmt.Errorf("hooppy: GetPostEdit: postID must be a positive integer (got %d); a zero or negative id builds an invalid path (/posts/%d/edit) and the server cannot resolve it", postID, postID)
+	}
 	var resp PostEditResponse
 	if err := c.doGET(ctx, fmt.Sprintf(pathPostEdit, postID), nil, &resp, true); err != nil {
 		return nil, err
@@ -320,6 +323,11 @@ func (c *Client) UpdatePostText(ctx context.Context, postID int, newText string)
 	edit, err := c.GetPostEdit(ctx, postID)
 	if err != nil {
 		return nil, err
+	}
+	// Issue #158: a full-state PUT must be built on THIS post's state. A 200 {}
+	// decodes id=0 — refuse before any write rather than PUT a near-empty body.
+	if edit.ID != 0 && edit.ID != postID {
+		return nil, fmt.Errorf("hooppy: UpdatePostText: post %d /edit response carries id %d, not the requested post — not a recognisable post edit state; refusing the full-state PUT", postID, edit.ID)
 	}
 
 	// Preserve per-network text variants: replace only .Text, keep each
@@ -499,6 +507,9 @@ func (c *Client) MovePost(ctx context.Context, postID, toScheduleID int) (*PostM
 	edit, err := c.GetPostEdit(ctx, postID)
 	if err != nil {
 		return nil, err
+	}
+	if edit.ID != 0 && edit.ID != postID {
+		return nil, fmt.Errorf("hooppy: MovePost: post %d /edit response carries id %d, not the requested post — not a recognisable post edit state; refusing the move", postID, edit.ID)
 	}
 	if edit.PublicationWhenType != 3 {
 		return nil, fmt.Errorf("hooppy: MovePost: post %d: publication_when_type=%d is not 3 (by schedule) — only a schedule-driven post can be moved between schedules; this post is %s and is not schedule-bound",

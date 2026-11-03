@@ -1050,3 +1050,68 @@ func TestUpdatePostText_NullNormalization(t *testing.T) {
 		t.Errorf("selected_pages_by_source_ids len = %d, want 0 (schedule-driven, empty selection)", len(sel))
 	}
 }
+
+// TestPostWriters_EditStateGuards pins issue #158 for the post writers
+// (UpdatePostText full-state PUT, MovePost batch move) on GET /posts/{id}/edit:
+//   - a body naming a DIFFERENT post (nonzero id) is refused before any write;
+//   - a `{}` body issues no write (refused by the when_type / page-target
+//     guards);
+//   - a valid body that merely OMITS id is accepted (the live response can
+//     omit it — see buildPostUpdatePayload).
+//
+// RED-on-revert (mutation: posts.go — remove the `edit.ID != 0 &&` clause in
+// UpdatePostText / MovePost): the omitted-id case is refused → the
+// "accepts_omitted_id" subtests fail.
+func TestPostWriters_EditStateGuards(t *testing.T) {
+	const validNoID = `{"publication_when_type":3,"schedule_id":7,"publication_how_type":1,"texts":[{"text":"old","source_id":0}]}`
+	for _, op := range []string{"UpdatePostText", "MovePost"} {
+		for _, tc := range []struct {
+			name, body string
+			wantWrite  bool
+			wantErr    string
+		}{
+			{"refuses_empty_object", `{}`, false, "post 42"},
+			{"refuses_other_post", `{"id":43,"publication_when_type":3,"schedule_id":7}`, false, "not a recognisable post edit state"},
+			{"accepts_omitted_id", validNoID, true, ""},
+		} {
+			t.Run(op+"/"+tc.name, func(t *testing.T) {
+				writes := 0
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet && r.URL.Path == "/posts/42/edit" {
+						w.Write([]byte(tc.body))
+						return
+					}
+					writes++
+					w.Write([]byte(`{"success":true,"posts":[{"id":42}]}`))
+				}))
+				defer srv.Close()
+				c := newTestClient(t, srv)
+
+				var err error
+				if op == "UpdatePostText" {
+					_, err = c.UpdatePostText(context.Background(), 42, "new")
+				} else {
+					_, err = c.MovePost(context.Background(), 42, 7)
+				}
+				if tc.wantWrite {
+					if err != nil && strings.Contains(err.Error(), "not a recognisable post edit state") {
+						t.Fatalf("%s refused a valid /edit body that omits id: %v", op, err)
+					}
+					if writes == 0 {
+						t.Fatalf("%s issued no write for a valid id-less /edit body (err=%v)", op, err)
+					}
+					return
+				}
+				if err == nil {
+					t.Fatalf("%s: expected a refusal, got nil", op)
+				}
+				if writes != 0 {
+					t.Errorf("%s issued %d write(s) on a bad /edit state, want 0", op, writes)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("%s: error = %q, want it to contain %q", op, err.Error(), tc.wantErr)
+				}
+			})
+		}
+	}
+}

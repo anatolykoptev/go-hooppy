@@ -237,6 +237,58 @@ func TestRunScheduleUpdate_DeleteAfterHours_SetsHour(t *testing.T) {
 	}
 }
 
+// TestRunScheduleUpdate_EmptyEditResponse_NoPUT is the F2 journey test for
+// issue #158: `schedules update 57793 --delete-after-days 30` when GET
+// /posts/schedules/57793/edit answers a 200 {} (or a full-looking state for a
+// DIFFERENT schedule) must NOT send the PUT — a read-modify-write body built
+// on it would wipe or overwrite the schedule. The command refuses with exit 1.
+//
+// F2 RED-on-revert (mutation: projects.go — drop the id check in
+// UpdateScheduleFromEdit): the different_id case issues the PUT → putCalls=1
+// fails the "want 0" assertion. (The {} case is additionally covered by the
+// older structural-key guard.)
+func TestRunScheduleUpdate_EmptyEditResponse_NoPUT(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"empty_object", `{}`},
+		{"different_id", `{"id":43,"name":"Other","publication_how_type":1,"times":[[{"hours":1,"minutes":2}]]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			putCalls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/posts/schedules/57793/edit":
+					w.Write([]byte(tc.body))
+				case r.Method == http.MethodPut && r.URL.Path == "/posts/schedules/57793":
+					putCalls++
+					w.Write([]byte(`{"schedules":[{}]}`))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			c, err := hooppy.NewClient(hooppy.Config{Token: "test-token", BaseURL: srv.URL})
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			var out, errOut bytes.Buffer
+			code := runScheduleUpdate(context.Background(), c, &out, &errOut, scheduleUpdateArgs{
+				id:                 57793,
+				deleteAfterDays:    30,
+				deleteAfterDaysSet: true,
+			})
+			if code != 1 {
+				t.Fatalf("runScheduleUpdate exit %d, want 1 — a bad /edit state must refuse before the PUT; stdout=%s", code, out.String())
+			}
+			if putCalls != 0 {
+				t.Errorf("PUT /posts/schedules/57793 issued %d time(s), want 0 — a read-modify-write on a bad /edit state would wipe the schedule", putCalls)
+			}
+		})
+	}
+}
+
 // TestRunScheduleUpdate_DeleteAfterValidationRefused checks the flag-range
 // guards fire locally, before any request: days >= 0 and 0 <= hours <= 23.
 // The stub FAILS the test if any request arrives — the refusal must precede
