@@ -410,8 +410,10 @@ func TestStopParsingResult_ThreeArms_F11(t *testing.T) {
 // same hole by moving its flag default from 1 to 3; MCP has no default to
 // move, so it refuses instead.
 //
-// Sharper while #143 is open: these two tools register with an OPEN schema,
-// so the SDK never tells the agent the field is required.
+// Still load-bearing after #143: the restored closed schema rejects the
+// OMITTED field at the boundary but does not constrain the range — a given
+// 0, 4 or -1 validates and reaches the builder, so this refusal is the last
+// line before the publish-now branch.
 func TestBuildPayloads_RejectInvalidWhenType_F12(t *testing.T) {
 	for _, wt := range []int{0, 4, -1} {
 		t.Run(fmt.Sprintf("copy_when_type_%d", wt), func(t *testing.T) {
