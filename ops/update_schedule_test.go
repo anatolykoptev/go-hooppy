@@ -89,6 +89,45 @@ func TestUpdateSchedule_NoFieldsRefused(t *testing.T) {
 	}
 }
 
+// TestUpdateSchedule_EmptyNameRefused: an explicitly given name that is
+// empty or whitespace-only is NOT "unset" — it is invalid. With explicit
+// presence, "--name ”" / MCP name:"" arrives as a non-nil pointer, so
+// without this check "name":"" travels into the PUT and silently wipes the
+// schedule's name (Devin Review on PR #176). delete_posts_day=30 rides
+// along to prove the refusal fires even when every other field is valid;
+// the stub fails the test if ANY request escapes.
+//
+// Mutation: remove the Name check in UpdateSchedule → the overrides carry
+// name:"" → a request fires and every assertion below goes RED.
+func TestUpdateSchedule_EmptyNameRefused(t *testing.T) {
+	for _, tc := range []struct{ name, input string }{
+		{"empty", ""},
+		{"whitespace", "  "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("unexpected request: %s %s — an empty name must be refused locally", r.Method, r.URL.Path)
+			}))
+			defer srv.Close()
+
+			_, err := UpdateSchedule(context.Background(), newTestClient(t, srv.URL), 57793, UpdateScheduleInput{
+				Name:           pstr(tc.input),
+				DeletePostsDay: pint(30),
+			})
+			if err == nil {
+				t.Fatalf("name=%q returned nil error — an explicitly empty name must be refused, not sent as \"name\":\"\"", tc.input)
+			}
+			var ve *ValidationError
+			if !errors.As(err, &ve) {
+				t.Errorf("error type = %T, want *ValidationError (input validation must be distinguishable from API errors)", err)
+			}
+			if !strings.Contains(err.Error(), "name must not be empty") {
+				t.Errorf("error must say \"name must not be empty\", got: %s", err.Error())
+			}
+		})
+	}
+}
+
 // TestUpdateSchedule_StateValidation is the F4 guard: state 0 must be
 // refused with a clear error naming the real values, not silently ignored
 // (the 2026-11-03 audit F-1 defect: the MCP schema documented "0=paused"

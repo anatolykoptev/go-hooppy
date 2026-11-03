@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"strings"
 
 	"github.com/anatolykoptev/go-hooppy"
 )
@@ -27,12 +28,17 @@ type UpdateScheduleInput struct {
 // drops 36 of 72 fields the server carries on /edit.
 //
 // All validation lives here and nowhere else: at least one field given,
-// state in {1,2,3} (0 is not a state — the 2026-11-03 audit F-1 defect was
-// an MCP schema documenting "0=paused" while the handler treated 0 as
+// a given name non-empty after trimming ("" is a real value on the wire —
+// it would overwrite the schedule's name, not leave it unchanged), state
+// in {1,2,3} (0 is not a state — the 2026-11-03 audit F-1 defect was an
+// MCP schema documenting "0=paused" while the handler treated 0 as
 // unset), day >= 0, hour 0..23. Local refusals are *ValidationError.
 func UpdateSchedule(ctx context.Context, c *hooppy.Client, id int, in UpdateScheduleInput) (*hooppy.ScheduleResponse, error) {
 	if id == 0 {
 		return nil, &ValidationError{msg: "id is required (got 0)"}
+	}
+	if in.Name != nil && strings.TrimSpace(*in.Name) == "" {
+		return nil, errFieldf(in, "Name", "must not be empty")
 	}
 	if in.State != nil && (*in.State < 1 || *in.State > 3) {
 		return nil, errFieldf(in, "State", "must be one of 1, 2 or 3 (got %d)", *in.State)

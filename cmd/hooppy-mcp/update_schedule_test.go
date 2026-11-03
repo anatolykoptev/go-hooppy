@@ -391,3 +391,41 @@ func TestUpdateScheduleTool_StateZeroRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateScheduleTool_EmptyNameRefused: MCP name:"" is an explicitly
+// given empty name — a non-nil pointer, not "unset". It must be refused
+// locally: without the ops-level check the "" would travel as "name":""
+// and wipe the schedule's real name (Devin Review on PR #176).
+// delete_posts_day:30 rides along to prove the refusal fires even when
+// every other field is valid; the stub fails the test if ANY request
+// escapes.
+//
+// Mutation: remove the Name check in ops.UpdateSchedule → the call issues
+// GET+PUT and the refusal assertions go RED.
+func TestUpdateScheduleTool_EmptyNameRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s — an empty name must be refused locally", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	t.Setenv("HOOPPY_TOKEN", "test-token")
+	t.Setenv("HOOPPY_BASE_URL", srv.URL)
+
+	cs := newMCPClientSession(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "hooppy_update_schedule",
+		Arguments: map[string]any{
+			"id":               42,
+			"name":             "",
+			"delete_posts_day": 30,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("name=\"\" returned success — an explicitly empty name must be refused, not sent as \"name\":\"\"")
+	}
+	if !strings.Contains(toolResultText(res), "name must not be empty") {
+		t.Errorf("error must say \"name must not be empty\", got: %s", toolResultText(res))
+	}
+}
