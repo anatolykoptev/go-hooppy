@@ -14,20 +14,19 @@ const (
 	pathPosts            = "/posts"
 	pathPostDelete       = "/posts/%d"
 	pathPostsBatchDelete = "/posts/batch/delete"
-	// Undocumented: POST /posts/batch/move moves existing posts to another
-	// schedule. Not in the public OpenAPI spec (v0.1.0). Discovered via API
-	// probing — may change without notice. The posts_ids field is a
+	// POST /posts/batch/move moves existing posts to another schedule
+	// (documented in the official API reference). The posts_ids field is a
 	// comma-joined STRING, not a JSON array (a JSON array makes the server
 	// throw ErrorException: explode(...) and return 500 — measured live
 	// 2026-07-30, issue #105).
 	pathPostsBatchMove = "/posts/batch/move"
-	// Undocumented: GET /posts/schedules/{id}/posts returns a schedule's
-	// queue depth and per-day calendar in one call. Not in the public
-	// OpenAPI spec. Discovered via API probing — may change without notice
-	// (issue #106).
+	// GET /posts/schedules/{id}/posts returns a schedule's queue depth and
+	// per-day calendar in one call (documented in the official API
+	// reference; issue #106).
 	pathSchedulePosts = "/posts/schedules/%d/posts"
-	// Undocumented endpoints (not in OpenAPI spec v0.1.0).
-	// Discovered via API probing — may change without notice.
+	// Endpoints found by API probing. Several are now in the official API
+	// reference (PUT /posts/{id}, GET /posts/{id}/edit, GET /notifications);
+	// the README coverage table is the authoritative per-endpoint answer.
 	pathUser           = "/users/me"
 	pathUserSettings   = "/users/settings"
 	pathWatermarks     = "/watermarks"
@@ -48,9 +47,8 @@ const (
 	pathPostsSearchEdit       = "/posts-search/%d/edit"
 	pathPostEdit              = "/posts/%d/edit"
 	// Cross-posting rule engine (the /cross-posting subsystem, NOT the
-	// /posts/{mode} cross-post dispatcher in crosspost.go). UNDOCUMENTED: not
-	// in the public OpenAPI spec (v0.1.0). Discovered via API probing + the
-	// hooppy.ru Nuxt bundle — may change without notice. The read surface is
+	// /posts/{mode} cross-post dispatcher in crosspost.go). Documented in the
+	// official API reference (the /posts/{mode} dispatcher is not). The read surface is
 	// list / {id}/edit / {id}/statistics; there is no direct GET by id (405,
 	// same shape as /posts-search/{id} and /posts/schedules/{id}).
 	pathCrossPostings          = "/cross-posting"

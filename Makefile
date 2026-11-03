@@ -46,3 +46,4 @@ install: build
 # Part of preflight so the guard is exercised on every PR alongside the Go gate.
 py-test:
 	python3 scripts/test_issue_open_tasks.py
+	python3 -I scripts/test_fetch_api_docs.py

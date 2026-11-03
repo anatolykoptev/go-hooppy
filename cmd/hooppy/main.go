@@ -267,13 +267,13 @@ func registerPosts(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// posts move — move a post (or batch) to another schedule (undocumented).
+	// posts move — move a post (or batch) to another schedule.
 	// A move re-slots the post to the TAIL of the target queue; the server
 	// assigns the new publication_date, which is reported per post (moving
 	// into a booked schedule is a silent months-long delay otherwise).
 	moveCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
 		Name:  "move [post-id]",
-		Short: "Move a post (or batch) to another schedule (undocumented)",
+		Short: "Move a post (or batch) to another schedule",
 	})
 	moveCmd.Args = cobra.MaximumNArgs(1)
 	var moveIDs string
@@ -309,10 +309,10 @@ func registerPosts(root *cobra.Command) {
 		printJSON(edit)
 	}
 
-	// posts update (undocumented) — two modes: text-only (preserve schedule+attachments) or full
+	// posts update — two modes: text-only (preserve schedule+attachments) or full
 	updateCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
 		Name:  "update",
-		Short: "Update an existing post by ID (undocumented endpoint)",
+		Short: "Update an existing post by ID",
 	})
 	updateCmd.Args = cobra.ExactArgs(1)
 	var updText, updPageIDs string
@@ -416,10 +416,10 @@ func registerProjects(root *cobra.Command) {
 		os.Exit(runListProjects(context.Background(), c, os.Stdout, os.Stderr, projPage, projAll))
 	}
 
-	// projects create (undocumented)
+	// projects create
 	createCmd := cli.RegisterSubcommand(projectsCmd, cli.SubcommandConfig{
 		Name:  "create",
-		Short: "Create a project (undocumented endpoint)",
+		Short: "Create a project",
 	})
 	createCmd.Args = cobra.NoArgs
 	var projName string
@@ -435,10 +435,10 @@ func registerProjects(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// projects delete (undocumented)
+	// projects delete
 	deleteCmd := cli.RegisterSubcommand(projectsCmd, cli.SubcommandConfig{
 		Name:  "delete",
-		Short: "Delete a project by ID (undocumented endpoint)",
+		Short: "Delete a project by ID",
 	})
 	deleteCmd.Args = cobra.ExactArgs(1)
 	deleteCmd.Run = func(_ *cobra.Command, args []string) {
@@ -450,10 +450,10 @@ func registerProjects(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// projects update (undocumented)
+	// projects update
 	projUpdateCmd := cli.RegisterSubcommand(projectsCmd, cli.SubcommandConfig{
 		Name:  "update",
-		Short: "Update a project name by ID (undocumented endpoint)",
+		Short: "Update a project name by ID",
 	})
 	projUpdateCmd.Args = cobra.ExactArgs(1)
 	var projUpdName string
@@ -499,10 +499,10 @@ func registerSchedules(root *cobra.Command) {
 		os.Exit(runListSchedules(context.Background(), c, os.Stdout, os.Stderr, schedPage, schedAll))
 	}
 
-	// schedules create (undocumented)
+	// schedules create
 	createCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
 		Name:  "create",
-		Short: "Create a schedule (undocumented endpoint)",
+		Short: "Create a schedule",
 	})
 	createCmd.Args = cobra.NoArgs
 	var schedName string
@@ -515,10 +515,10 @@ func registerSchedules(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// schedules delete (undocumented)
+	// schedules delete
 	deleteCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
 		Name:  "delete",
-		Short: "Delete a schedule by ID (undocumented endpoint)",
+		Short: "Delete a schedule by ID",
 	})
 	deleteCmd.Args = cobra.ExactArgs(1)
 	deleteCmd.Run = func(_ *cobra.Command, args []string) {
@@ -530,7 +530,7 @@ func registerSchedules(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// schedules update (undocumented) — the pilot op on the shared ops
+	// schedules update — the pilot op on the shared ops
 	// layer. Command name, flag set and input type all come from the
 	// ops.Registry entry; the Run closure only parses the positional id and
 	// adapts I/O. Routes through ops.UpdateSchedule → UpdateScheduleFromEdit
@@ -541,7 +541,7 @@ func registerSchedules(root *cobra.Command) {
 	schedUpdateEntry := ops.MustEntry("UpdateSchedule")
 	schedUpdateCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
 		Name:  schedUpdateEntry.CLILeaf(),
-		Short: "Update a schedule by ID, preserving all fields (read-modify-write, undocumented endpoint)",
+		Short: "Update a schedule by ID, preserving all fields (read-modify-write)",
 	})
 	schedUpdateCmd.Args = cobra.ExactArgs(1)
 	if err := RegisterOpFlags(schedUpdateCmd, schedUpdateEntry.Input); err != nil {
@@ -561,7 +561,7 @@ func registerSchedules(root *cobra.Command) {
 	// (is_posts_repeated, delete_posts_day, delete_posts_hour) as JSON.
 	showCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
 		Name:  "show <schedule-id>",
-		Short: "Show a schedule's state and auto-delete flags as JSON (undocumented endpoint)",
+		Short: "Show a schedule's state and auto-delete flags as JSON",
 	})
 	showCmd.Args = cobra.ExactArgs(1)
 	showCmd.Run = func(_ *cobra.Command, args []string) {
@@ -574,7 +574,7 @@ func registerSchedules(root *cobra.Command) {
 	// schedules times — print a schedule's posting slots per weekday
 	timesCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
 		Name:  "times",
-		Short: "Print a schedule's posting slots per weekday (undocumented endpoint)",
+		Short: "Print a schedule's posting slots per weekday",
 	})
 	timesCmd.Args = cobra.ExactArgs(1)
 	timesCmd.Run = func(_ *cobra.Command, args []string) {
@@ -587,7 +587,7 @@ func registerSchedules(root *cobra.Command) {
 	}
 
 	// schedules queue — show a schedule's queue depth and booked-until date
-	// (undocumented). One request; no paged walk. Default output summarizes
+	// (/posts/schedules/{id}/posts). One request; no paged walk. Default output summarizes
 	// depth, first booked day, booked-until, and per-day counts; --json
 	// prints the raw envelope. --from/--to narrow a truncated calendar
 	// (is_has_more=true); --page advances the page (the only lever that
@@ -596,7 +596,7 @@ func registerSchedules(root *cobra.Command) {
 	// omitted and a loud warning emitted when the response is partial.
 	queueCmd := cli.RegisterSubcommand(schedulesCmd, cli.SubcommandConfig{
 		Name:  "queue <schedule-id>",
-		Short: "Show a schedule's queue depth and booked-until date (undocumented endpoint)",
+		Short: "Show a schedule's queue depth and booked-until date",
 		Long: "Show a schedule's queue — its depth (total_rows), first booked day, booked-until date, " +
 			"and per-day counts — in ONE request (no paged walk; issue #106). --json prints the raw " +
 			"envelope. --from/--to narrow the calendar (dd.mm.yyyy); --page advances the page. " +
@@ -897,12 +897,12 @@ func registerProxies(root *cobra.Command) {
 	}
 }
 
-// --- notifications (undocumented) ---
+// --- notifications ---
 
 func registerNotifications(root *cobra.Command) {
 	cmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
 		Name:  "notifications",
-		Short: "List publication status notifications (undocumented endpoint)",
+		Short: "List publication status notifications",
 	})
 	cmd.Args = cobra.NoArgs
 	var notifPage int
@@ -1456,7 +1456,7 @@ func runDoctor(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, sin
 	return 0
 }
 
-// --- crossposting (the /cross-posting rule engine, undocumented) ---
+// --- crossposting (the /cross-posting rule engine) ---
 //
 // `hooppy crossposting` exposes the server-side cross-posting rule engine
 // (#57): connections that collect from source publics on a timer, rank by
@@ -1466,10 +1466,10 @@ func runDoctor(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, sin
 func registerCrossPostings(root *cobra.Command) {
 	cpCmd := cli.RegisterSubcommand(root, cli.SubcommandConfig{
 		Name:  "crossposting",
-		Short: "Manage cross-posting rule-engine connections (undocumented endpoints)",
+		Short: "Manage cross-posting rule-engine connections",
 		Long: "Inspect the /cross-posting rule engine: connections that collect from source publics on a timer, " +
 			"rank by engagement, filter by thresholds, deduplicate, and publish into a project/schedule. " +
-			"Read-only surface (list / show / stats); writes are a separate task. UNDOCUMENTED endpoints — may change without notice.",
+			"Read-only surface (list / show / stats); writes are a separate task.",
 	})
 	cpCmd.Args = cobra.NoArgs
 	cpCmd.RunE = groupHelpRun
@@ -1477,7 +1477,7 @@ func registerCrossPostings(root *cobra.Command) {
 	// crossposting list
 	listCmd := cli.RegisterSubcommand(cpCmd, cli.SubcommandConfig{
 		Name:  "list",
-		Short: "List cross-posting connections (undocumented endpoint)",
+		Short: "List cross-posting connections",
 	})
 	listCmd.Args = cobra.NoArgs
 	var cpPage int
@@ -1492,12 +1492,12 @@ func registerCrossPostings(root *cobra.Command) {
 	// crossposting show <id>
 	showCmd := cli.RegisterSubcommand(cpCmd, cli.SubcommandConfig{
 		Name:  "show <connection-id>",
-		Short: "Show a connection's full editable state with decoded enum names (undocumented endpoint)",
+		Short: "Show a connection's full editable state with decoded enum names",
 		Long: "Fetch a cross-posting connection's full editable state (GET /cross-posting/{id}/edit, 95 keys) and " +
 			"print it with the integer enums DECODED to names alongside the raw integers (search_mode, " +
 			"search_mode_direction, determine_best_by, check_when_type, check_interval) and the engagement " +
 			"thresholds (search_likes/views/comments/reposts, 0 = unset). The full raw body is preserved — no " +
-			"field is dropped. UNDOCUMENTED endpoint — may change without notice.",
+			"field is dropped.",
 	})
 	showCmd.Args = cobra.ExactArgs(1)
 	showCmd.Run = func(_ *cobra.Command, args []string) {
@@ -1510,11 +1510,11 @@ func registerCrossPostings(root *cobra.Command) {
 	// crossposting stats <id>
 	statsCmd := cli.RegisterSubcommand(cpCmd, cli.SubcommandConfig{
 		Name:  "stats <connection-id>",
-		Short: "Show a connection's per-day statistics (undocumented endpoint)",
+		Short: "Show a connection's per-day statistics",
 		Long: "Fetch a cross-posting connection's per-day statistics (GET /cross-posting/{id}/statistics): " +
 			"found, filtered, duplicates, taken, errors. A non-empty array with all-zero counters is a REAL " +
 			"measurement (the engine ran and found nothing — the live state today); an empty array is absent " +
-			"data (the engine has not run). UNDOCUMENTED endpoint — may change without notice.",
+			"data (the engine has not run).",
 	})
 	statsCmd.Args = cobra.ExactArgs(1)
 	statsCmd.Run = func(_ *cobra.Command, args []string) {

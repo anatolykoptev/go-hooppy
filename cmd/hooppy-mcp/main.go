@@ -53,7 +53,8 @@ func registerTools(server *mcp.Server) {
 	registerListSchedules(server)
 	registerGetScheduleEdit(server)
 	registerListSchedulePosts(server)
-	// Undocumented endpoints (not in OpenAPI spec v0.1.0)
+	// Mixed: most of these are in the official API reference now (see the
+	// README coverage table); user, watermarks, proxies and disconnect are not.
 	registerCreateSchedule(server)
 	registerUpdateSchedule(server)
 	registerDeleteSchedule(server)
@@ -85,7 +86,7 @@ func registerTools(server *mcp.Server) {
 	registerImportSearchPost(server)
 	registerCopySearchPost(server)
 	// Cross-posting rule engine (the /cross-posting subsystem, NOT the
-	// /posts/{mode} cross-post dispatcher) — UNDOCUMENTED, read-only surface.
+	// /posts/{mode} cross-post dispatcher) — documented, read-only surface.
 	registerListCrossPostings(server)
 	registerGetCrossPostingEdit(server)
 	registerGetCrossPostingStatistics(server)
@@ -616,7 +617,7 @@ func registerListSchedules(server *mcp.Server) {
 	)
 }
 
-// --- get_schedule_edit (undocumented endpoint) ---
+// --- get_schedule_edit ---
 
 type getScheduleEditInput struct {
 	ID int `json:"id" jsonschema:"Schedule ID to fetch the editable state for (use list_schedules to find IDs). REQUIRED."`
@@ -626,7 +627,7 @@ func registerGetScheduleEdit(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_get_schedule_edit",
-			Description: "Get a schedule's full editable state, including its posting times (an array of 7 weekday arrays, each holding that day's time slots). This is the endpoint that models the schedule's times — the list_schedules response does not carry them. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "Get a schedule's full editable state, including its posting times (an array of 7 weekday arrays, each holding that day's time slots). This is the endpoint that models the schedule's times — the list_schedules response does not carry them.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in getScheduleEditInput) (*mcp.CallToolResult, error) {
 			if in.ID == 0 {
@@ -645,7 +646,7 @@ func registerGetScheduleEdit(server *mcp.Server) {
 	)
 }
 
-// --- create_schedule (undocumented endpoint) ---
+// --- create_schedule ---
 
 type createScheduleInput struct {
 	Name string `json:"name" jsonschema:"Schedule name."`
@@ -655,7 +656,7 @@ func registerCreateSchedule(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_create_schedule",
-			Description: "Create a publication schedule on Hooppy. Uses default settings (all flags off, state=active). UNDOCUMENTED endpoint — may change without notice.",
+			Description: "Create a publication schedule on Hooppy. Uses default settings (all flags off, state=active).",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in createScheduleInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -671,7 +672,7 @@ func registerCreateSchedule(server *mcp.Server) {
 	)
 }
 
-// --- delete_schedule (undocumented endpoint) ---
+// --- delete_schedule ---
 
 type deleteScheduleInput struct {
 	ID int `json:"id" jsonschema:"Schedule ID to delete."`
@@ -681,7 +682,7 @@ func registerDeleteSchedule(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_delete_schedule",
-			Description: "Delete a publication schedule on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "Delete a publication schedule on Hooppy by ID.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in deleteScheduleInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -697,7 +698,7 @@ func registerDeleteSchedule(server *mcp.Server) {
 	)
 }
 
-// --- delete_project (undocumented endpoint) ---
+// --- delete_project ---
 
 type deleteProjectInput struct {
 	ID int `json:"id" jsonschema:"Project ID to delete."`
@@ -707,7 +708,7 @@ func registerDeleteProject(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_delete_project",
-			Description: "Delete a project on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "Delete a project on Hooppy by ID.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in deleteProjectInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -723,7 +724,7 @@ func registerDeleteProject(server *mcp.Server) {
 	)
 }
 
-// --- create_project (undocumented) ---
+// --- create_project ---
 
 type createProjectInput struct {
 	Name   string `json:"name" jsonschema:"Project name."`
@@ -734,7 +735,7 @@ func registerCreateProject(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_create_project",
-			Description: "Create a post project on Hooppy. Uses default settings. UNDOCUMENTED endpoint.",
+			Description: "Create a post project on Hooppy. Uses default settings.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in createProjectInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -850,7 +851,7 @@ func registerListProxies(server *mcp.Server) {
 	)
 }
 
-// --- list_notifications (undocumented) ---
+// --- list_notifications ---
 
 type listNotificationsInput struct {
 	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
@@ -861,7 +862,7 @@ func registerListNotifications(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_notifications",
-			Description: "List publication status notifications on Hooppy. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows). UNDOCUMENTED endpoint.",
+			Description: "List publication status notifications on Hooppy. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listNotificationsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -914,7 +915,7 @@ func registerDisconnectPage(server *mcp.Server) {
 	)
 }
 
-// --- update_project (undocumented) ---
+// --- update_project ---
 
 type updateProjectInput struct {
 	ID   int    `json:"id" jsonschema:"Project ID to update."`
@@ -925,7 +926,7 @@ func registerUpdateProject(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_update_project",
-			Description: "Update a project name on Hooppy by ID. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "Update a project name on Hooppy by ID.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in updateProjectInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -941,7 +942,7 @@ func registerUpdateProject(server *mcp.Server) {
 	)
 }
 
-// --- update_schedule (undocumented) ---
+// --- update_schedule ---
 
 // updateScheduleInput is the typed tool input: the shared ops input struct
 // (single source of the parameter set, embedded so its fields promote into
@@ -974,7 +975,7 @@ func registerUpdateSchedule(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        entry.MCPTool,
-			Description: "Update a publication schedule on Hooppy by ID. Performs a read-modify-write: fetches the schedule's full editable state, applies only the fields you specify (name, state, delete_posts_day, delete_posts_hour), and sends the complete object back — preserving every other field the API carries (posting times, page targets, captions, comments, buttons, start/stop dates, watermark, UTM tags, story/reels source-id lists, and ~50 more the tool does not expose as inputs). Do NOT expect a partial update: changing only the name through a partial writer would silently wipe the schedule's posting times and page selection. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "Update a publication schedule on Hooppy by ID. Performs a read-modify-write: fetches the schedule's full editable state, applies only the fields you specify (name, state, delete_posts_day, delete_posts_hour), and sends the complete object back — preserving every other field the API carries (posting times, page targets, captions, comments, buttons, start/stop dates, watermark, UTM tags, story/reels source-id lists, and ~50 more the tool does not expose as inputs). Do NOT expect a partial update: changing only the name through a partial writer would silently wipe the schedule's posting times and page selection.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in updateScheduleInput) (*mcp.CallToolResult, error) {
 			if in.ID == 0 {
@@ -993,7 +994,7 @@ func registerUpdateSchedule(server *mcp.Server) {
 	)
 }
 
-// --- update_post (undocumented) ---
+// --- update_post ---
 
 type updatePostInput struct {
 	ID      int    `json:"id" jsonschema:"Post ID to update."`
@@ -1008,7 +1009,7 @@ func registerUpdatePost(server *mcp.Server) {
 			Description: "Update an existing post on Hooppy by ID by republishing it immediately (publication_when_type=1) to the given page_ids. " +
 				"WARNING: this drops the post out of any schedule it belongs to and clears attachments — it is a full republish, not an in-place edit. " +
 				"To edit only the text of a scheduled post while preserving its schedule, attachments, page selection and per-source text variants, use hooppy_update_post_text instead. " +
-				"UNDOCUMENTED endpoint — may change without notice.",
+				"Documented in the official API reference.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in updatePostInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -1030,7 +1031,7 @@ func registerUpdatePost(server *mcp.Server) {
 	)
 }
 
-// --- update_post_text (undocumented, schedule-safe) ---
+// --- update_post_text (schedule-safe) ---
 
 type updatePostTextInput struct {
 	ID   int    `json:"id" jsonschema:"Post ID to edit."`
@@ -1051,7 +1052,7 @@ func registerUpdatePostText(server *mcp.Server) {
 			Name: "hooppy_update_post_text",
 			Description: "Edit ONLY the text of an existing Hooppy post while preserving its schedule (schedule_id), attachments, page selection and per-source text variants. " +
 				"The safe way to fix a typo or reword a SCHEDULED post — unlike hooppy_update_post, this does NOT republish immediately or drop the post out of its schedule. " +
-				"Fetches the current post state and sends the full state back with only the text changed, so nothing else is wiped. UNDOCUMENTED endpoint — may change without notice.",
+				"Fetches the current post state and sends the full state back with only the text changed, so nothing else is wiped.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in updatePostTextInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -1067,7 +1068,7 @@ func registerUpdatePostText(server *mcp.Server) {
 	)
 }
 
-// --- move_post (undocumented, schedule-safe) ---
+// --- move_post (schedule-safe) ---
 
 type movePostInput struct {
 	ID           int `json:"id" jsonschema:"Post ID to move."`
@@ -1091,7 +1092,7 @@ func registerMovePost(server *mcp.Server) {
 				"A move RE-SLOTS the post to the TAIL of the target queue — the server assigns the new publication_date, which is returned in the result. " +
 				"Moving into a booked schedule can delay the post by months; the returned publication_date is how the caller sees that delay. " +
 				"Only a schedule-driven post (publication_when_type=3) can be moved; a non-schedule post is refused. " +
-				"UNDOCUMENTED endpoint — may change without notice.",
+				"Documented in the official API reference.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in movePostInput) (*mcp.CallToolResult, error) {
 			if in.ID <= 0 {
@@ -1113,7 +1114,7 @@ func registerMovePost(server *mcp.Server) {
 	)
 }
 
-// --- batch_move_posts (undocumented) ---
+// --- batch_move_posts ---
 
 type batchMovePostsInput struct {
 	IDs          []int `json:"ids" jsonschema:"Post IDs to move (1 to 1000)."`
@@ -1140,7 +1141,7 @@ func registerBatchMovePosts(server *mcp.Server) {
 			Description: "Move multiple existing posts to another schedule in a single request. " +
 				"Each post is RE-SLOTTED to the TAIL of the target queue — the server assigns each post's new publication_date, which is returned per post in the `moved` array of the result (one entry per id, even for a single-id call). " +
 				"Moving into a booked schedule can delay posts by months; the returned per-post publication_date values are how the caller sees that delay. " +
-				"UNDOCUMENTED endpoint — may change without notice.",
+				"Documented in the official API reference.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in batchMovePostsInput) (*mcp.CallToolResult, error) {
 			if len(in.IDs) == 0 {
@@ -1189,7 +1190,7 @@ func registerBatchMovePosts(server *mcp.Server) {
 	)
 }
 
-// --- list_schedule_posts (undocumented) ---
+// --- list_schedule_posts ---
 
 type listSchedulePostsInput struct {
 	ScheduleID int    `json:"schedule_id" jsonschema:"Schedule ID to show the queue for (use list_schedules to find IDs). REQUIRED."`
@@ -1235,7 +1236,7 @@ func registerListSchedulePosts(server *mcp.Server) {
 				"A `warning` field is ALSO set when page>0 returns zero day keys with total_rows>0 (a page past the end — total_rows is the collection total and does not change with paging). " +
 				"The result is ALWAYS valid JSON: {warning?, posts_by_days, total_rows, rows_limit, is_has_more}. " +
 				"Use this before moving posts INTO a schedule to see how far out the queue runs. " +
-				"UNDOCUMENTED endpoint — may change without notice.",
+				"Documented in the official API reference.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listSchedulePostsInput) (*mcp.CallToolResult, error) {
 			if in.ScheduleID == 0 {
@@ -2065,10 +2066,10 @@ func registerRewriteSearchPost(server *mcp.Server) {
 // connections that collect from source publics on a timer, rank by
 // engagement, filter by thresholds, deduplicate, and publish into a
 // project/schedule. The API speaks in integer enums; the tools expose the
-// decoded names alongside the raw integers (issue #51). UNDOCUMENTED
-// endpoints — may change without notice. Writes are a separate task.
+// decoded names alongside the raw integers (issue #51). Documented in the
+// official API reference. Writes are a separate task.
 
-// --- list_cross_postings (undocumented endpoint) ---
+// --- list_cross_postings ---
 
 type listCrossPostingsInput struct {
 	Page int  `json:"page,omitempty" jsonschema:"Page number for pagination, 1-indexed (0 or omit = first page, 20 rows per page)."`
@@ -2079,7 +2080,7 @@ func registerListCrossPostings(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_list_cross_postings",
-			Description: "List the operator's cross-posting rule-engine connections on Hooppy. A connection is a server-side rule that collects fresh posts from source publics on a timer, ranks them by engagement (search_mode: 1 new · 2 old · 3 best · 4 random; determine_best_by: 1 likes · 2 reposts · 3 comments · 4 views), filters by engagement thresholds (search_likes/views/comments/reposts, 0 = unset), deduplicates, and publishes into a project/schedule. Each row carries the five integer enums, the four thresholds, take_amount, state, and the check schedule (check_when_type: 1 by interval · 2 at fixed times; check_interval: 1 every 30 min · 2 hourly · ... · 12 three times weekly). The enum integers are decoded to names in the response. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows). UNDOCUMENTED endpoint — may change without notice.",
+			Description: "List the operator's cross-posting rule-engine connections on Hooppy. A connection is a server-side rule that collects fresh posts from source publics on a timer, ranks them by engagement (search_mode: 1 new · 2 old · 3 best · 4 random; determine_best_by: 1 likes · 2 reposts · 3 comments · 4 views), filters by engagement thresholds (search_likes/views/comments/reposts, 0 = unset), deduplicates, and publishes into a project/schedule. Each row carries the five integer enums, the four thresholds, take_amount, state, and the check schedule (check_when_type: 1 by interval · 2 at fixed times; check_interval: 1 every 30 min · 2 hourly · ... · 12 three times weekly). The enum integers are decoded to names in the response. Returns 20 rows per page; use page to paginate (1-indexed, 0 or omit = first page), or set all=true to fetch every page in one call (recommended — the response has is_has_more/total_rows).",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listCrossPostingsInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -2115,7 +2116,7 @@ func registerListCrossPostings(server *mcp.Server) {
 	)
 }
 
-// --- get_cross_posting_edit (undocumented endpoint) ---
+// --- get_cross_posting_edit ---
 
 type getCrossPostingEditInput struct {
 	ID int `json:"id" jsonschema:"Cross-posting connection ID to fetch the full editable state for (use list_cross_postings to find IDs). REQUIRED."`
@@ -2125,7 +2126,7 @@ func registerGetCrossPostingEdit(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_get_cross_posting_edit",
-			Description: "Get a cross-posting connection's full editable state (GET /cross-posting/{id}/edit, 95 keys), with the five integer enums DECODED to names alongside the raw integers and the four engagement thresholds (search_likes/views/comments/reposts, 0 = unset). The full raw body is preserved — no field is dropped — so the future write path can read-modify-write without losing fields. This is the endpoint that models the connection's full state; there is no direct GET by id (405). The decoded enum names are injected as *_name keys (search_mode_name, search_mode_direction_name, determine_best_by_name, check_when_type_name, check_interval_name); the raw integers stay in the original keys for round-tripping. An enum value the bundle does not define is marked *_unknown=true. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "Get a cross-posting connection's full editable state (GET /cross-posting/{id}/edit, 95 keys), with the five integer enums DECODED to names alongside the raw integers and the four engagement thresholds (search_likes/views/comments/reposts, 0 = unset). The full raw body is preserved — no field is dropped — so the future write path can read-modify-write without losing fields. This is the endpoint that models the connection's full state; there is no direct GET by id (405). The decoded enum names are injected as *_name keys (search_mode_name, search_mode_direction_name, determine_best_by_name, check_when_type_name, check_interval_name); the raw integers stay in the original keys for round-tripping. An enum value the bundle does not define is marked *_unknown=true.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in getCrossPostingEditInput) (*mcp.CallToolResult, error) {
 			if in.ID == 0 {
@@ -2148,7 +2149,7 @@ func registerGetCrossPostingEdit(server *mcp.Server) {
 	)
 }
 
-// --- get_cross_posting_statistics (undocumented endpoint) ---
+// --- get_cross_posting_statistics ---
 
 type getCrossPostingStatisticsInput struct {
 	ID int `json:"id" jsonschema:"Cross-posting connection ID to fetch per-day statistics for (use list_cross_postings to find IDs). REQUIRED."`
@@ -2158,7 +2159,7 @@ func registerGetCrossPostingStatistics(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_get_cross_posting_statistics",
-			Description: "Get a cross-posting connection's per-day statistics (GET /cross-posting/{id}/statistics): for each day, posts_found_amount (checked), posts_filtered_amount (rejected by thresholds), posts_duplicates_amount (already seen), posts_taken_amount (published), and errors. A non-empty statistics array with all-zero counters is a REAL measurement — the engine ran and found/filtered/took nothing (the live state today on a configured-but-not-producing connection); an empty array is absent data (the engine has not run). Do not mistake zero counters for no data. UNDOCUMENTED endpoint — may change without notice.",
+			Description: "Get a cross-posting connection's per-day statistics (GET /cross-posting/{id}/statistics): for each day, posts_found_amount (checked), posts_filtered_amount (rejected by thresholds), posts_duplicates_amount (already seen), posts_taken_amount (published), and errors. A non-empty statistics array with all-zero counters is a REAL measurement — the engine ran and found/filtered/took nothing (the live state today on a configured-but-not-producing connection); an empty array is absent data (the engine has not run). Do not mistake zero counters for no data.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in getCrossPostingStatisticsInput) (*mcp.CallToolResult, error) {
 			if in.ID == 0 {

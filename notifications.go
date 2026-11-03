@@ -9,7 +9,7 @@ import (
 
 // ListNotifications returns the user's notifications via GET /notifications.
 //
-// UNDOCUMENTED: not in the public OpenAPI spec (v0.1.0).
+// Documented in the official API reference (openapi.yaml): GET /notifications.
 func (c *Client) ListNotifications(ctx context.Context, page int) (*NotificationsResponse, error) {
 	params := url.Values{}
 	// Reject negatives before any request: the old `> 0` guard let a
