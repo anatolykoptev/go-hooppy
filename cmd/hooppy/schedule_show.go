@@ -35,6 +35,21 @@ func scheduleSummaryFromEdit(edit *hooppy.ScheduleEditResponse) scheduleSummary 
 	}
 }
 
+// scheduleSummaryFromList projects a schedules-LIST row onto the summary
+// shape. The list endpoint carries the same is_posts_repeated and
+// delete_posts_* fields as /edit (issue #158) — used by `schedules list
+// --repeated`, which must not issue an /edit read per row.
+func scheduleSummaryFromList(s hooppy.Schedule) scheduleSummary {
+	return scheduleSummary{
+		ID:              s.ID,
+		Name:            s.Name,
+		State:           s.State,
+		IsPostsRepeated: s.IsPostsRepeated,
+		DeletePostsDay:  s.DeletePostsDay,
+		DeletePostsHour: s.DeletePostsHour,
+	}
+}
+
 // runScheduleShow is the testable core of `hooppy schedules show <id>`. It
 // fetches the schedule's full /edit state and prints the summary as JSON.
 // Returns the process exit code (0 on success, 1 on any refusal/error) and

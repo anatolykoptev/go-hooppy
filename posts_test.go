@@ -1050,3 +1050,41 @@ func TestUpdatePostText_NullNormalization(t *testing.T) {
 		t.Errorf("selected_pages_by_source_ids len = %d, want 0 (schedule-driven, empty selection)", len(sel))
 	}
 }
+
+// TestPostWriters_RefuseEmptyEditState_NoWrite is the sibling-path guard for
+// issue #158: UpdatePostText (full-state PUT) and MovePost (batch move) must
+// refuse BEFORE any write when GET /posts/{id}/edit answers a 200 {} or a
+// payload naming a different post. The stub fails the test on any non-GET.
+//
+// RED-on-revert (mutation: posts.go — drop the edit.ID != postID check in
+// UpdatePostText / MovePost): UpdatePostText builds a PUT from the empty state
+// (or hits the page-target guard with a different error), MovePost proceeds
+// to the when_type guard — the err-text assertions fail.
+func TestPostWriters_RefuseEmptyEditState_NoWrite(t *testing.T) {
+	for _, body := range []string{`{}`, `{"id":43,"publication_when_type":3,"schedule_id":7}`} {
+		for _, op := range []string{"UpdatePostText", "MovePost"} {
+			t.Run(op+"/"+body, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet && r.URL.Path == "/posts/42/edit" {
+						w.Write([]byte(body))
+						return
+					}
+					t.Errorf("write issued on a poisoned /edit state: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}))
+				defer srv.Close()
+				c := newTestClient(t, srv)
+
+				var err error
+				if op == "UpdatePostText" {
+					_, err = c.UpdatePostText(context.Background(), 42, "new")
+				} else {
+					_, err = c.MovePost(context.Background(), 42, 7)
+				}
+				if err == nil || !strings.Contains(err.Error(), "not a recognisable post edit state") {
+					t.Fatalf("%s: err = %v, want a refusal containing %q", op, err, "not a recognisable post edit state")
+				}
+			})
+		}
+	}
+}

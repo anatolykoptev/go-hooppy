@@ -76,3 +76,45 @@ func TestRunScheduleShow_PrintsAutoDeleteFields(t *testing.T) {
 		t.Errorf("stdout summary = %+v, want id=57793 name=Repeating state=1 is_posts_repeated=1 delete_posts_day=30 delete_posts_hour=5", got)
 	}
 }
+
+// TestRunScheduleShow_RefusesMismatchedEditID is the F3 journey guard for
+// issue #158: when GET /posts/schedules/{id}/edit returns a payload whose
+// id is not the requested id — including a valid 200 {} — `schedules show`
+// must refuse (exit 1) naming the requested id instead of printing zero
+// values with exit 0.
+//
+// F3 RED-on-revert (mutation: projects.go — drop the resp.ID != id check in
+// GetScheduleEdit): exit 0 and a zero-valued summary on stdout → all three
+// assertions fail.
+func TestRunScheduleShow_RefusesMismatchedEditID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"empty_object", `{}`},
+		{"different_id", `{"id":43,"name":"Other","state":1,"is_posts_repeated":1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := stubScheduleEdit(t, map[string]string{
+				"/posts/schedules/42/edit": tc.body,
+			})
+			defer srv.Close()
+			c, err := hooppy.NewClient(hooppy.Config{Token: "test-token", BaseURL: srv.URL})
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			var out, errOut bytes.Buffer
+			code := runScheduleShow(context.Background(), c, &out, &errOut, 42)
+			if code != 1 {
+				t.Fatalf("runScheduleShow exit %d, want 1 — a mismatched /edit id must refuse, not print zero or wrong-schedule values; stdout=%q", code, out.String())
+			}
+			if out.Len() != 0 {
+				t.Errorf("stdout = %q, want empty — no summary may be printed for a mismatched /edit payload", out.String())
+			}
+			if !strings.Contains(errOut.String(), "42") {
+				t.Errorf("stderr = %q, want it to name the requested schedule id 42", errOut.String())
+			}
+		})
+	}
+}

@@ -111,6 +111,22 @@ func (c *Client) GetCrossPostingEdit(ctx context.Context, id int) (*CrossPosting
 	if err := c.doGET(ctx, fmt.Sprintf(pathCrossPostingEdit, id), nil, &resp, true); err != nil {
 		return nil, err
 	}
+	// Issue #158 (sibling): a 200 {} unmarshals cleanly into a zero-valued
+	// struct — refuse it and any PROVABLE wrong-connection response before
+	// a caller prints it or builds the future read-modify-write on it. The
+	// wire always carries an id key (fixture-verified); require its
+	// presence in the raw body, and refuse a nonzero id that is not the
+	// requested connection. An id key decoded as 0 is tolerated — only a
+	// PROVABLE mismatch refuses.
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Raw, &rawMap); err == nil {
+		if _, ok := rawMap["id"]; !ok {
+			return nil, fmt.Errorf("hooppy: GetCrossPostingEdit: cross-posting %d /edit response is not a recognisable edit state (no id key — a 200 {} decodes this way); refusing to report or act on zero values", id)
+		}
+	}
+	if resp.ID != 0 && resp.ID != id {
+		return nil, fmt.Errorf("hooppy: GetCrossPostingEdit: /edit response id %d does not match the requested connection %d — the payload is a different cross-posting's state; refusing to report or act on it", resp.ID, id)
+	}
 	return &resp, nil
 }
 

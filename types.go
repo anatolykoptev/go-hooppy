@@ -66,6 +66,13 @@ type Schedule struct {
 	IsDeleted            int    `json:"is_deleted,omitempty"`
 	PublicationHowType   int    `json:"publication_how_type,omitempty"`
 	PublicationWhereType int    `json:"publication_where_type,omitempty"`
+	// List rows carry the auto-delete state too (GET /posts/schedules,
+	// issue #158): is_posts_repeated=1 marks a repeating schedule and
+	// delete_posts_day/hour are its auto-delete windows (0 = off). `show`
+	// and `list --repeated` read these without an /edit round trip.
+	IsPostsRepeated int `json:"is_posts_repeated,omitempty"`
+	DeletePostsDay  int `json:"delete_posts_day,omitempty"`
+	DeletePostsHour int `json:"delete_posts_hour,omitempty"`
 }
 
 // SchedulePayload is the request body for POST /posts/schedules (create)

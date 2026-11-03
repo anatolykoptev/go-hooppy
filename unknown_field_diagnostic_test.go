@@ -821,13 +821,10 @@ var unmodelledBaselines = map[string]map[string]string{
 	"GET /posts/schedules": {
 		"list[0].add_link_to_user":                 "number",
 		"list[0].ads_times":                        "array",
-		"list[0].delete_posts_day":                 "number",
-		"list[0].delete_posts_hour":                "number",
 		"list[0].donut_paid_duration":              "number",
 		"list[0].download_vk_videos":               "number",
 		"list[0].expand_clips_title":               "number",
 		"list[0].is_comments_disabled":             "number",
-		"list[0].is_posts_repeated":                "number",
 		"list[0].is_random_content":                "number",
 		"list[0].is_unique_content":                "number",
 		"list[0].message_to_channel":               "null",
