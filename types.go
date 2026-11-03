@@ -269,6 +269,16 @@ type ScheduleTimeSlot struct {
 type ScheduleEditResponse struct {
 	ID   int    `json:"id"`
 	Name string `json:"name"`
+	// State, IsPostsRepeated, DeletePostsDay and DeletePostsHour are the
+	// schedule's lifecycle flags on the wire (all plain ints): state is the
+	// run state (1=active, 2=deferred, 3=stopped), is_posts_repeated marks a
+	// repeating schedule, and delete_posts_day/delete_posts_hour are the
+	// auto-delete-after-publication settings the `schedules update
+	// --delete-after-*` flags write back through UpdateScheduleFromEdit.
+	State           int `json:"state"`
+	IsPostsRepeated int `json:"is_posts_repeated"`
+	DeletePostsDay  int `json:"delete_posts_day"`
+	DeletePostsHour int `json:"delete_posts_hour"`
 	// Times is the posting schedule: 7 arrays (one per weekday), each
 	// holding that day's slots. A weekday with no slots is an empty array.
 	Times [][]ScheduleTimeSlot `json:"times"`

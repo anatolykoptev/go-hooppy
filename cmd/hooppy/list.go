@@ -299,3 +299,48 @@ func runListSchedules(ctx context.Context, c *hooppy.Client, out, errOut io.Writ
 	}
 	return emitList(out, errOut, "schedules", false, len(resp.List), resp.TotalRows, resp.IsHasMore, resp)
 }
+
+// runListSchedulesRepeated is the testable core of `hooppy schedules list
+// --repeated`: only schedules whose /edit state carries is_posts_repeated=1,
+// emitted as a JSON array of scheduleSummary rows (id, name, state,
+// is_posts_repeated, delete_posts_day, delete_posts_hour).
+//
+// The list response does not model is_posts_repeated (the Schedule type is
+// narrow by convention), so the command does one /edit read per schedule.
+// The walk still runs through ListAllSchedulesWithTotal + NewAllListEnvelope
+// so a truncated collection fails loud rather than filtering a partial set.
+//
+// A failed /edit read aborts the whole command (exit 1) — silently skipping
+// that schedule would report a repeated schedule's absence as fact. The
+// client's retry/backoff handles transient 429/5xx on the ~55 sequential
+// reads. Ordering follows the list order; an empty result is `[]`, never
+// null.
+func runListSchedulesRepeated(ctx context.Context, c *hooppy.Client, out, errOut io.Writer) int {
+	list, total, err := c.ListAllSchedulesWithTotal(ctx)
+	if err != nil {
+		fmt.Fprintf(errOut, "error: %v\n", err)
+		return 1
+	}
+	if _, err := hooppy.NewAllListEnvelope(list, total, func(s hooppy.Schedule) int { return s.ID }); err != nil {
+		fmt.Fprintf(errOut, "error: %v\n", err)
+		return 1
+	}
+	rows := make([]scheduleSummary, 0, len(list))
+	for _, s := range list {
+		edit, err := c.GetScheduleEdit(ctx, s.ID)
+		if err != nil {
+			fmt.Fprintf(errOut, "error: schedules list --repeated: read /edit for schedule %d: %v\n", s.ID, err)
+			return 1
+		}
+		if edit.IsPostsRepeated == 1 {
+			rows = append(rows, scheduleSummaryFromEdit(edit))
+		}
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(rows); err != nil {
+		fmt.Fprintf(errOut, "error encoding output: %v\n", err)
+		return 1
+	}
+	return 0
+}
