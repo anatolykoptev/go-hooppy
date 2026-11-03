@@ -161,11 +161,12 @@ func errSchedulesWithoutWhenType3(whenType int, flagName, whenTypeField string) 
 // irreversible path. The CLI closed the same hole by moving its flag default
 // from 1 to 3; MCP has no default to move, so it must refuse instead.
 //
-// This is sharper while issue #143 is open: these two tools register with an
-// OPEN schema (a jsonschema tag description beginning "1=publish now" breaks
-// inference and AddTool falls back), so the SDK never tells the agent the
-// field is required. Until #143 restores the schema, this check is the only
-// thing standing between an omitted field and a live publish.
+// The check survives #143's fix: the restored closed schema rejects an
+// omitted field at the boundary (publication_when_type is required), but the
+// schema does not constrain the RANGE — a given 0, 4 or -1 still validates
+// and reaches here. This refusal is the only thing mapping an in-schema but
+// out-of-range value back to the agent instead of into the publish-now
+// branch.
 func checkPublicationWhenType(whenType int) error {
 	switch whenType {
 	case 1, 2, 3:
@@ -1726,7 +1727,7 @@ func stopParsingResult(res *hooppy.StopParsingResult) (*mcp.CallToolResult, erro
 
 type copySearchPostInput struct {
 	SearchPostID        int    `json:"search_post_id" jsonschema:"ID of the scraped post (from list_search_posts). REQUIRED. Deprecated: use import_search_post instead."`
-	PublicationWhenType int    `json:"publication_when_type" jsonschema:"1=publish now, 2=at specific time, 3=by schedule."`
+	PublicationWhenType int    `json:"publication_when_type" jsonschema:"Publication timing: 1=publish now, 2=at specific time, 3=by schedule."`
 	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default)."`
 	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
 	SchedulesIDs        string `json:"schedules_ids,omitempty" jsonschema:"Comma-separated schedule IDs (for when_type 3). Use list_schedules to get IDs."`
@@ -1814,7 +1815,7 @@ func registerCopySearchPost(server *mcp.Server) {
 type importSearchPostInput struct {
 	SearchPostID        int    `json:"search_post_id,omitempty" jsonschema:"ID of a single scraped post (from list_search_posts). Mutually exclusive with search_post_ids; pass exactly one."`
 	SearchPostIDs       string `json:"search_post_ids,omitempty" jsonschema:"Comma-separated IDs of scraped posts (from list_search_posts) for a batch import. Mutually exclusive with search_post_id; pass exactly one. Each post is resolved and published independently — text and attachments are preserved per post."`
-	PublicationWhenType int    `json:"publication_when_type" jsonschema:"1=publish now, 2=at specific time, 3=by schedule."`
+	PublicationWhenType int    `json:"publication_when_type" jsonschema:"Publication timing: 1=publish now, 2=at specific time, 3=by schedule."`
 	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default, 2=by schedule pages)."`
 	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
 	SchedulesIDs        string `json:"schedules_ids,omitempty" jsonschema:"Comma-separated schedule IDs (for when_type 3). Use list_schedules to get IDs."`
@@ -1933,7 +1934,7 @@ type rewriteSearchPostInput struct {
 	SearchPostID        int    `json:"search_post_id,omitempty" jsonschema:"ID of a single scraped post (from list_search_posts). Mutually exclusive with search_post_ids; pass exactly one."`
 	SearchPostIDs       string `json:"search_post_ids,omitempty" jsonschema:"Comma-separated IDs of scraped posts (from list_search_posts) for a batch rewrite. Mutually exclusive with search_post_id; pass exactly one. The server assigns schedule slots in the given order."`
 	Text                string `json:"text,omitempty" jsonschema:"New text overriding the original. REQUIRED with search_post_id; NOT allowed with search_post_ids — batch rewrite cannot express per-post text (omit text to keep each post's original text, like import)."`
-	PublicationWhenType int    `json:"publication_when_type" jsonschema:"1=publish now, 2=at specific time, 3=by schedule."`
+	PublicationWhenType int    `json:"publication_when_type" jsonschema:"Publication timing: 1=publish now, 2=at specific time, 3=by schedule."`
 	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default)."`
 	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
 	SchedulesIDs        string `json:"schedules_ids,omitempty" jsonschema:"Comma-separated schedule IDs (for when_type 3). Use list_schedules to get IDs."`
