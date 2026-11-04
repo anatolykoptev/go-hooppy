@@ -8,6 +8,7 @@ import (
 	"io"
 
 	"github.com/anatolykoptev/go-hooppy"
+	"github.com/anatolykoptev/go-hooppy/ops"
 )
 
 // runStopParsing implements `search stop`. It does NOT report success from the
@@ -82,24 +83,43 @@ type stopParsingOutput struct {
 	Unconfirmed         bool `json:"unconfirmed,omitempty"`
 }
 
+// printOpError routes an error from an ops-layer call: a *ops.ValidationError
+// is a local refusal that fired before any request — printed as an error and
+// exit 1, like every sibling ops adapter (runScheduleUpdate, runPostsWhere)
+// and the repo's 0 = complete / 1 = error / 2 = partial convention. Returns
+// (exit code, handled) — handled=false means the error is not an ops
+// validation error and the caller should apply its own special-case handling
+// (PartialPostError / CreateNoIDError) before falling back to the generic
+// print.
+func printOpError(err error, errOut io.Writer) (int, bool) {
+	var ve *ops.ValidationError
+	if errors.As(err, &ve) {
+		fmt.Fprintf(errOut, "error: %v\n", err)
+		return 1, true
+	}
+	return 0, false
+}
+
 // runCopySearchPost implements `search copy`. Extracted from the inline Run
 // closure so the schedules-dropped guard (issue #111) can be falsified at the
 // command level with a stub server: a test asserts NO request reached the
 // server when the guard fires, not merely a non-zero exit (a command that
 // published and then errored would pass an exit-only check).
-func runCopySearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, postID, whenType, howType int, pages, schedules, date, hours, minutes string) int {
+func runCopySearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, in ops.CopySearchPostInput) int {
 	// The deprecation notice goes to stderr (stdout is data) before the
 	// runner does the work. Emitted from the runner (not the cobra Run
 	// closure) so a runner test can observe it — everything else moved
 	// into the runner for the same testability reason.
 	fmt.Fprintln(errOut, "warn: 'search copy' is deprecated and now behaves like 'search import' (resolve+publish); use 'search import' instead.")
-	payload, err := buildCopyPayload(postID, whenType, howType, pages, schedules, date, hours, minutes)
+	resp, err := ops.CopySearchPost(ctx, c, in)
 	if err != nil {
-		fmt.Fprintf(errOut, "error: %v\n", err)
-		return 1
-	}
-	resp, err := c.CopySearchPost(ctx, payload)
-	if err != nil {
+		if code, handled := printOpError(err, errOut); handled {
+			return code
+		}
+		postID := 0
+		if in.SearchPostID != nil {
+			postID = *in.SearchPostID
+		}
 		if code, handled := reportCreateNoID(err, out, errOut, postID); handled {
 			return code
 		}
@@ -131,15 +151,12 @@ func runCopySearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Wri
 // as runImport).
 //
 // Exit codes (repo convention): 0=complete, 1=error, 2=partial.
-func runRewriteSearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, postID int, postIDs, text string, whenType, howType int, pages, schedules, date, hours, minutes string, noAttachments bool) int {
-	payload, err := buildRewritePayload(postID, postIDs, text, whenType, howType, pages, schedules, date, hours, minutes)
+func runRewriteSearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.Writer, in ops.RewriteSearchPostInput) int {
+	resp, err := ops.RewriteSearchPost(ctx, c, in)
 	if err != nil {
-		fmt.Fprintf(errOut, "error: %v\n", err)
-		return 1
-	}
-	payload.NoAttachments = noAttachments
-	resp, err := c.RewriteSearchPost(ctx, payload)
-	if err != nil {
+		if code, handled := printOpError(err, errOut); handled {
+			return code
+		}
 		var ppe *hooppy.PartialPostError
 		if errors.As(err, &ppe) {
 			// Partial batch: print the populated result (what landed) to
@@ -158,6 +175,10 @@ func runRewriteSearchPost(ctx context.Context, c *hooppy.Client, out, errOut io.
 			}
 			fmt.Fprintf(errOut, "error: %v\n", err)
 			return 2
+		}
+		postID := 0
+		if in.SearchPostID != nil {
+			postID = *in.SearchPostID
 		}
 		if code, handled := reportCreateNoID(err, out, errOut, postID); handled {
 			return code

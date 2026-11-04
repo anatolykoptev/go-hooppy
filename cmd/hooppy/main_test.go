@@ -4,15 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/anatolykoptev/go-hooppy"
+	"github.com/anatolykoptev/go-hooppy/ops"
 	"github.com/anatolykoptev/go-kit/cli"
 	"github.com/spf13/cobra"
 )
@@ -362,59 +363,86 @@ func TestSearchRewriteImport_PostIDsFlagRegistered(t *testing.T) {
 }
 
 // TestSearchBuilders_FlagValidation is a table test over the search
-// subcommand builders covering flag validation. Each row asserts the builder
-// returns an error for an invalid flag combination AND that the error names
-// the intended cause (errSub) — a row that only asserted err == nil could
-// pass on a DIFFERENT error than the one it targets (finding 5d). The
-// validation previously lived inline in the Run closures (untestable because
-// they os.Exit). Findings 1, 4, 5 all live in this previously-untested half.
+// subcommand ops covering flag validation. Each row asserts the op returns a
+// *ops.ValidationError for an invalid flag combination AND that the error
+// names the intended cause (errSub) — a row that only asserted err == nil
+// could pass on a DIFFERENT error than the one it targets (finding 5d). The
+// validation lived inline in the Run closures before (untestable because
+// they os.Exit), then in the CLI builders, now in the ops layer — the same
+// checks both surfaces run. A nil client is safe: validation fires before
+// any request is built, so the client is never dereferenced on these rows.
 func TestSearchBuilders_FlagValidation(t *testing.T) {
+	ctx := context.Background()
 	cases := []struct {
 		name   string
 		errSub string
 		fn     func() error
 	}{
 		{"rewrite: --post-id and --post-ids mutually exclusive", "mutually exclusive", func() error {
-			_, err := buildRewritePayload(1001, "2001,2002", "x", 1, 1, "123", "", "", "", "")
+			_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{
+				SearchPostID: pint(1001), SearchPostIDs: pids(2001, 2002), Text: pstr("x"),
+				PublishSearchTarget: ops.PublishSearchTarget{PublicationWhenType: pint(1), SelectedPagesIDs: pids(123)},
+			})
 			return err
 		}},
-		{"rewrite: one id required", "--post-id or --post-ids is required", func() error {
-			_, err := buildRewritePayload(0, "", "x", 1, 1, "123", "", "", "", "")
+		{"rewrite: one id required", "is required", func() error {
+			_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{
+				Text:                pstr("x"),
+				PublishSearchTarget: ops.PublishSearchTarget{PublicationWhenType: pint(1), SelectedPagesIDs: pids(123)},
+			})
 			return err
 		}},
-		{"rewrite: single-post --text required", "--text is required for --post-id", func() error {
-			_, err := buildRewritePayload(1001, "", "", 1, 1, "123", "", "", "", "")
+		{"rewrite: single-post --text required", "--text", func() error {
+			_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{
+				SearchPostID:        pint(1001),
+				PublishSearchTarget: ops.PublishSearchTarget{PublicationWhenType: pint(1), SelectedPagesIDs: pids(123)},
+			})
 			return err
 		}},
-		{"rewrite: when-type 3 needs schedules", "--schedules is required", func() error {
-			_, err := buildRewritePayload(1001, "", "x", 3, 1, "", "", "", "", "")
+		{"rewrite: when-type 3 needs schedules", "--schedules", func() error {
+			_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{
+				SearchPostID: pint(1001), Text: pstr("x"),
+				PublishSearchTarget: ops.PublishSearchTarget{PublicationWhenType: pint(3)},
+			})
 			return err
 		}},
 		// Finding 4: batch rewrite cannot express per-post text.
-		{"rewrite: batch + --text refused", "not allowed with --post-ids", func() error {
-			_, err := buildRewritePayload(0, "2001,2002", "x", 1, 1, "123", "", "", "", "")
+		{"rewrite: batch + --text refused", "not allowed with", func() error {
+			_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{
+				SearchPostIDs: pids(2001, 2002), Text: pstr("x"),
+				PublishSearchTarget: ops.PublishSearchTarget{PublicationWhenType: pint(1), SelectedPagesIDs: pids(123)},
+			})
 			return err
 		}},
 		{"import: --post-id and --post-ids mutually exclusive", "mutually exclusive", func() error {
-			_, err := buildImportPayload(1001, "2001,2002", 3, 2, "999")
+			_, err := ops.ImportSearchPost(ctx, nil, ops.ImportSearchPostInput{
+				SearchPostID: pint(1001), SearchPostIDs: pids(2001, 2002),
+				PublishSearchTarget: ops.PublishSearchTarget{PublicationWhenType: pint(3), SchedulesIDs: pids(999)},
+			})
 			return err
 		}},
-		{"import: one id required", "--post-id or --post-ids is required", func() error {
-			_, err := buildImportPayload(0, "", 3, 2, "999")
+		{"import: one id required", "is required", func() error {
+			_, err := ops.ImportSearchPost(ctx, nil, ops.ImportSearchPostInput{
+				PublishSearchTarget: ops.PublishSearchTarget{PublicationWhenType: pint(3), SchedulesIDs: pids(999)},
+			})
 			return err
 		}},
-		{"import: when-type 3 needs schedules", "--schedules is required", func() error {
-			_, err := buildImportPayload(1001, "", 3, 2, "")
+		{"import: when-type 3 needs schedules", "--schedules", func() error {
+			_, err := ops.ImportSearchPost(ctx, nil, ops.ImportSearchPostInput{
+				SearchPostID:        pint(1001),
+				PublishSearchTarget: ops.PublishSearchTarget{PublicationWhenType: pint(3)},
+			})
 			return err
 		}},
-		{"import: invalid id token", "invalid ID", func() error {
-			_, err := buildImportPayload(0, "2001,abc", 3, 2, "999")
-			return err
-		}},
-		// Finding 5b: empty element is a typo, not a silent drop (unified with
-		// the MCP strict parser).
-		{"import: empty element in id list", "empty element", func() error {
-			_, err := buildImportPayload(0, "2001,,2003", 3, 2, "999")
+		// Finding 5b: a non-positive id in the batch list is refused, naming
+		// the position — the strict-parse contract the comma-string carried
+		// ("2001,0,2003" must error, not silently drop an entry and shift the
+		// schedule slots of everything after it).
+		{"import: zero id in batch", "positive", func() error {
+			_, err := ops.ImportSearchPost(ctx, nil, ops.ImportSearchPostInput{
+				SearchPostIDs:       pids(2001, 0, 2003),
+				PublishSearchTarget: ops.PublishSearchTarget{PublicationWhenType: pint(3), SchedulesIDs: pids(999)},
+			})
 			return err
 		}},
 	}
@@ -423,6 +451,10 @@ func TestSearchBuilders_FlagValidation(t *testing.T) {
 			err := tc.fn()
 			if err == nil {
 				t.Fatal("expected validation error, got nil")
+			}
+			var ve *ops.ValidationError
+			if !errors.As(err, &ve) {
+				t.Fatalf("error = %v (%T), want *ops.ValidationError — a local refusal must be typed so the CLI can exit 1 and MCP can tool-error", err, err)
 			}
 			if !strings.Contains(err.Error(), tc.errSub) {
 				t.Errorf("error %q does not name the intended cause %q — a different error passed for this row (finding 5d)", err.Error(), tc.errSub)
@@ -522,58 +554,4 @@ func flexInt(v int64) hooppy.FlexInt {
 	var f hooppy.FlexInt
 	_ = json.Unmarshal([]byte(fmt.Sprintf("%d", v)), &f)
 	return f
-}
-
-// TestSearchBuilders_PayloadConstruction is a table test over the search
-// subcommand builders covering payload construction — the previously
-// untested half where findings 1 and 5 lived. Asserts the exact payload
-// fields that reach the wire, not just err == nil.
-func TestSearchBuilders_PayloadConstruction(t *testing.T) {
-	t.Run("rewrite batch builds slice payload in caller order, no text override", func(t *testing.T) {
-		// Finding 4: batch rewrite cannot express per-post text, so --text is
-		// rejected with --post-ids and --post-ids alone sends no Texts (each
-		// post's text comes from the resolve step in RewriteSearchPost's
-		// client-side loop, not from the payload).
-		p, err := buildRewritePayload(0, "2003,2001,2002", "", 1, 1, "123", "", "", "", "")
-		if err != nil {
-			t.Fatalf("buildRewritePayload: %v", err)
-		}
-		if p.SearchPostID != 0 {
-			t.Errorf("SearchPostID = %d, want 0 (batch uses the slice)", p.SearchPostID)
-		}
-		if got, want := p.SearchPostIDs, []int{2003, 2001, 2002}; !reflect.DeepEqual(got, want) {
-			t.Errorf("SearchPostIDs = %v, want %v (caller order preserved)", got, want)
-		}
-		// Texts is nil for batch — RewriteSearchPost ignores it and resolves
-		// each post's text independently via the resolve step.
-	})
-
-	t.Run("import batch keeps original text (resolve step fills it)", func(t *testing.T) {
-		// ImportSearchPost resolves each post via ResolveSearchPost and
-		// publishes via PublishPost; the payload's Texts field is ignored
-		// (the resolve step fills the text). Only the IDs and publication
-		// target are read.
-		p, err := buildImportPayload(0, "3001,3002", 3, 2, "999")
-		if err != nil {
-			t.Fatalf("buildImportPayload: %v", err)
-		}
-		if got, want := p.SearchPostIDs, []int{3001, 3002}; !reflect.DeepEqual(got, want) {
-			t.Errorf("SearchPostIDs = %v, want %v", got, want)
-		}
-		// Texts is nil — ImportSearchPost ignores it and resolves each post's
-		// text independently via the resolve step.
-	})
-
-	t.Run("import single-post leaves Texts nil for Run to fill", func(t *testing.T) {
-		p, err := buildImportPayload(1001, "", 3, 2, "999")
-		if err != nil {
-			t.Fatalf("buildImportPayload: %v", err)
-		}
-		if p.SearchPostID != 1001 {
-			t.Errorf("SearchPostID = %d, want 1001", p.SearchPostID)
-		}
-		if p.Texts != nil {
-			t.Errorf("Texts = %v, want nil (Run fills from GetSearchPostEdit in single-post mode)", p.Texts)
-		}
-	})
 }

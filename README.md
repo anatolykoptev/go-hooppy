@@ -302,6 +302,15 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 
 > **Note — `hooppy_copy_search_post` is deprecated.** The historical `CopySearchPost` (PUT /posts/copy) created empty posts; the restored shim now delegates to resolve+publish (the same path `hooppy_import_search_post` uses), preserving text + attachments. Use `hooppy_import_search_post` for the non-deprecated name, or `hooppy_rewrite_search_post` for a text override. Batch import is fully exposed via MCP (`hooppy_import_search_post` with `search_post_ids`).
 
+> **Id lists accept an int array or a comma string.** `search_post_ids`, `selected_pages_ids` and `schedules_ids` take `[10, 11]` or `"10,11"` — both reach the API as the same list (the tools used to take only the comma string; old agent calls keep working). Examples:
+>
+> ```json
+> {"search_post_ids": [2001, 2002], "schedules_ids": [10, 11]}
+> {"search_post_ids": "2001,2002", "schedules_ids": "10,11"}
+> ```
+>
+> `publication_when_type` defaults to 3 (by schedule) when omitted, so `selected_pages_ids` needs an explicit `publication_when_type` of 1 or 2. `publication_how_type` is derived from the target (1 for direct pages, per the API reference); an explicit 2 (a page set) needs a `project_id` these tools do not send and is refused under `publication_when_type` 1 or 2.
+
 ## The ops layer (for contributors)
 
 The CLI (`cmd/hooppy`) and the MCP server (`cmd/hooppy-mcp`) share one

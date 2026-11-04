@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1098,95 +1097,59 @@ func registerSearch(root *cobra.Command) {
 	// CopySearchPost library shim now delegates to resolve+publish (the same
 	// path import uses), so this alias does the same. A one-line deprecation
 	// note prints to stderr (never stdout — stdout is data). Use `search
-	// import` for the non-deprecated name.
+	// import` for the non-deprecated name. Flags, validation and the request
+	// body are owned by ops.CopySearchPost (registry entry); the Run closure
+	// only fills the input and adapts I/O.
+	copyEntry := ops.MustEntry("CopySearchPost")
 	copyCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
-		Name:  "copy",
+		Name:  copyEntry.CLILeaf(),
 		Short: "Deprecated: copy a scraped post to your pages (use 'search import' instead)",
 	})
 	copyCmd.Args = cobra.NoArgs
-	var copyPostID int
-	var copyPages, copySchedules string
-	var copyWhenType, copyHowType int
-	var copyDate, copyHours, copyMinutes string
-	copyCmd.Flags().IntVar(&copyPostID, "post-id", 0, "scraped post ID from 'search posts' (REQUIRED). copy is single-post only — for a batch use 'search import --post-ids'.")
-	copyCmd.Flags().StringVar(&copyPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
-	copyCmd.Flags().IntVar(&copyWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule (default 3 — a published post cannot be un-published from the queue; pass --when-type 1 explicitly to publish now)")
-	copyCmd.Flags().IntVar(&copyHowType, "how-type", 1, "publication how type (1=default)")
-	copyCmd.Flags().StringVar(&copySchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
-	copyCmd.Flags().StringVar(&copyDate, "date", "", "publication date dd.mm.yyyy (for when-type 2)")
-	copyCmd.Flags().StringVar(&copyHours, "hours", "", "publication hours HH (for when-type 2)")
-	copyCmd.Flags().StringVar(&copyMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
+	if err := RegisterOpFlags(copyCmd, copyEntry.Input); err != nil {
+		panic(err)
+	}
 	copyCmd.Run = func(_ *cobra.Command, _ []string) {
-		os.Exit(runCopySearchPost(context.Background(), mustClient(), os.Stdout, os.Stderr, copyPostID, copyWhenType, copyHowType, copyPages, copySchedules, copyDate, copyHours, copyMinutes))
+		var in ops.CopySearchPostInput
+		die(FillOpInput(copyCmd, &in))
+		os.Exit(runCopySearchPost(context.Background(), mustClient(), os.Stdout, os.Stderr, in))
 	}
 
-	// search rewrite
+	// search rewrite — flags, validation and the request body are owned by
+	// ops.RewriteSearchPost (registry entry).
+	rewriteEntry := ops.MustEntry("RewriteSearchPost")
 	rewriteCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
-		Name:  "rewrite",
+		Name:  rewriteEntry.CLILeaf(),
 		Short: "Rewrite a scraped post with custom text and publish to your pages",
 	})
 	rewriteCmd.Args = cobra.NoArgs
-	var rwPostID int
-	var rwPostIDs string
-	var rwText, rwPages, rwSchedules string
-	var rwWhenType, rwHowType int
-	var rwDate, rwHours, rwMinutes string
-	var rwNoAttachments bool
-	rewriteCmd.Flags().IntVar(&rwPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
-	rewriteCmd.Flags().StringVar(&rwPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Each post is resolved and published independently (client-side loop) — attachments are preserved per post from the resolve step. Batch rewrite keeps each post's original text (the --text flag is rejected with --post-ids); use --post-id for a single-post text override.")
-	rewriteCmd.Flags().StringVar(&rwText, "text", "", "new text for the post (required for --post-id; NOT allowed with --post-ids — batch keeps each post's original text)")
-	rewriteCmd.Flags().StringVar(&rwPages, "to", "", "comma-separated page IDs to publish to (for when-type 1 or 2)")
-	rewriteCmd.Flags().IntVar(&rwWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule (default 3 — a published post cannot be un-published from the queue; pass --when-type 1 explicitly to publish now)")
-	rewriteCmd.Flags().IntVar(&rwHowType, "how-type", 1, "publication how type (1=default)")
-	rewriteCmd.Flags().StringVar(&rwSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
-	rewriteCmd.Flags().StringVar(&rwDate, "date", "", "publication date dd.mm.yyyy (for when-type 2)")
-	rewriteCmd.Flags().StringVar(&rwHours, "hours", "", "publication hours HH (for when-type 2)")
-	rewriteCmd.Flags().StringVar(&rwMinutes, "minutes", "", "publication minutes MM (for when-type 2)")
-	rewriteCmd.Flags().BoolVar(&rwNoAttachments, "no-attachments", false, "strip all attachments (photos, videos, links, etc.) — publish text only")
+	if err := RegisterOpFlags(rewriteCmd, rewriteEntry.Input); err != nil {
+		panic(err)
+	}
 	rewriteCmd.Run = func(_ *cobra.Command, _ []string) {
-		os.Exit(runRewriteSearchPost(context.Background(), mustClient(), os.Stdout, os.Stderr, rwPostID, rwPostIDs, rwText, rwWhenType, rwHowType, rwPages, rwSchedules, rwDate, rwHours, rwMinutes, rwNoAttachments))
+		var in ops.RewriteSearchPostInput
+		die(FillOpInput(rewriteCmd, &in))
+		os.Exit(runRewriteSearchPost(context.Background(), mustClient(), os.Stdout, os.Stderr, in))
 	}
 
 	// search import — copy one or more scraped posts with full text + attachments.
-	//
-	// import copies the source post's text VERBATIM. The caller is expected to
-	// rewrite the text for the target networks — import does not rewrite. Two
-	// hygiene checks always run and warn to stderr:
-	//   - VK wiki-link markup ([url|text]) — renders as a hyperlink only on
-	//     VK; a schedule targeting other networks publishes literal brackets.
-	//   - Russian advertising disclosures (Erid, Реклама., ИНН) — identify a
-	//     contract between the advertiser and the SOURCE publisher;
-	//     republishing them asserts we are party to a contract we are not.
-	// Advertising markers are NEVER auto-removed: a disclosure that genuinely
-	// IS our advertising must stay, and the tool cannot tell the two apart.
-	// --strip-vk-markup converts [url|text] to text (opt-in).
+	// Flags, validation and the request body are owned by
+	// ops.ImportSearchPost (registry entry); the op also owns the
+	// VK-markup/advertising-disclosure scan (its findings come back per post
+	// in the result and runImport prints them).
+	importEntry := ops.MustEntry("ImportSearchPost")
 	importCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
-		Name:  "import",
+		Name:  importEntry.CLILeaf(),
 		Short: "Copy a scraped post with full text + photos/videos (resolves via edit endpoint, publishes via POST /posts)",
 	})
 	importCmd.Args = cobra.NoArgs
-	var impPostID int
-	var impPostIDs string
-	var impSchedules string
-	var impWhenType, impHowType int
-	var impNoAttachments, impStripVK bool
-	importCmd.Flags().IntVar(&impPostID, "post-id", 0, "scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)")
-	importCmd.Flags().StringVar(&impPostIDs, "post-ids", "", "comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Each post is resolved and published independently (client-side loop) — text and attachments are preserved per post from the resolve step. Schedule slots are reported in publication order (the queue's own order), not the order given on the command line.")
-	importCmd.Flags().IntVar(&impWhenType, "when-type", 3, "1=publish now, 2=at specific time, 3=by schedule")
-	importCmd.Flags().IntVar(&impHowType, "how-type", 2, "publication how type (2=by schedule pages)")
-	importCmd.Flags().StringVar(&impSchedules, "schedules", "", "comma-separated schedule IDs (for when-type 3)")
-	importCmd.Flags().BoolVar(&impNoAttachments, "no-attachments", false, "strip all attachments (photos, videos, links, etc.)")
-	importCmd.Flags().BoolVar(&impStripVK, "strip-vk-markup", false, "convert VK wiki-link markup [url|text] to text (opt-in). Advertising disclosures (Erid/Реклама./ИНН) are NEVER auto-removed: a disclosure that genuinely is our advertising must stay, and the tool cannot tell the two apart.")
+	if err := RegisterOpFlags(importCmd, importEntry.Input); err != nil {
+		panic(err)
+	}
 	importCmd.Run = func(_ *cobra.Command, _ []string) {
-		os.Exit(runImport(context.Background(), mustClient(), os.Stdout, os.Stderr, importArgs{
-			postID:        impPostID,
-			postIDs:       impPostIDs,
-			whenType:      impWhenType,
-			howType:       impHowType,
-			schedules:     impSchedules,
-			noAttachments: impNoAttachments,
-			stripVK:       impStripVK,
-		}))
+		var in ops.ImportSearchPostInput
+		die(FillOpInput(importCmd, &in))
+		os.Exit(runImport(context.Background(), mustClient(), os.Stdout, os.Stderr, in))
 	}
 }
 
@@ -1227,197 +1190,6 @@ func parseIntList(s string) []int {
 		os.Exit(1)
 	}
 	return ids
-}
-
-// errSchedulesWithoutWhenType3 is the "schedules given with a non-schedule
-// when-type" refusal shared by the CLI's copy, rewrite and import builders.
-// flagName is this surface's flag ("--schedules"), and the message names
-// "--when-type" for the same reason: an error is a corrective instruction, so
-// it must name flags the operator can actually type.
-//
-// MCP carries its own copy naming "schedules_ids" and "publication_when_type".
-// The two are deliberately separate functions in separate packages saying
-// different things; nothing enforces that they agree, and a comment claiming
-// they cannot drift would assert an invariant that does not exist.
-func errSchedulesWithoutWhenType3(whenType int, flagName string) error {
-	return fmt.Errorf("%s is only meaningful with --when-type 3 (by schedule); with --when-type %d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass --when-type 3 to queue by schedule, or drop %s to publish as --when-type %d intends", flagName, whenType, flagName, whenType)
-}
-
-// buildCopyPayload validates search copy flags and builds the payload. copy
-// is single-post only (the restored CopySearchPost shim refuses SearchPostIDs);
-// use `search import` or `search rewrite` for a batch.
-func buildCopyPayload(postID, whenType, howType int, pages, schedules, date, hours, minutes string) (hooppy.CopySearchPostPayload, error) {
-	if postID == 0 {
-		return hooppy.CopySearchPostPayload{}, errors.New("--post-id is required (see 'hooppy search posts'); copy does not support --post-ids — use 'search import' or 'search rewrite' for a batch")
-	}
-	if whenType == 2 && (date == "" || hours == "" || minutes == "") {
-		return hooppy.CopySearchPostPayload{}, errors.New("--date, --hours, --minutes are required for --when-type 2")
-	}
-	schedIDs, err := parseIntListErr(schedules)
-	if err != nil {
-		return hooppy.CopySearchPostPayload{}, err
-	}
-	if whenType == 3 && len(schedIDs) == 0 {
-		return hooppy.CopySearchPostPayload{}, errors.New("--schedules is required for --when-type 3 (by schedule) — a schedule-driven copy targeted at no schedule publishes to nothing")
-	}
-	// A flag combination that cannot do what the caller asked must fail loudly
-	// before the request, never proceed with a different meaning (issue #111).
-	// --schedules targets the by-schedule queue; every other when-type ignores
-	// it (the switch below sets SchedulesIDs only in case 3). Without this
-	// guard, `search copy --schedules 10,11` with the default when-type (or an
-	// explicit --when-type 1/2) silently drops the schedules and publishes to
-	// pages NOW — an irreversible publish the caller did not ask for. Refuse
-	// before any request so the operator cannot reach the live publishing
-	// queue with a payload whose meaning differs from their intent.
-	if len(schedIDs) > 0 && whenType != 3 {
-		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(whenType, "--schedules")
-	}
-	pageIDs, err := parseIntListErr(pages)
-	if err != nil {
-		return hooppy.CopySearchPostPayload{}, err
-	}
-	payload := hooppy.CopySearchPostPayload{
-		SearchPostID:        postID,
-		PublicationWhenType: whenType,
-		PublicationHowType:  howType,
-	}
-	switch whenType {
-	case 3:
-		payload.SchedulesIDs = schedIDs
-	case 2:
-		payload.SelectedPagesIDs = pageIDs
-		payload.PublicationDate = &hooppy.PublicationDate{Date: date, Hours: hours, Minutes: minutes}
-	default:
-		payload.SelectedPagesIDs = pageIDs
-	}
-	return payload, nil
-}
-
-// buildRewritePayload validates search rewrite flags and builds the payload.
-// --post-id and --post-ids are mutually exclusive. RewriteSearchPost resolves
-// each post via ResolveSearchPost (which fetches text + attachments) and
-// publishes via PublishPost; the payload's Texts field is the only field
-// RewriteSearchPost reads beyond the IDs and publication target.
-//
-// Text handling:
-//   - SINGLE-post (--post-id): --text is REQUIRED (the override). The resolved
-//     text is replaced with this text before publishing.
-//   - BATCH (--post-ids): --text is NOT allowed — each post keeps its own
-//     resolved text (per-post, the whole point of the client-side loop).
-func buildRewritePayload(postID int, postIDs, text string, whenType, howType int, pages, schedules, date, hours, minutes string) (hooppy.CopySearchPostPayload, error) {
-	if postID != 0 && postIDs != "" {
-		return hooppy.CopySearchPostPayload{}, errors.New("--post-id and --post-ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
-	}
-	if postID == 0 && postIDs == "" {
-		return hooppy.CopySearchPostPayload{}, errors.New("--post-id or --post-ids is required (see 'hooppy search posts')")
-	}
-	batch := postIDs != ""
-	// Batch rewrite cannot express per-post text through this payload shape
-	// (one texts array for N ids is a broadcast or a positional pairing that
-	// blanks posts 2..N). Refuse the combination; --post-ids alone means no
-	// text override (the server keeps each post's original text, like import).
-	if batch && text != "" {
-		return hooppy.CopySearchPostPayload{}, errors.New("--text is not allowed with --post-ids — batch rewrite cannot express per-post text through this payload shape (one texts array for N ids is a broadcast or a positional pairing that blanks posts 2..N); omit --text to keep each post's original text, or rewrite one post at a time with --post-id")
-	}
-	if !batch && text == "" {
-		return hooppy.CopySearchPostPayload{}, errors.New("--text is required for --post-id (rewrite overrides the single post's text)")
-	}
-	if whenType == 2 && (date == "" || hours == "" || minutes == "") {
-		return hooppy.CopySearchPostPayload{}, errors.New("--date, --hours, --minutes are required for --when-type 2")
-	}
-	schedIDs, err := parseIntListErr(schedules)
-	if err != nil {
-		return hooppy.CopySearchPostPayload{}, err
-	}
-	if whenType == 3 && len(schedIDs) == 0 {
-		return hooppy.CopySearchPostPayload{}, errors.New("--schedules is required for --when-type 3 (by schedule) — a schedule-driven rewrite targeted at no schedule publishes to nothing")
-	}
-	// A flag combination that cannot do what the caller asked must fail loudly
-	// before the request, never proceed with a different meaning (issue #111).
-	// --schedules targets the by-schedule queue; every other when-type ignores
-	// it (the switch below sets SchedulesIDs only in case 3). Without this
-	// guard, `search rewrite --schedules 10,11` with the default when-type (or
-	// an explicit --when-type 1/2) silently drops the schedules and publishes
-	// to pages NOW — an irreversible publish the caller did not ask for.
-	if len(schedIDs) > 0 && whenType != 3 {
-		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(whenType, "--schedules")
-	}
-	pageIDs, err := parseIntListErr(pages)
-	if err != nil {
-		return hooppy.CopySearchPostPayload{}, err
-	}
-	idList, err := parseIntListErr(postIDs)
-	if err != nil {
-		return hooppy.CopySearchPostPayload{}, err
-	}
-	payload := hooppy.CopySearchPostPayload{
-		PublicationWhenType: whenType,
-		PublicationHowType:  howType,
-	}
-	if batch {
-		payload.SearchPostIDs = idList
-		// Batch: Texts is empty — RewriteSearchPost ignores it and each post
-		// keeps its own resolved text (per-post, from the resolve step).
-	} else {
-		payload.SearchPostID = postID
-		payload.Texts = []hooppy.PostText{{Text: text, SourceID: 0}}
-	}
-	switch whenType {
-	case 3:
-		payload.SchedulesIDs = schedIDs
-	case 2:
-		payload.SelectedPagesIDs = pageIDs
-		payload.PublicationDate = &hooppy.PublicationDate{Date: date, Hours: hours, Minutes: minutes}
-	default:
-		payload.SelectedPagesIDs = pageIDs
-	}
-	return payload, nil
-}
-
-// buildImportPayload validates search import flags and builds the payload.
-// ImportSearchPost resolves each post via ResolveSearchPost (which fetches
-// text + attachments) and publishes via PublishPost; the payload's Texts and
-// Attachments fields are ignored by ImportSearchPost (the resolve step fills
-// them). Only the IDs and publication target are read.
-func buildImportPayload(postID int, postIDs string, whenType, howType int, schedules string) (hooppy.CopySearchPostPayload, error) {
-	if postID != 0 && postIDs != "" {
-		return hooppy.CopySearchPostPayload{}, errors.New("--post-id and --post-ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
-	}
-	if postID == 0 && postIDs == "" {
-		return hooppy.CopySearchPostPayload{}, errors.New("--post-id or --post-ids is required (see 'hooppy search posts')")
-	}
-	schedIDs, err := parseIntListErr(schedules)
-	if err != nil {
-		return hooppy.CopySearchPostPayload{}, err
-	}
-	if whenType == 3 && len(schedIDs) == 0 {
-		return hooppy.CopySearchPostPayload{}, errors.New("--schedules is required for --when-type 3 (by schedule) — a schedule-driven import targeted at no schedule publishes to nothing")
-	}
-	// The same guard copy and rewrite carry (issue #111), and import needs it
-	// more than they do: they assign SchedulesIDs inside a `switch whenType`,
-	// so a non-3 when-type silently drops the flag. Import assigns it in the
-	// payload literal below with no switch, so the schedules would reach the
-	// wire while publication_when_type says publish-now — the server receives
-	// a payload naming two contradictory intents and picks one. Refuse before
-	// the request rather than let it publish under a meaning nobody chose.
-	if len(schedIDs) > 0 && whenType != 3 {
-		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(whenType, "--schedules")
-	}
-	idList, err := parseIntListErr(postIDs)
-	if err != nil {
-		return hooppy.CopySearchPostPayload{}, err
-	}
-	payload := hooppy.CopySearchPostPayload{
-		PublicationWhenType: whenType,
-		PublicationHowType:  howType,
-		SchedulesIDs:        schedIDs,
-	}
-	if postIDs != "" {
-		payload.SearchPostIDs = idList
-	} else {
-		payload.SearchPostID = postID
-	}
-	return payload, nil
 }
 
 // --- doctor ---

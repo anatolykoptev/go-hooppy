@@ -10,324 +10,36 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/anatolykoptev/go-hooppy"
+	"github.com/anatolykoptev/go-hooppy/ops"
 )
 
-// --- stripVKMarkup: table-driven over the real shapes ---
-
-func TestStripVKMarkup(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{
-			name: "single link converts to display text",
-			in:   "See [https://vk.com/x|Заголовок] for details",
-			want: "See Заголовок for details",
-		},
-		{
-			name: "multiple links in one text all convert",
-			in:   "[https://vk.com/a|First] and [https://vk.com/b|Second]",
-			want: "First and Second",
-		},
-		{
-			name: "pipe inside link text preserved (split on first pipe only)",
-			in:   "[https://vk.com/x|text|with|pipes]",
-			want: "text|with|pipes",
-		},
-		{
-			name: "unterminated bracket left untouched",
-			in:   "Text [https://vk.com/x|Заголовок without close",
-			want: "Text [https://vk.com/x|Заголовок without close",
-		},
-		{
-			name: "bracket with no pipe left untouched (not a wiki-link)",
-			in:   "See [https://vk.com/x] here",
-			want: "See [https://vk.com/x] here",
-		},
-		{
-			name: "empty brackets left untouched",
-			in:   "See [] here",
-			want: "See [] here",
-		},
-		{
-			name: "double-bracket internal page with display converts to display",
-			in:   "See [[page_name|Display Text]] here",
-			want: "See Display Text here",
-		},
-		{
-			name: "double-bracket internal page without pipe left untouched",
-			in:   "See [[page_name]] here",
-			want: "See [[page_name]] here",
-		},
-		{
-			name: "unterminated double-bracket left untouched",
-			in:   "See [[page_name|Display without close",
-			want: "See [[page_name|Display without close",
-		},
-		{
-			name: "no markup passes through byte-identical",
-			in:   "Plain text with no markup at all.\nSecond line.",
-			want: "Plain text with no markup at all.\nSecond line.",
-		},
-		{
-			name: "no markup with leading/trailing spaces preserved byte-identical",
-			in:   "  spaced text  ",
-			want: "  spaced text  ",
-		},
-		{
-			name: "adjacent links with no gap",
-			in:   "[https://vk.com/a|One][https://vk.com/b|Two]",
-			want: "OneTwo",
-		},
-		{
-			name: "link text containing brackets in display is handled by first-close rule",
-			in:   "[https://vk.com/x|text] stuff]",
-			want: "text stuff]",
-		},
-		// F1: a malformed marker must pass through byte-identical, including
-		// when valid-looking markup appears later in the same text. The old
-		// unterminated-[[ branch emitted only the first "[" and advanced by
-		// one, so the second "[" re-entered the single-bracket parser, found
-		// a later "]" and "|", and transformed text that was never a valid
-		// marker. Each case below was mangled before the fix; all must now be
-		// byte-identical.
-		{
-			name: "unterminated [[ with later ] and | passes through byte-identical",
-			in:   "[[a|b]|c]",
-			want: "[[a|b]|c]",
-		},
-		{
-			name: "unterminated [[ with later ] and space passes through byte-identical",
-			in:   "[[page|Display] text]",
-			want: "[[page|Display] text]",
-		},
-		{
-			name: "nested broken [[ with inner [ passes through byte-identical",
-			in:   "[[a|[c|d]]]",
-			want: "[[a|[c|d]]]",
-		},
-		// F5: a "[" inside a [url|text] inner is nested/broken markup — leave
-		// it byte-untouched so strip is idempotent (the old first-close rule
-		// turned "[url|[x|y]]" into "[x|y]" on pass 1 and "y" on pass 2).
-		{
-			name: "single bracket with inner [ passes through byte-identical (idempotence)",
-			in:   "[url|[x|y]]",
-			want: "[url|[x|y]]",
-		},
-		// A "[" inside the display text is NOT only nested/broken markup — it can
-		// be a legitimate link whose display contains "[". stripVKMarkup leaves
-		// such a marker byte-untouched DELIBERATELY to stay idempotent and avoid
-		// the nested-bracket corruption class, at the cost of not converting this
-		// rare valid form. This case pins the trade-off in the suite: the marker
-		// reaches the wire byte-identical, not mangled and not converted.
-		{
-			name: "link whose display text contains [ is left byte-untouched (trade-off pinned)",
-			in:   "[https://vk.com/x|see [note]]",
-			want: "[https://vk.com/x|see [note]]",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := stripVKMarkup(tc.in)
-			if got != tc.want {
-				t.Errorf("stripVKMarkup(%q) =\n  %q\nwant\n  %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestStripVKMarkup_Idempotent pins strip(strip(x)) == strip(x) over the whole
-// table, so the idempotence property is asserted rather than incidental. A
-// non-idempotent strip is a corruption vector on a live publishing queue: a
-// caller that pre-transforms and then re-transforms would get a different
-// result, and the first-close rule could leave a "[" in the output that
-// re-parses on the second pass.
-func TestStripVKMarkup_Idempotent(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-	}{
-		{"single link", "See [https://vk.com/x|Заголовок] for details"},
-		{"multiple links", "[https://vk.com/a|First] and [https://vk.com/b|Second]"},
-		{"pipe in display", "[https://vk.com/x|text|with|pipes]"},
-		{"unterminated single", "Text [https://vk.com/x|Заголовок without close"},
-		{"no pipe", "See [https://vk.com/x] here"},
-		{"empty brackets", "See [] here"},
-		{"double-bracket display", "See [[page_name|Display Text]] here"},
-		{"double-bracket no pipe", "See [[page_name]] here"},
-		{"unterminated double-bracket", "See [[page_name|Display without close"},
-		{"plain text", "Plain text with no markup at all.\nSecond line."},
-		{"spaced", "  spaced text  "},
-		{"adjacent links", "[https://vk.com/a|One][https://vk.com/b|Two]"},
-		{"first-close display", "[https://vk.com/x|text] stuff]"},
-		{"F1 unterminated [[ with later pipe", "[[a|b]|c]"},
-		{"F1 unterminated [[ with space", "[[page|Display] text]"},
-		{"F1 nested broken [[", "[[a|[c|d]]]"},
-		{"F5 single bracket with inner [", "[url|[x|y]]"},
-		{"display text contains [ (trade-off)", "[https://vk.com/x|see [note]]"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			once := stripVKMarkup(tc.in)
-			twice := stripVKMarkup(once)
-			if once != twice {
-				t.Errorf("strip not idempotent on %q:\n  pass1=%q\n  pass2=%q", tc.in, once, twice)
-			}
-		})
-	}
-}
-
-// --- detectVKMarkup: returns the raw markup strings ---
-
-func TestDetectVKMarkup(t *testing.T) {
-	t.Run("finds single link", func(t *testing.T) {
-		hits := detectVKMarkup("See [https://vk.com/x|Заголовок] here")
-		if len(hits) != 1 || hits[0] != "[https://vk.com/x|Заголовок]" {
-			t.Errorf("detectVKMarkup = %v, want [\"[https://vk.com/x|Заголовок]\"]", hits)
-		}
-	})
-	t.Run("finds multiple links", func(t *testing.T) {
-		hits := detectVKMarkup("[https://vk.com/a|A] [https://vk.com/b|B]")
-		if len(hits) != 2 {
-			t.Errorf("detectVKMarkup = %v, want 2 hits", hits)
-		}
-	})
-	t.Run("no markup returns empty", func(t *testing.T) {
-		hits := detectVKMarkup("plain text")
-		if len(hits) != 0 {
-			t.Errorf("detectVKMarkup = %v, want empty", hits)
-		}
-	})
-	t.Run("unterminated bracket not reported", func(t *testing.T) {
-		hits := detectVKMarkup("[https://vk.com/x|no close")
-		if len(hits) != 0 {
-			t.Errorf("detectVKMarkup = %v, want empty (unterminated is not a marker)", hits)
-		}
-	})
-	t.Run("double-bracket page without pipe is reported", func(t *testing.T) {
-		// [[page]] has no display text, but it is still VK wiki markup (an
-		// internal page reference) — report it so the operator knows it is
-		// there, even though strip leaves it untouched.
-		hits := detectVKMarkup("See [[page_name]] here")
-		if len(hits) != 1 || hits[0] != "[[page_name]]" {
-			t.Errorf("detectVKMarkup = %v, want [\"[[page_name]]\"]", hits)
-		}
-	})
-	t.Run("single bracket without pipe not reported", func(t *testing.T) {
-		// [url] with no pipe is not a wiki-link — do not report it.
-		hits := detectVKMarkup("See [https://vk.com/x] here")
-		if len(hits) != 0 {
-			t.Errorf("detectVKMarkup = %v, want empty (no pipe = not a wiki-link)", hits)
-		}
-	})
-	t.Run("unterminated double-bracket not reported", func(t *testing.T) {
-		hits := detectVKMarkup("See [[page_name|Display without close")
-		if len(hits) != 0 {
-			t.Errorf("detectVKMarkup = %v, want empty (unterminated [[ is not a marker)", hits)
-		}
-	})
-	// A "[" inside a marker's inner means nested/broken markup — not a valid
-	// VK marker. stripVKMarkup leaves it byte-untouched, so detection MUST
-	// NOT report it either: reporting it would warn "VK markup found" and
-	// suggest --strip-vk-markup, a flag that changes nothing. Detection and
-	// strip must agree on what is a marker.
-	t.Run("malformed nested double-bracket not reported (strip leaves it, detection agrees)", func(t *testing.T) {
-		hits := detectVKMarkup("[[a|[c|d]]]")
-		if len(hits) != 0 {
-			t.Errorf("detectVKMarkup = %v, want empty (inner [ = malformed, strip leaves it, detection must agree)", hits)
-		}
-	})
-	t.Run("malformed single bracket with inner [ not reported (strip leaves it, detection agrees)", func(t *testing.T) {
-		hits := detectVKMarkup("[url|[x|y]]")
-		if len(hits) != 0 {
-			t.Errorf("detectVKMarkup = %v, want empty (inner [ = malformed, strip leaves it, detection must agree)", hits)
-		}
-	})
-}
-
-// --- detectAdMarkers: returns the matched lines ---
-
-func TestDetectAdMarkers(t *testing.T) {
-	cases := []struct {
-		name      string
-		in        string
-		wantLines []string
-	}{
-		{
-			name:      "Erid marker matched",
-			in:        "Some post text\nErid: 2VtzqwxyzAB\nmore text",
-			wantLines: []string{"Erid: 2VtzqwxyzAB"},
-		},
-		{
-			// The real-world token is written "erid:" in lower case at least
-			// as often as "Erid:". Erid is a Latin token and the disclosure
-			// body is Cyrillic, so the lower-case form cannot appear inside a
-			// Russian word — case-insensitive matching is safe here.
-			name:      "lower-case erid marker matched (case-insensitive)",
-			in:        "erid: 2VtzqwxyzAB",
-			wantLines: []string{"erid: 2VtzqwxyzAB"},
-		},
-		{
-			// Regression guard: "Реклама." stays case-sensitive. The lower-case
-			// "реклама." is an ordinary Russian word ("this is an ad. a good
-			// one.") and would fire on non-disclosure text.
-			name:      "lower-case реклама. NOT matched (Cyrillic word, false-positive risk)",
-			in:        "это реклама. хорошая.",
-			wantLines: nil,
-		},
-		{
-			name:      "Реклама. marker matched",
-			in:        "Реклама. ООО «Ромашка».",
-			wantLines: []string{"Реклама. ООО «Ромашка»."},
-		},
-		{
-			name:      "ИНН marker matched",
-			in:        "ИНН 1234567890",
-			wantLines: []string{"ИНН 1234567890"},
-		},
-		{
-			// F4: "ИНН" is a Cyrillic ABBREVIATION, not a word — the lower-case
-			// "инн" is not an ordinary Russian word, so folding has no
-			// false-positive cost (a hit is one extra warning, never
-			// corruption), and the miss is real: "инн 1234567890" in a sloppy
-			// source escapes detection when the marker is case-sensitive.
-			name:      "lower-case инн matched (Cyrillic abbreviation, fold-safe)",
-			in:        "инн 1234567890",
-			wantLines: []string{"инн 1234567890"},
-		},
-		{
-			name: "full advertising block matched as one line",
-			in:   "Реклама. ООО «Ромашка». ИНН 1234567. Erid: 2VtzqwxyzAB",
-			wantLines: []string{
-				"Реклама. ООО «Ромашка». ИНН 1234567. Erid: 2VtzqwxyzAB",
-			},
-		},
-		{
-			name:      "no markers returns empty",
-			in:        "Just a normal post about cats.",
-			wantLines: nil,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := detectAdMarkers(tc.in)
-			if len(got) != len(tc.wantLines) {
-				t.Fatalf("detectAdMarkers = %v, want %v", got, tc.wantLines)
-			}
-			for i, line := range tc.wantLines {
-				if got[i] != line {
-					t.Errorf("detectAdMarkers[%d] = %q, want %q", i, got[i], line)
-				}
-			}
-		})
-	}
-}
-
 // --- runImport integration tests with httptest ---
+
+// impIn builds the ops.ImportSearchPostInput for a runImport test call —
+// the test-side analogue of what FillOpInput produces from parsed flags:
+// every field the test "passes" is a non-nil pointer (the flag was given);
+// fields left out are nil (not given).
+func impIn(postID int, postIDs []int, whenType, howType int, stripVK bool) ops.ImportSearchPostInput {
+	in := ops.ImportSearchPostInput{
+		PublishSearchTarget: ops.PublishSearchTarget{
+			PublicationWhenType: &whenType,
+			PublicationHowType:  &howType,
+		},
+		StripVKMarkup: &stripVK,
+	}
+	if postID != 0 {
+		in.SearchPostID = &postID
+	}
+	if len(postIDs) > 0 {
+		ids := ops.IDList(postIDs)
+		in.SearchPostIDs = &ids
+	}
+	return in
+}
 
 // importStubServer serves GET /posts-search/{id}/edit and POST /posts,
 // capturing every import request body. The edit responses are keyed by
@@ -481,12 +193,7 @@ func TestRunImport_DetectionWarningsToStderr(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postID:   1001,
-		whenType: 1,
-		howType:  1,
-		stripVK:  false,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(1001, nil, 1, 1, false))
 	if code != 0 {
 		t.Fatalf("runImport exit %d; stderr=%s", code, errOut.String())
 	}
@@ -530,12 +237,7 @@ func TestRunImport_StripVKMarkup_Batch(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postIDs:  "3001,3002,3003",
-		whenType: 1,
-		howType:  1,
-		stripVK:  true,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(0, []int{3001, 3002, 3003}, 1, 1, true))
 	if code != 0 {
 		t.Fatalf("runImport exit %d; stderr=%s", code, errOut.String())
 	}
@@ -580,12 +282,7 @@ func TestF3_BatchDistinctTextsYieldsThreePostsWithOwnText(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postIDs:  "4001,4002,4003",
-		whenType: 1,
-		howType:  1,
-		stripVK:  false,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(0, []int{4001, 4002, 4003}, 1, 1, false))
 	if code != 0 {
 		t.Fatalf("runImport exit %d; stderr=%s", code, errOut.String())
 	}
@@ -621,12 +318,7 @@ func TestRunImport_NoStrip_BatchUnchanged(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postIDs:  "3001,3002",
-		whenType: 1,
-		howType:  1,
-		stripVK:  false,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(0, []int{3001, 3002}, 1, 1, false))
 	if code != 0 {
 		t.Fatalf("runImport exit %d; stderr=%s", code, errOut.String())
 	}
@@ -655,12 +347,7 @@ func TestRunImport_StripVKMarkup_SinglePost(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postID:   1001,
-		whenType: 1,
-		howType:  1,
-		stripVK:  true,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(1001, nil, 1, 1, true))
 	if code != 0 {
 		t.Fatalf("runImport exit %d; stderr=%s", code, errOut.String())
 	}
@@ -682,12 +369,7 @@ func TestRunImport_AdMarkersWarnOnly(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postID:   1001,
-		whenType: 1,
-		howType:  1,
-		stripVK:  true, // even with strip on
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(1001, nil, 1, 1, true))
 	if code != 0 {
 		t.Fatalf("runImport exit %d; stderr=%s", code, errOut.String())
 	}
@@ -719,12 +401,7 @@ func TestRunImport_AttachmentDelivery_BothModes(t *testing.T) {
 	srv1, cap1 := importStubServer(t, editBodies)
 	c1 := newImportTestClient(t, srv1)
 	var out1, err1 strings.Builder
-	code := runImport(context.Background(), c1, &out1, &err1, importArgs{
-		postIDs:  "4001,4002",
-		whenType: 1,
-		howType:  1,
-		stripVK:  false,
-	})
+	code := runImport(context.Background(), c1, &out1, &err1, impIn(0, []int{4001, 4002}, 1, 1, false))
 	if code != 0 {
 		t.Fatalf("non-strip exit %d; stderr=%s", code, err1.String())
 	}
@@ -746,12 +423,7 @@ func TestRunImport_AttachmentDelivery_BothModes(t *testing.T) {
 	srv2, cap2 := importStubServer(t, editBodies)
 	c2 := newImportTestClient(t, srv2)
 	var out2, err2 strings.Builder
-	code = runImport(context.Background(), c2, &out2, &err2, importArgs{
-		postIDs:  "4001,4002",
-		whenType: 1,
-		howType:  1,
-		stripVK:  true,
-	})
+	code = runImport(context.Background(), c2, &out2, &err2, impIn(0, []int{4001, 4002}, 1, 1, true))
 	if code != 0 {
 		t.Fatalf("strip exit %d; stderr=%s", code, err2.String())
 	}
@@ -780,12 +452,7 @@ func TestRunImport_CostWarning_SingleIsFree(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postID:   1001,
-		whenType: 1,
-		howType:  1,
-		stripVK:  false,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(1001, nil, 1, 1, false))
 	if code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, errOut.String())
 	}
@@ -866,12 +533,7 @@ func TestRunImport_StripBatch_PartialFailurePreservesPublished(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postIDs:  "5001,5002,5003,5004,5005",
-		whenType: 1,
-		howType:  1,
-		stripVK:  true,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(0, []int{5001, 5002, 5003, 5004, 5005}, 1, 1, true))
 	// Exit non-zero — a post failed.
 	if code == 0 {
 		t.Fatalf("exit 0; want non-zero (one import failed); stderr=%s", errOut.String())
@@ -961,12 +623,7 @@ func TestRunImport_StripBatch_EditFetchFailurePreservesPublished(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postIDs:  "5101,5102,5103,5104,5105",
-		whenType: 1,
-		howType:  1,
-		stripVK:  true,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(0, []int{5101, 5102, 5103, 5104, 5105}, 1, 1, true))
 	// Exit non-zero — a post failed.
 	if code == 0 {
 		t.Fatalf("exit 0; want non-zero (one edit fetch failed); stderr=%s", errOut.String())
@@ -1089,12 +746,7 @@ func TestRunImport_BatchFlagOff_DetectionReadFailureNonFatal(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postIDs:  "6001,6002,6003",
-		whenType: 1,
-		howType:  1,
-		stripVK:  false,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(0, []int{6001, 6002, 6003}, 1, 1, false))
 	// Partial: 2 succeeded, 1 failed → exit 2.
 	if code != 2 {
 		t.Fatalf("exit %d; want 2 (partial: 2 succeeded, 1 resolve failed); stderr=%s", code, errOut.String())
@@ -1178,12 +830,7 @@ func TestRunImport_StripBatch_ZeroIDCreateIsVisible(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postIDs:  "7001",
-		whenType: 1,
-		howType:  1,
-		stripVK:  true,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(0, []int{7001}, 1, 1, true))
 	// A zero-id create is NOT a failure — the post was created, the server
 	// just did not return its id. Exit zero.
 	if code != 0 {
@@ -1241,7 +888,7 @@ func TestRunImport_F6_ThreePathsAgreeOnCreateNoID(t *testing.T) {
 	editBodies := map[int]string{8001: editBodyFor("post one")}
 
 	// pathOutcome runs one import path and returns (exitCode, stdoutParsed).
-	pathOutcome := func(t *testing.T, args importArgs) (int, map[string]interface{}) {
+	pathOutcome := func(t *testing.T, args ops.ImportSearchPostInput) (int, map[string]interface{}) {
 		srv := importStubServerZeroID(t, editBodies)
 		c := newImportTestClient(t, srv)
 		var out, errOut strings.Builder
@@ -1255,12 +902,7 @@ func TestRunImport_F6_ThreePathsAgreeOnCreateNoID(t *testing.T) {
 
 	// --- strip-batch path (the reference behaviour) ---
 	t.Run("strip_batch", func(t *testing.T) {
-		code, parsed := pathOutcome(t, importArgs{
-			postIDs:  "8001",
-			whenType: 1,
-			howType:  1,
-			stripVK:  true,
-		})
+		code, parsed := pathOutcome(t, impIn(0, []int{8001}, 1, 1, true))
 		if code != 0 {
 			t.Fatalf("strip_batch: exit %d, want 0 (CreateNoIDError → created_no_id, not a failure)", code)
 		}
@@ -1276,12 +918,7 @@ func TestRunImport_F6_ThreePathsAgreeOnCreateNoID(t *testing.T) {
 
 	// --- single-post path (round 1 exited 1 here) ---
 	t.Run("single", func(t *testing.T) {
-		code, parsed := pathOutcome(t, importArgs{
-			postID:   8001,
-			whenType: 1,
-			howType:  1,
-			stripVK:  false,
-		})
+		code, parsed := pathOutcome(t, impIn(8001, nil, 1, 1, false))
 		if code != 0 {
 			t.Fatalf("single: exit %d, want 0 (CreateNoIDError → created_no_id, same as strip-batch; round 1 exited 1 here — the duplicate-re-run hazard)", code)
 		}
@@ -1295,12 +932,7 @@ func TestRunImport_F6_ThreePathsAgreeOnCreateNoID(t *testing.T) {
 
 	// --- batch-flag-off path (round 1 exited 1 here) ---
 	t.Run("batch_off", func(t *testing.T) {
-		code, parsed := pathOutcome(t, importArgs{
-			postIDs:  "8001",
-			whenType: 1,
-			howType:  1,
-			stripVK:  false,
-		})
+		code, parsed := pathOutcome(t, impIn(0, []int{8001}, 1, 1, false))
 		if code != 0 {
 			t.Fatalf("batch_off: exit %d, want 0 (CreateNoIDError → created_no_id, same as strip-batch; round 1 exited 1 here)", code)
 		}
@@ -1360,11 +992,7 @@ func TestRunImport_BatchAllFailed_Exits1(t *testing.T) {
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
-	code := runImport(context.Background(), c, &out, &errOut, importArgs{
-		postIDs:  "6101,6102",
-		whenType: 1,
-		howType:  1,
-	})
+	code := runImport(context.Background(), c, &out, &errOut, impIn(0, []int{6101, 6102}, 1, 1, false))
 	if code != 1 {
 		t.Fatalf("exit %d; want 1 (every post failed = error, NOT partial/exit 2); stderr=%s", code, errOut.String())
 	}
@@ -1408,7 +1036,7 @@ func TestRunImport_SinglePost_CreateNoID_MatchesSiblings(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := runImport(context.Background(), newStubClient(t, srv), &out, &errOut,
-		importArgs{postID: 7001, whenType: 1, howType: 1})
+		impIn(7001, nil, 1, 1, false))
 
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errOut.String())
@@ -1418,5 +1046,146 @@ func TestRunImport_SinglePost_CreateNoID_MatchesSiblings(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "no id") {
 		t.Errorf("stderr must warn the post cannot be addressed — this arm was silent while its two siblings warned, got:\n%s", errOut.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F1/F2/F3 — the task-spec journey tests at the CLI adapter level.
+// Each mutation below is a FILE:LINE edit inside ops.resolveSearchTarget or
+// the op's target construction; the CLI runner and the MCP tool-call test of
+// the same name go RED together because the op is the shared guard.
+// ---------------------------------------------------------------------------
+
+// countingImportStub is a stub that fails on ANY request — for refusal tests
+// the assertion is that nothing was even attempted (a resolve GET included).
+func countingImportStub(t *testing.T) (*httptest.Server, *int32) {
+	t.Helper()
+	var count int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&count, 1)
+		w.Write([]byte(`{"id":5001}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &count
+}
+
+// F1 — `hooppy search import --when-type 3 --to <page>`: the journey. Under
+// when-type 3 the schedule owns its page set, so --to was silently dropped
+// and the post published to the schedule's pages instead (issue #139). The
+// op refuses it BEFORE any HTTP call; the runner maps the refusal to exit 1.
+//
+// Mutation: delete the `whenType == 3 && len(pages) > 0` check in
+// ops/publish_search.go (resolveSearchTarget) → the op proceeds to resolve →
+// reqCount > 0 → this test AND TestF1_MCP_ImportPagesUnderWhenType3
+// (cmd/hooppy-mcp) both go RED.
+func TestF1_CLI_ImportPagesUnderWhenType3(t *testing.T) {
+	srv, count := countingImportStub(t)
+	c := newImportTestClient(t, srv)
+
+	var out, errOut strings.Builder
+	in := impIn(2001, nil, 3, 2, false)
+	in.SchedulesIDs = pids(10)
+	in.SelectedPagesIDs = pids(99)
+	code := runImport(context.Background(), c, &out, &errOut, in)
+
+	if code != 1 {
+		t.Fatalf("exit = %d, want %d (local validation refusal — exit 1 like every sibling ops adapter) — --to with --when-type 3 must be refused (issue #139). stderr: %s", code, 1, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "--to") || !strings.Contains(errOut.String(), "when-type 3") {
+		t.Errorf("stderr should name the flag and the when-type, got: %s", errOut.String())
+	}
+	if got := atomic.LoadInt32(count); got != 0 {
+		t.Fatalf("reqCount = %d, want 0 — the refusal must fire BEFORE any request (a request means the post published to the wrong target, issue #139)", got)
+	}
+}
+
+// F2 — date flags under when-type 1 and 3: `hooppy search import
+// --when-type 1 --date 01.01.2027 --to <page>` published NOW, discarding the
+// caller's date (issue #140); the when-type-3 shape queued the post on the
+// schedule's slots for the same reason. Both must refuse before any request.
+//
+// Mutation: delete the `whenType != 2 && len(dateFlags) > 0` check in
+// ops/publish_search.go (resolveSearchTarget) → the op proceeds → reqCount >
+// 0 → this test AND TestF2_MCP_ImportDateUnderWhenType1And3 both go RED.
+func TestF2_CLI_ImportDateUnderWhenType1And3(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func() ops.ImportSearchPostInput
+	}{
+		{"date under when-type 1", func() ops.ImportSearchPostInput {
+			in := impIn(2001, nil, 1, 2, false)
+			in.SelectedPagesIDs = pids(123)
+			d := "01.01.2027"
+			in.PublishDate = &d
+			return in
+		}},
+		{"date under when-type 3", func() ops.ImportSearchPostInput {
+			in := impIn(2001, nil, 3, 2, false)
+			in.SchedulesIDs = pids(10)
+			d, h := "01.01.2027", "10"
+			in.PublishDate, in.PublishHours = &d, &h
+			return in
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, count := countingImportStub(t)
+			c := newImportTestClient(t, srv)
+
+			var out, errOut strings.Builder
+			code := runImport(context.Background(), c, &out, &errOut, tc.build())
+
+			if code != 1 {
+				t.Fatalf("exit = %d, want %d (local validation refusal — exit 1 like every sibling ops adapter) — date flags under this when-type must be refused (issue #140). stderr: %s", code, 1, errOut.String())
+			}
+			if !strings.Contains(errOut.String(), "--date") && !strings.Contains(errOut.String(), "--hours") {
+				t.Errorf("stderr should name the date flags, got: %s", errOut.String())
+			}
+			if got := atomic.LoadInt32(count); got != 0 {
+				t.Fatalf("reqCount = %d, want 0 — the refusal must fire BEFORE any request (issue #140)", got)
+			}
+		})
+	}
+}
+
+// F3 — `hooppy search import --when-type 2 --date 01.02.2027 --hours 10
+// --minutes 30 --to 99` produces THE SAME request body as the MCP tool with
+// the equivalent input. The op builds the body, so the assertion is
+// byte-equality against one literal on both sides: this test asserts it from
+// the CLI runner's recorded POST, TestF3_MCP_ImportBodyMatchesCLI
+// (cmd/hooppy-mcp) and TestF3_ImportWhenType2_DatePages_GoldenBody (ops)
+// assert the identical literal.
+//
+// Mutation: drop publication_date from the op's target (case 2 branch in
+// resolveSearchTarget) → all three go RED.
+func TestF3_CLI_ImportBodyMatchesMCPTool(t *testing.T) {
+	// Author-written expectation, derived from openapi.yaml POST /posts
+	// (publication_how_type, line 2020-2023): direct pages (selected_pages_ids)
+	// under when-type 2 is how_type 1; 2 would need a project_id. Not a
+	// recorded server exchange. Same literal as ops.goldenImportWhenType2Body.
+	const golden = `{"as_copy":1,"publication_when_type":2,"publication_how_type":1,"publication_where_type":1,"selected_pages_ids":[99],"schedules_ids":[],"publication_date":{"date":"01.02.2027","hours":"10","minutes":"30"},"texts":[{"text":"x","source_id":0}],"attachments":[],"ids":"1001"}`
+
+	srv, cap := importStubServer(t, map[int]string{1001: editBodyFor("x")})
+	c := newImportTestClient(t, srv)
+
+	var out, errOut strings.Builder
+	in := impIn(1001, nil, 2, 2, false)
+	in.PublicationHowType = nil // omitted: the op derives it from the target
+	in.SelectedPagesIDs = pids(99)
+	d, h, m := "01.02.2027", "10", "30"
+	in.PublishDate, in.PublishHours, in.PublishMinutes = &d, &h, &m
+	code := runImport(context.Background(), c, &out, &errOut, in)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 for a valid when-type-2 import. stderr: %s", code, errOut.String())
+	}
+	if len(cap.rawJSON) != 1 {
+		t.Fatalf("POST count = %d, want 1", len(cap.rawJSON))
+	}
+	// The client's request encoder appends one trailing "\n" to every body
+	// (client.go json.NewEncoder().Encode) — identical framing on both
+	// surfaces, so the document-level comparison trims exactly that one.
+	if got := strings.TrimSuffix(cap.rawJSON[0], "\n"); got != golden {
+		t.Errorf("CLI POST /posts body =\n%s\nwant byte-equal to the MCP tool's body\n%s\n— both surfaces emit the identical body because the op builds it (F3)", got, golden)
 	}
 }

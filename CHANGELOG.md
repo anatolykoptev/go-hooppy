@@ -9,6 +9,25 @@
 
 ### Changed
 
+* **One shared builder for `search copy` / `search rewrite` / `search import` (#139, #140, #141, audit F-7).**
+  * Three `ops` functions now own validation and request building for both the CLI and the MCP tools, replacing six hand-kept builders.
+  * Contradictory combinations are refused before any request, with exit 1 on the CLI and a tool error on MCP:
+    * pages under when-type 3 (#139);
+    * a non-empty `--date/--hours/--minutes` under when-type 1 or 3 (#140).
+  * Batch publishing always sends one id per request, so the server's HTTP 500 on comma-joined ids (#141) cannot occur.
+* **New: `search import` gains `--to`, `--date`, `--hours` and `--minutes`** (F-7), so the CLI can publish to chosen pages and at a fixed date, as the MCP tool already could.
+* **BEHAVIOUR CHANGE — MCP: an omitted `publication_when_type` now means 3 (queue by schedule).**
+  * It was previously refused.
+  * With `schedules_ids` the post is queued. With `selected_pages_ids` and no when-type the call is refused, and it never publishes now.
+  * The CLI default was already 3 and is unchanged.
+* **BEHAVIOUR CHANGE — `publication_how_type` follows the target.**
+  * Under when-type 1/2 it defaults to 1, "selected pages", per `openapi.yaml` `POST /posts`.
+  * An explicit how-type 2 (page set) under when-type 1/2 is refused before any request, because these tools carry no `project_id`. On main it was sent without one, which the spec calls invalid.
+  * Under when-type 3 each command keeps its previous default: copy/rewrite 1, import 2.
+  * On MCP an omitted how-type was previously sent as 0.
+* **MCP id lists accept both forms.** `search_post_ids`, `selected_pages_ids` and `schedules_ids` accept a JSON integer array or a comma-separated string ("10,11"). Both produce the same request.
+* **MCP `hooppy_import_search_post`: when every post of a batch fails,** the error now carries the `per_post` record of what was attempted.
+
 * **BEHAVIOUR CHANGE — Rewrite/Import are now resolve+publish compositions (client-side loop)**: `RewriteSearchPost` and `ImportSearchPost` no longer send a single server-side batch request with comma-joined ids. Instead, each scraped post ID is resolved via `ResolveSearchPost` (GET /posts-search/{id}/edit?as_copy=1) and published via `PublishPost` (POST /posts with as_copy=1) in a client-side loop. This fixes the server's batch-specific defects: the batch form auto-copied text/attachments server-side (form-dependent behaviour), while the single form did not — the client-side loop gives each post its own original text and attachments regardless of batch size. The `payload.Attachments` field is now ignored by Rewrite/Import (the resolve step fills attachments); `payload.Texts` is read only by Rewrite (single-post override) and ignored by Import. The `--post-ids` help text for `search rewrite` and `search import` is updated to reflect this. Batch `search import` now exits 2 (partial) when some posts succeed and some fail, following the repo convention (0=complete, 1=error, 2=partial); each failed post is named on stderr. The batch stdout shape for `search import` is `{"strip_vk_markup":bool,"per_post":[{search_post_id,status,post_id,error}]}` (the `strip_vk_markup` wrapper key is KEPT — the CLI `runImport` path still emits it; the per-post array is the shape contract).
 
 * **BEHAVIOUR CHANGE — batch partial failure no longer discards posts**: `RewriteSearchPost` and `ImportSearchPost` now return a populated `*PostIDResponse` (with every id that landed) alongside a typed `*PartialPostError` when a batch completes some posts but fails on others. Previously a per-post failure returned `nil, fmt.Errorf(...)`, discarding `resp.IDs` — a caller's only recourse was a re-run, which duplicates the already-published posts. The single-post path (SearchPostID scalar) returns a plain wrapped error with a nil result on failure, matching the pre-batch contract. The CLI `search rewrite` prints the partial result to stdout and exits 2; the MCP tools return `{result, partial_error}` JSON. See `PartialPostError` for the three-outcome distinction (nil=complete, *PartialPostError=partial, other error=total failure).

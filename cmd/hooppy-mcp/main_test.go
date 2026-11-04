@@ -1,333 +1,165 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/anatolykoptev/go-hooppy"
+	"github.com/anatolykoptev/go-hooppy/ops"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// TestParseOrderedIDListStr_Strict verifies the MCP strict parser for
-// order-significant id lists (search_post_ids on rewrite). The lenient
-// parseIntListStr skips unparseable entries by design — on an ordered list,
-// "2001,abc,2003" became [2001,2003]: one post silently not copied and every
-// subsequent post's schedule slot shifted by one. The fully-invalid case
-// errors via the both-empty guard, so only the partial drop was silent — the
-// worse half. parseOrderedIDListStr must reject any unparseable or empty
-// element, naming the offending token, and (per finding 5c) must reject a
-// non-positive id — its own error text promises "positive IDs" but the parser
-// previously accepted 0 and -5.
+// The search-post publish tools are thin adapters over the ops layer: the
+// tool input IS the ops input struct, so every guard the old per-surface
+// builders carried (strict ordered-id parse, schedules/when-type
+// contradiction, when-type range, batch+text refusal) now lives in the op
+// and runs identically for the CLI. The tables below re-drive the same
+// refusal cases against the ops directly — a nil client is safe because
+// validation fires before any request is built. End-to-end coverage of the
+// tool-call path (JSON args → adapter → op → wire) lives in
+// import_rewrite_test.go and the F1/F2/F3 adapter tests there.
 //
-// NOTE: this test guards the PARSER in isolation only. It does NOT guard the
-// call site — an earlier version of this comment claimed "route search_post_ids
-// back through parseIntListStr and these tests fail", which was measurably
-// FALSE: reverting the call site to the lenient helper built and left this
-// suite green, because the parser was never wired in here. The call site is
-// guarded separately by TestBuildRewriteSearchPostPayload_StrictParse, which
-// drives the real builder and DOES fail on that revert.
-func TestParseOrderedIDListStr_Strict(t *testing.T) {
-	cases := []struct {
-		name    string
-		in      string
-		want    []int
-		wantErr bool
-		errSub  string
-	}{
-		{"empty string → nil, no error", "", nil, false, ""},
-		{"single valid", "2001", []int{2001}, false, ""},
-		{"multiple valid preserves order", "2003,2001,2002", []int{2003, 2001, 2002}, false, ""},
-		{"whitespace trimmed", " 2001 , 2002 ", []int{2001, 2002}, false, ""},
-		{"unparseable mid-list → error naming token", "2001,abc,2003", nil, true, "abc"},
-		{"unparseable head → error naming token", "abc,2001", nil, true, "abc"},
-		{"empty element mid-list → error", "2001,,2003", nil, true, "empty element"},
-		{"trailing comma → empty element error", "2001,2002,", nil, true, "empty element"},
-		{"leading comma → empty element error", ",2001,2002", nil, true, "empty element"},
-		{"all invalid → error", "abc,def", nil, true, "abc"},
-		// Finding 5c: the error text promises "positive IDs" but the parser
-		// accepted 0 and -5. Both must now error.
-		{"zero id → error (not positive)", "2001,0,2003", nil, true, "0"},
-		{"negative id → error (not positive)", "2001,-5,2003", nil, true, "-5"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseOrderedIDListStr(tc.in)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("parseOrderedIDListStr(%q) = %v, nil — want an error (lenient drop would silently shift later slots)", tc.in, got)
-				}
-				if tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
-					t.Errorf("error %q does not name the offending token %q", err.Error(), tc.errSub)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseOrderedIDListStr(%q) unexpected error: %v", tc.in, err)
-			}
-			if !sliceEq(got, tc.want) {
-				t.Errorf("parseOrderedIDListStr(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
-	}
-}
+// Ordered-id strictness: MCP agents now pass search_post_ids as a JSON
+// array, not a comma string, so the unparseable-token class is rejected by
+// JSON decode at the boundary; the zero/negative classes the ops still see
+// are asserted here and in ops/publish_search_test.go.
 
-// TestParseIntListStr_LenientStillDrops verifies the lenient helper is
-// UNCHANGED — it still skips unparseable entries (its contract for
-// non-ordered fields like schedules_ids/selected_pages_ids). The fix added a
-// STRICT sibling for ordered id lists; it did not alter the lenient path.
-// This pins the divergence so a future "unify the two parsers" change does
-// not silently regress either contract.
-func TestParseIntListStr_LenientStillDrops(t *testing.T) {
-	got := parseIntListStr("2001,abc,2003")
-	if want := []int{2001, 2003}; !sliceEq(got, want) {
-		t.Errorf("parseIntListStr lenient path changed: got %v, want %v (lenient drop is the contract for non-ordered fields)", got, want)
-	}
-}
+func pint(v int) *int           { return &v }
+func pstr(v string) *string     { return &v }
+func pids(v ...int) *ops.IDList { l := ops.IDList(v); return &l }
 
-func sliceEq(a, b []int) bool {
-	if len(a) != len(b) {
-		return false
+// requireOpValidation asserts err is a *ops.ValidationError naming every
+// substring — the refusal a tool adapter maps to IsError=true before any
+// request is built.
+func requireOpValidation(t *testing.T, err error, subs ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected a *ops.ValidationError refusal, got nil")
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+	var ve *ops.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v (%T), want *ops.ValidationError — a local refusal must be typed so the adapter maps it to a tool error before any request", err, err)
+	}
+	for _, sub := range subs {
+		if !strings.Contains(err.Error(), sub) {
+			t.Errorf("error %q does not contain %q", err.Error(), sub)
 		}
 	}
-	return true
 }
 
-// TestBuildRewriteSearchPostPayload_StrictParse guards the CALL SITE, not the
-// parser. The parser test above (TestParseOrderedIDListStr_Strict) guards
-// parseOrderedIDListStr in isolation; an earlier RED-on-revert claim there was
-// measurably false because reverting the call site to the lenient
-// parseIntListStr left the suite green — the parser was never wired into the
-// test. This test drives the real builder (buildRewriteSearchPostPayload) so
-// that the strict parse is enforced at the point of use: an unparseable id in
-// an order-significant list must error naming the token, not silently drop
-// and shift every later post's schedule slot by one.
-//
-// RED-on-revert: route search_post_ids back through parseIntListStr inside
-// buildRewriteSearchPostPayload and the "partial drop" cases return a payload
-// with err == nil (the bad token dropped) → these assertions fail.
-func TestBuildRewriteSearchPostPayload_StrictParse(t *testing.T) {
-	cases := []struct {
+// TestRewriteSearchPost_StrictIDs guards the ordered-id strictness at the op:
+// a zero or negative id in an order-significant batch must error naming the
+// offending value — a dropped entry shifts every later post's schedule slot
+// by one. (Unparseable tokens cannot reach here anymore: the MCP arg is a
+// JSON array and the CLI flag is a parsed []int.)
+func TestRewriteSearchPost_StrictIDs(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
 		name   string
-		in     rewriteSearchPostInput
+		ids    []int
 		errSub string
 	}{
-		{
-			"unparseable mid-list errors at the call site",
-			rewriteSearchPostInput{SearchPostIDs: "2001,abc,2003", PublicationWhenType: 1},
-			"abc",
-		},
-		{
-			"empty element mid-list errors at the call site",
-			rewriteSearchPostInput{SearchPostIDs: "2001,,2003", PublicationWhenType: 1},
-			"empty element",
-		},
-		{
-			"trailing comma errors at the call site",
-			rewriteSearchPostInput{SearchPostIDs: "2001,2003,", PublicationWhenType: 1},
-			"empty element",
-		},
-		// Finding 5c: positivity is enforced at the call site too.
-		{
-			"zero id errors at the call site",
-			rewriteSearchPostInput{SearchPostIDs: "2001,0,2003", PublicationWhenType: 1},
-			"0",
-		},
-		{
-			"negative id errors at the call site",
-			rewriteSearchPostInput{SearchPostIDs: "2001,-5,2003", PublicationWhenType: 1},
-			"-5",
-		},
-	}
-	for _, tc := range cases {
+		{"zero id errors naming it", []int{2001, 0, 2003}, "0"},
+		{"negative id errors naming it", []int{2001, -5, 2003}, "-5"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := buildRewriteSearchPostPayload(tc.in)
-			if err == nil {
-				t.Fatalf("buildRewriteSearchPostPayload(%+v) = _, nil — want an error (lenient drop at the call site would silently shift later schedule slots)", tc.in)
-			}
-			if !strings.Contains(err.Error(), tc.errSub) {
-				t.Errorf("error %q does not name the offending token %q", err.Error(), tc.errSub)
-			}
+			_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{
+				SearchPostIDs: pids(tc.ids...),
+				PublishSearchTarget: ops.PublishSearchTarget{
+					PublicationWhenType: pint(1),
+				},
+			})
+			requireOpValidation(t, err, "positive", tc.errSub)
 		})
 	}
 }
 
-// TestBuildRewriteSearchPostPayload_BatchTextRefusal verifies finding 4 at
-// the MCP surface: batch rewrite cannot express per-post text, so text with
-// search_post_ids errors; batch alone sends no Texts (each post's text comes
-// from the resolve step); single-post requires text.
-func TestBuildRewriteSearchPostPayload_BatchTextRefusal(t *testing.T) {
-	t.Run("batch + text → error", func(t *testing.T) {
-		_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{
-			SearchPostIDs: "2001,2002", Text: "hello", PublicationWhenType: 1,
+// TestRewriteSearchPost_BatchTextRefusal pins finding 4 at the op: batch
+// rewrite cannot express per-post text — text with search_post_ids errors;
+// single-post without text errors.
+func TestRewriteSearchPost_BatchTextRefusal(t *testing.T) {
+	ctx := context.Background()
+	t.Run("batch + text refused", func(t *testing.T) {
+		_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{
+			SearchPostIDs: pids(2001, 2002),
+			Text:          pstr("hello"),
+			PublishSearchTarget: ops.PublishSearchTarget{
+				PublicationWhenType: pint(1),
+				SelectedPagesIDs:    pids(123),
+			},
 		})
-		if err == nil {
-			t.Fatal("expected error for batch + text, got nil — batch rewrite cannot express per-post text")
-		}
-		if !strings.Contains(err.Error(), "not allowed with search_post_ids") {
-			t.Errorf("error must name the batch+text refusal, got: %v", err)
-		}
+		requireOpValidation(t, err, "--text", "--post-ids")
 	})
-
-	t.Run("batch alone → no text override (resolve fills per post)", func(t *testing.T) {
-		p, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{
-			SearchPostIDs: "2003,2001,2002", PublicationWhenType: 1,
+	t.Run("single + no text refused", func(t *testing.T) {
+		_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{
+			SearchPostID: pint(2001),
+			PublishSearchTarget: ops.PublishSearchTarget{
+				PublicationWhenType: pint(1),
+				SelectedPagesIDs:    pids(123),
+			},
 		})
-		if err != nil {
-			t.Fatalf("batch alone: %v", err)
-		}
-		if got, want := p.SearchPostIDs, []int{2003, 2001, 2002}; !sliceEq(got, want) {
-			t.Errorf("SearchPostIDs = %v, want %v (caller order)", got, want)
-		}
-		// Texts is nil for batch — RewriteSearchPost ignores it and resolves
-		// each post's text independently via the resolve step.
-	})
-
-	t.Run("single + no text → error", func(t *testing.T) {
-		_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{
-			SearchPostID: 2001, PublicationWhenType: 1,
-		})
-		if err == nil {
-			t.Fatal("expected error for single-post without text, got nil — single rewrite requires text")
-		}
-		if !strings.Contains(err.Error(), "text is required for search_post_id") {
-			t.Errorf("error must name the single-post text requirement, got: %v", err)
-		}
-	})
-
-	t.Run("single + text → override payload", func(t *testing.T) {
-		p, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{
-			SearchPostID: 2001, Text: "hello", PublicationWhenType: 1,
-		})
-		if err != nil {
-			t.Fatalf("single + text: %v", err)
-		}
-		if p.SearchPostID != 2001 {
-			t.Errorf("SearchPostID = %d, want 2001", p.SearchPostID)
-		}
-		if len(p.Texts) != 1 || p.Texts[0].Text != "hello" {
-			t.Errorf("Texts = %v, want [{hello 0}]", p.Texts)
-		}
+		requireOpValidation(t, err, "--text", "required")
 	})
 }
 
-// TestBuildCopySearchPostPayload_SchedulesWhenTypeGuard and
-// TestBuildRewriteSearchPostPayload_SchedulesWhenTypeGuard are the table tests
-// that close finding 2: all four MCP contradiction guards (copy + rewrite,
-// each the when_type=3+empty and the schedules+non-3 pair) were ungated —
-// deleting both contradiction guards left `go build ./...` clean and
-// `go test ./cmd/hooppy-mcp/` green (proven by mutation). The copy handler's
-// validation was inline and unreachable from a test; it is now extracted into
-// buildCopySearchPostPayload so it can be tested at all.
+// The schedules/when-type contradiction guard, driven at the op for all
+// three tools — both directions per tool so neither arm is satisfied by a
+// guard that refuses everything:
+//   - schedules with when-type 1 → error (the contradiction guard)
+//   - when-type 3 without schedules → error (the converse guard)
 //
-// Each table covers BOTH directions so neither guard can be satisfied by
-// breaking its pair:
-//   - when_type 1 + schedules → error (the contradiction guard)
-//   - when_type 3 + schedules → SchedulesIDs populated (the _OK pair)
-//
-// F8 RED-on-revert: delete the contradiction guards from both builders and the
-// "when_type 1 + schedules → error" cases return a payload with err == nil →
-// these assertions fail. (This exact mutation is green today.)
-
-func TestBuildCopySearchPostPayload_SchedulesWhenTypeGuard(t *testing.T) {
-	cases := []struct {
-		name      string
-		in        copySearchPostInput
-		wantErr   bool
-		errSub    string
-		wantSched []int
+// The _OK pair (schedules DO reach the wire under when-type 3) is pinned at
+// the wire level in ops/publish_search_test.go
+// (TestCopySearchPost_WhenType3SendsSchedules).
+func TestOps_SchedulesWhenTypeGuard(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		whenTy int
+		sched  []int
+		pages  []int // pages only on the when-type-1 row (pages under 3 is the #139 guard, a different refusal)
+		errSub string
 	}{
-		{
-			"when_type 1 + schedules → error (contradiction guard)",
-			copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SchedulesIDs: "10,11"},
-			true, "publication_when_type=3", nil,
-		},
-		{
-			"when_type 3 + schedules → SchedulesIDs populated (_OK pair)",
-			copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: "10,11"},
-			false, "", []int{10, 11},
-		},
-		{
-			"when_type 3 + no schedules → error (existing converse guard)",
-			copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: ""},
-			true, "publication_when_type=3", nil,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p, err := buildCopySearchPostPayload(tc.in)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("buildCopySearchPostPayload(%+v) = %+v, nil — want an error (the contradiction guard must refuse schedules with a non-schedule when-type; F8 mutation is green without this)", tc.in, p)
-				}
-				if !strings.Contains(err.Error(), "schedules") {
-					t.Errorf("error must name schedules, got: %v", err)
-				}
-				if tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
-					t.Errorf("error must contain %q, got: %v", tc.errSub, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("buildCopySearchPostPayload(%+v): %v", tc.in, err)
-			}
-			if !sliceEq(p.SchedulesIDs, tc.wantSched) {
-				t.Errorf("SchedulesIDs = %v, want %v — schedules must reach the payload under when-type 3 (the _OK pair stops the contradiction guard from refusing ALL schedules)", p.SchedulesIDs, tc.wantSched)
-			}
+		{"when_type 1 + schedules refused (contradiction guard)", 1, []int{10, 11}, []int{123}, "when-type 1"},
+		{"when_type 3 + no schedules refused (converse guard)", 3, nil, nil, "required"},
+	} {
+		t.Run("copy/"+tc.name, func(t *testing.T) {
+			_, err := ops.CopySearchPost(ctx, nil, ops.CopySearchPostInput{
+				SearchPostID: pint(2001),
+				PublishSearchTarget: ops.PublishSearchTarget{
+					PublicationWhenType: pint(tc.whenTy),
+					SchedulesIDs:        pids(tc.sched...),
+					SelectedPagesIDs:    pids(tc.pages...),
+				},
+			})
+			requireOpValidation(t, err, "schedules", tc.errSub)
 		})
-	}
-}
-
-func TestBuildRewriteSearchPostPayload_SchedulesWhenTypeGuard(t *testing.T) {
-	cases := []struct {
-		name      string
-		in        rewriteSearchPostInput
-		wantErr   bool
-		errSub    string
-		wantSched []int
-	}{
-		{
-			"when_type 1 + schedules → error (contradiction guard)",
-			rewriteSearchPostInput{SearchPostID: 2001, Text: "hello", PublicationWhenType: 1, SchedulesIDs: "10,11"},
-			true, "publication_when_type=3", nil,
-		},
-		{
-			"when_type 3 + schedules → SchedulesIDs populated (_OK pair)",
-			rewriteSearchPostInput{SearchPostID: 2001, Text: "hello", PublicationWhenType: 3, SchedulesIDs: "10,11"},
-			false, "", []int{10, 11},
-		},
-		{
-			"when_type 3 + no schedules → error (existing converse guard)",
-			rewriteSearchPostInput{SearchPostID: 2001, Text: "hello", PublicationWhenType: 3, SchedulesIDs: ""},
-			true, "publication_when_type=3", nil,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p, err := buildRewriteSearchPostPayload(tc.in)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("buildRewriteSearchPostPayload(%+v) = %+v, nil — want an error (the contradiction guard must refuse schedules with a non-schedule when-type; F8 mutation is green without this)", tc.in, p)
-				}
-				if !strings.Contains(err.Error(), "schedules") {
-					t.Errorf("error must name schedules, got: %v", err)
-				}
-				if tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
-					t.Errorf("error must contain %q, got: %v", tc.errSub, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("buildRewriteSearchPostPayload(%+v): %v", tc.in, err)
-			}
-			if !sliceEq(p.SchedulesIDs, tc.wantSched) {
-				t.Errorf("SchedulesIDs = %v, want %v — schedules must reach the payload under when-type 3", p.SchedulesIDs, tc.wantSched)
-			}
+		t.Run("rewrite/"+tc.name, func(t *testing.T) {
+			_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{
+				SearchPostID: pint(2001),
+				Text:         pstr("x"),
+				PublishSearchTarget: ops.PublishSearchTarget{
+					PublicationWhenType: pint(tc.whenTy),
+					SchedulesIDs:        pids(tc.sched...),
+					SelectedPagesIDs:    pids(tc.pages...),
+				},
+			})
+			requireOpValidation(t, err, "schedules", tc.errSub)
+		})
+		t.Run("import/"+tc.name, func(t *testing.T) {
+			_, err := ops.ImportSearchPost(ctx, nil, ops.ImportSearchPostInput{
+				SearchPostID: pint(2001),
+				PublishSearchTarget: ops.PublishSearchTarget{
+					PublicationWhenType: pint(tc.whenTy),
+					SchedulesIDs:        pids(tc.sched...),
+					SelectedPagesIDs:    pids(tc.pages...),
+				},
+			})
+			requireOpValidation(t, err, "schedules", tc.errSub)
 		})
 	}
 }
@@ -401,213 +233,109 @@ func TestStopParsingResult_ThreeArms_F11(t *testing.T) {
 	}
 }
 
-// F12 — publication_when_type outside {1,2,3} is refused, and 0 in particular.
-//
-// 0 is not an exotic input on this surface: it is the Go zero value an agent
-// produces by OMITTING the field, and the payload switch routes the default
-// case into publish-to-pages-NOW. So the omitted-field path on an
-// irreversible publishing tool was the irreversible path. The CLI closed the
-// same hole by moving its flag default from 1 to 3; MCP has no default to
-// move, so it refuses instead.
-//
-// Still load-bearing after #143: the restored closed schema rejects the
-// OMITTED field at the boundary but does not constrain the range — a given
-// 0, 4 or -1 validates and reaches the builder, so this refusal is the last
-// line before the publish-now branch.
-func TestBuildPayloads_RejectInvalidWhenType_F12(t *testing.T) {
+// F12 — publication_when_type outside {1,2,3} is refused at the op, and an
+// explicitly-given 0 in particular. (The pointer input means an OMITTED
+// when-type is nil → the op's safe default of 3 applies, which then demands
+// schedules — it no longer falls through to publish-now. An explicit 0/4/-1
+// is still refused.)
+func TestOps_RejectInvalidWhenType_F12(t *testing.T) {
+	ctx := context.Background()
 	for _, wt := range []int{0, 4, -1} {
 		t.Run(fmt.Sprintf("copy_when_type_%d", wt), func(t *testing.T) {
-			_, err := buildCopySearchPostPayload(copySearchPostInput{
-				SearchPostID:        2001,
-				PublicationWhenType: wt,
-				SelectedPagesIDs:    "123",
+			_, err := ops.CopySearchPost(ctx, nil, ops.CopySearchPostInput{
+				SearchPostID: pint(2001),
+				PublishSearchTarget: ops.PublishSearchTarget{
+					PublicationWhenType: pint(wt),
+					SelectedPagesIDs:    pids(123),
+				},
 			})
-			if err == nil {
-				t.Fatalf("publication_when_type=%d was accepted — an out-of-range when-type must not fall through to the publish-now branch", wt)
-			}
-			if !strings.Contains(err.Error(), "publication_when_type") {
-				t.Errorf("error should name publication_when_type so an agent can correct it, got: %v", err)
-			}
+			requireOpValidation(t, err, "when-type", fmt.Sprintf("%d", wt))
 		})
 		t.Run(fmt.Sprintf("rewrite_when_type_%d", wt), func(t *testing.T) {
-			_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{
-				SearchPostID:        2001,
-				Text:                "x",
-				PublicationWhenType: wt,
-				SelectedPagesIDs:    "123",
+			_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{
+				SearchPostID: pint(2001),
+				Text:         pstr("x"),
+				PublishSearchTarget: ops.PublishSearchTarget{
+					PublicationWhenType: pint(wt),
+					SelectedPagesIDs:    pids(123),
+				},
 			})
-			if err == nil {
-				t.Fatalf("publication_when_type=%d was accepted — an out-of-range when-type must not fall through to the publish-now branch", wt)
-			}
+			requireOpValidation(t, err, "when-type", fmt.Sprintf("%d", wt))
 		})
-	}
-}
-
-// TestBuildPayloads_AcceptValidWhenType is the pair to F12: 1, 2 and 3 still
-// build. Without it, F12 is satisfied by a check that refuses everything.
-func TestBuildPayloads_AcceptValidWhenType(t *testing.T) {
-	cases := []struct {
-		wt  int
-		in  copySearchPostInput
-		rin rewriteSearchPostInput
-	}{
-		{1, copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SelectedPagesIDs: "123"},
-			rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 1, SelectedPagesIDs: "123"}},
-		{2, copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 2, SelectedPagesIDs: "123", PublishDate: "01.01.2027", PublishHours: "10", PublishMinutes: "00"},
-			rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 2, SelectedPagesIDs: "123", PublishDate: "01.01.2027", PublishHours: "10", PublishMinutes: "00"}},
-		{3, copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: "55"},
-			rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 3, SchedulesIDs: "55"}},
-	}
-	for _, tc := range cases {
-		if _, err := buildCopySearchPostPayload(tc.in); err != nil {
-			t.Errorf("copy when_type=%d rejected: %v", tc.wt, err)
-		}
-		if _, err := buildRewriteSearchPostPayload(tc.rin); err != nil {
-			t.Errorf("rewrite when_type=%d rejected: %v", tc.wt, err)
-		}
-	}
-}
-
-// TestBuildImportSearchPostPayload_SchedulesWhenTypeGuard mirrors the copy and
-// rewrite guard tables for the import builder. The import handler was the
-// BLOCKER of round 3: it built its payload inline with NEITHER guard, so
-// schedules_ids with publication_when_type=1 was silently dropped (the post
-// published to pages NOW) and publication_when_type=0 fell through `default:`
-// into the same publish-now branch. Extracting buildImportSearchPostPayload
-// makes both guards reachable from a test.
-//
-// F8 RED-on-revert: delete the contradiction guard from
-// buildImportSearchPostPayload and the "when_type 1 + schedules → error" case
-// returns a payload with err == nil → this assertion fails.
-func TestBuildImportSearchPostPayload_SchedulesWhenTypeGuard(t *testing.T) {
-	cases := []struct {
-		name      string
-		in        importSearchPostInput
-		wantErr   bool
-		errSub    string
-		wantSched []int
-	}{
-		{
-			"when_type 1 + schedules → error (contradiction guard)",
-			importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SchedulesIDs: "10,11"},
-			true, "publication_when_type=3", nil,
-		},
-		{
-			"when_type 3 + schedules → SchedulesIDs populated (_OK pair)",
-			importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: "10,11"},
-			false, "", []int{10, 11},
-		},
-		{
-			"when_type 3 + no schedules → error (existing converse guard)",
-			importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 3, SchedulesIDs: ""},
-			true, "publication_when_type=3", nil,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p, err := buildImportSearchPostPayload(tc.in)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("buildImportSearchPostPayload(%+v) = %+v, nil — want an error (the contradiction guard must refuse schedules with a non-schedule when-type; the round-3 BLOCKER shipped without this guard)", tc.in, p)
-				}
-				if !strings.Contains(err.Error(), "schedules") {
-					t.Errorf("error must name schedules, got: %v", err)
-				}
-				if tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
-					t.Errorf("error must contain %q, got: %v", tc.errSub, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("buildImportSearchPostPayload(%+v): %v", tc.in, err)
-			}
-			if !sliceEq(p.SchedulesIDs, tc.wantSched) {
-				t.Errorf("SchedulesIDs = %v, want %v — schedules must reach the payload under when-type 3 (the _OK pair stops the contradiction guard from refusing ALL schedules)", p.SchedulesIDs, tc.wantSched)
-			}
-		})
-	}
-}
-
-// TestBuildImportSearchPostPayload_RejectInvalidWhenType mirrors F12 for the
-// import builder: publication_when_type outside {1,2,3} is refused, and 0
-// (the Go zero value an agent produces by omitting the field) in particular.
-// The round-3 BLOCKER shipped without checkPublicationWhenType, so 0 and 4
-// fell through `default:` into the publish-now branch.
-func TestBuildImportSearchPostPayload_RejectInvalidWhenType(t *testing.T) {
-	for _, wt := range []int{0, 4, -1} {
 		t.Run(fmt.Sprintf("import_when_type_%d", wt), func(t *testing.T) {
-			_, err := buildImportSearchPostPayload(importSearchPostInput{
-				SearchPostID:        2001,
-				PublicationWhenType: wt,
-				SelectedPagesIDs:    "123",
+			_, err := ops.ImportSearchPost(ctx, nil, ops.ImportSearchPostInput{
+				SearchPostID: pint(2001),
+				PublishSearchTarget: ops.PublishSearchTarget{
+					PublicationWhenType: pint(wt),
+					SelectedPagesIDs:    pids(123),
+				},
 			})
-			if err == nil {
-				t.Fatalf("publication_when_type=%d was accepted — an out-of-range when-type must not fall through to the publish-now branch (the round-3 BLOCKER shipped without this guard)", wt)
-			}
-			if !strings.Contains(err.Error(), "publication_when_type") {
-				t.Errorf("error should name publication_when_type so an agent can correct it, got: %v", err)
-			}
+			requireOpValidation(t, err, "when-type", fmt.Sprintf("%d", wt))
 		})
 	}
 }
 
-// TestBuildPayloads_CrossSurface_Guards_F21 is the table-driven cross-surface
-// invariant: EVERY publish builder refuses schedules with a when-type other
-// than 3, and refuses a when-type outside {1,2,3}. The builders are enumerated
-// explicitly so adding a fourth publish tool without its guard fails the suite
-// rather than shipping — a count of 2 guards across 3 tools is what hid the
-// round-3 BLOCKER (the import builder had neither guard, and no test seam
-// reached it).
-//
-// F21 — the table catches an unguarded builder. Proven by adding a
-// deliberately unguarded fake builder to the table and watching it go RED,
-// then removing the fake (see the falsification log in the report).
-func TestBuildPayloads_CrossSurface_Guards_F21(t *testing.T) {
+// TestOps_CrossSurfaceGuards_F21 is the cross-surface invariant: EVERY
+// publish op refuses schedules with a when-type other than 3, and refuses a
+// when-type outside {1,2,3}. The ops are enumerated explicitly so a fourth
+// publish op added without the shared target resolver fails the suite rather
+// than shipping — a count of 2 guards across 3 tools is what hid the round-3
+// BLOCKER (the import builder had neither guard, and no test seam reached
+// it).
+func TestOps_CrossSurfaceGuards_F21(t *testing.T) {
+	ctx := context.Background()
+	target := func(whenTy int, sched []int) ops.PublishSearchTarget {
+		return ops.PublishSearchTarget{
+			PublicationWhenType: pint(whenTy),
+			SchedulesIDs:        pids(sched...),
+			SelectedPagesIDs:    pids(123),
+		}
+	}
 	cases := []struct {
 		name      string
 		schedules func() error // schedules_ids with when-type 1 — must error
-		whenType0 func() error // when-type 0 (omitted field) — must error
+		whenType0 func() error // when-type 0 (explicit zero) — must error
 		whenType4 func() error // when-type 4 (out of range) — must error
 	}{
-		{"buildCopySearchPostPayload",
+		{"ops.CopySearchPost",
 			func() error {
-				_, err := buildCopySearchPostPayload(copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SchedulesIDs: "10,11"})
+				_, err := ops.CopySearchPost(ctx, nil, ops.CopySearchPostInput{SearchPostID: pint(2001), PublishSearchTarget: target(1, []int{10, 11})})
 				return err
 			},
 			func() error {
-				_, err := buildCopySearchPostPayload(copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 0, SelectedPagesIDs: "123"})
+				_, err := ops.CopySearchPost(ctx, nil, ops.CopySearchPostInput{SearchPostID: pint(2001), PublishSearchTarget: target(0, nil)})
 				return err
 			},
 			func() error {
-				_, err := buildCopySearchPostPayload(copySearchPostInput{SearchPostID: 2001, PublicationWhenType: 4, SelectedPagesIDs: "123"})
-				return err
-			},
-		},
-		{"buildRewriteSearchPostPayload",
-			func() error {
-				_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 1, SchedulesIDs: "10,11"})
-				return err
-			},
-			func() error {
-				_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 0, SelectedPagesIDs: "123"})
-				return err
-			},
-			func() error {
-				_, err := buildRewriteSearchPostPayload(rewriteSearchPostInput{SearchPostID: 2001, Text: "x", PublicationWhenType: 4, SelectedPagesIDs: "123"})
+				_, err := ops.CopySearchPost(ctx, nil, ops.CopySearchPostInput{SearchPostID: pint(2001), PublishSearchTarget: target(4, nil)})
 				return err
 			},
 		},
-		{"buildImportSearchPostPayload",
+		{"ops.RewriteSearchPost",
 			func() error {
-				_, err := buildImportSearchPostPayload(importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 1, SchedulesIDs: "10,11"})
+				_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{SearchPostID: pint(2001), Text: pstr("x"), PublishSearchTarget: target(1, []int{10, 11})})
 				return err
 			},
 			func() error {
-				_, err := buildImportSearchPostPayload(importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 0, SelectedPagesIDs: "123"})
+				_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{SearchPostID: pint(2001), Text: pstr("x"), PublishSearchTarget: target(0, nil)})
 				return err
 			},
 			func() error {
-				_, err := buildImportSearchPostPayload(importSearchPostInput{SearchPostID: 2001, PublicationWhenType: 4, SelectedPagesIDs: "123"})
+				_, err := ops.RewriteSearchPost(ctx, nil, ops.RewriteSearchPostInput{SearchPostID: pint(2001), Text: pstr("x"), PublishSearchTarget: target(4, nil)})
+				return err
+			},
+		},
+		{"ops.ImportSearchPost",
+			func() error {
+				_, err := ops.ImportSearchPost(ctx, nil, ops.ImportSearchPostInput{SearchPostID: pint(2001), PublishSearchTarget: target(1, []int{10, 11})})
+				return err
+			},
+			func() error {
+				_, err := ops.ImportSearchPost(ctx, nil, ops.ImportSearchPostInput{SearchPostID: pint(2001), PublishSearchTarget: target(0, nil)})
+				return err
+			},
+			func() error {
+				_, err := ops.ImportSearchPost(ctx, nil, ops.ImportSearchPostInput{SearchPostID: pint(2001), PublishSearchTarget: target(4, nil)})
 				return err
 			},
 		},
@@ -615,17 +343,17 @@ func TestBuildPayloads_CrossSurface_Guards_F21(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name+"/schedules_with_when_type_1", func(t *testing.T) {
 			if err := tc.schedules(); err == nil {
-				t.Fatalf("%s: schedules_ids with publication_when_type=1 was accepted — every publish builder must refuse this (the schedules are silently dropped and the post publishes NOW, the round-3 BLOCKER)", tc.name)
+				t.Fatalf("%s: schedules_ids with publication_when_type=1 was accepted — every publish op must refuse this (the schedules are silently dropped and the post publishes NOW, the round-3 BLOCKER)", tc.name)
 			}
 		})
 		t.Run(tc.name+"/when_type_0", func(t *testing.T) {
 			if err := tc.whenType0(); err == nil {
-				t.Fatalf("%s: publication_when_type=0 was accepted — every publish builder must refuse an out-of-range when-type (0 is the zero value an agent produces by omitting the field)", tc.name)
+				t.Fatalf("%s: publication_when_type=0 was accepted — every publish op must refuse an out-of-range when-type", tc.name)
 			}
 		})
 		t.Run(tc.name+"/when_type_4", func(t *testing.T) {
 			if err := tc.whenType4(); err == nil {
-				t.Fatalf("%s: publication_when_type=4 was accepted — every publish builder must refuse a when-type outside {1,2,3}", tc.name)
+				t.Fatalf("%s: publication_when_type=4 was accepted — every publish op must refuse a when-type outside {1,2,3}", tc.name)
 			}
 		})
 	}
