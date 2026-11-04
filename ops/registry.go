@@ -34,6 +34,24 @@ var Registry = []Entry{
 		MCPTool: "hooppy_post_where",
 		Input:   reflect.TypeOf(PostWhereInput{}),
 	},
+	{
+		Name:    "CopySearchPost",
+		CLIPath: "search copy",
+		MCPTool: "hooppy_copy_search_post",
+		Input:   reflect.TypeOf(CopySearchPostInput{}),
+	},
+	{
+		Name:    "RewriteSearchPost",
+		CLIPath: "search rewrite",
+		MCPTool: "hooppy_rewrite_search_post",
+		Input:   reflect.TypeOf(RewriteSearchPostInput{}),
+	},
+	{
+		Name:    "ImportSearchPost",
+		CLIPath: "search import",
+		MCPTool: "hooppy_import_search_post",
+		Input:   reflect.TypeOf(ImportSearchPostInput{}),
+	},
 }
 
 // CLILeaf returns the last word of the entry's CLI path — the subcommand

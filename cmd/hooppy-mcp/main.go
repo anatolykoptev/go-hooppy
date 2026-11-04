@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 
 	"github.com/anatolykoptev/go-hooppy"
 	"github.com/anatolykoptev/go-hooppy/ops"
@@ -114,105 +112,6 @@ func errResult(msg string) (*mcp.CallToolResult, error) {
 		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		IsError: true,
 	}, nil
-}
-
-func parseIntListStr(s string) []int {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	var ids []int
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			// skip invalid entries — MCP input is free-text, unlike CLI which exits on error
-			continue
-		}
-		ids = append(ids, n)
-	}
-	return ids
-}
-
-// errSchedulesWithoutWhenType3 is the "schedules given with a non-schedule
-// when-type" refusal for the MCP builders. Both parameters name THIS
-// surface's fields: flagName is "schedules_ids" and whenTypeField is
-// "publication_when_type". An error handed to an agent is a corrective
-// instruction, so it has to name keys the agent can actually set — an earlier
-// dedup of this sentence collapsed both surfaces onto the literal "when-type
-// 3", which is neither surface's field name.
-//
-// The CLI carries its own copy parameterised with "--schedules" and
-// "--when-type". The two are deliberately separate functions: they live in
-// different packages and say different things, and a comment claiming they
-// cannot drift would be claiming an invariant nothing enforces.
-func errSchedulesWithoutWhenType3(whenType int, flagName, whenTypeField string) error {
-	return fmt.Errorf("%s is only meaningful with %s=3 (by schedule); with %s=%d the schedules are silently dropped and the post is published by page/time instead (issue #111) — pass %s=3 to queue by schedule, or drop %s to publish as %s=%d intends", flagName, whenTypeField, whenTypeField, whenType, whenTypeField, flagName, whenTypeField, whenType)
-}
-
-// checkPublicationWhenType rejects a when-type outside {1,2,3} before any
-// payload is built.
-//
-// The zero value is the reason this exists. On MCP the caller is an LLM, and
-// an omitted publication_when_type arrives as 0 — which the payload switch
-// below routes through `default:` into the publish-to-pages-NOW branch. So
-// the omitted-field path on an irreversible publishing tool was the
-// irreversible path. The CLI closed the same hole by moving its flag default
-// from 1 to 3; MCP has no default to move, so it must refuse instead.
-//
-// The check survives #143's fix: the restored closed schema rejects an
-// omitted field at the boundary (publication_when_type is required), but the
-// schema does not constrain the RANGE — a given 0, 4 or -1 still validates
-// and reaches here. This refusal is the only thing mapping an in-schema but
-// out-of-range value back to the agent instead of into the publish-now
-// branch.
-func checkPublicationWhenType(whenType int) error {
-	switch whenType {
-	case 1, 2, 3:
-		return nil
-	case 0:
-		return fmt.Errorf("publication_when_type is required and must be 1 (publish now), 2 (at a specific time) or 3 (by schedule) — it was omitted, and an omitted value must not be read as 'publish now' on a tool that publishes irreversibly")
-	default:
-		return fmt.Errorf("publication_when_type=%d is not a valid value — use 1 (publish now), 2 (at a specific time) or 3 (by schedule)", whenType)
-	}
-}
-
-// parseOrderedIDListStr parses a comma-separated id list STRICTLY: any
-// unparseable or empty element returns an error naming the offending token.
-// Use this for ORDER-SIGNIFICANT id lists (search_post_ids on rewrite/import)
-// where the lenient parseIntListStr would silently drop a bad entry and shift
-// every later post's schedule slot by one — one post not copied plus a silent
-// slot reassignment is worse than the fully-invalid case (which errors via
-// the both-empty guard). Do NOT reuse the lenient helper on an ordered id
-// list.
-func parseOrderedIDListStr(s string) ([]int, error) {
-	if s == "" {
-		return nil, nil
-	}
-	parts := strings.Split(s, ",")
-	ids := make([]int, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			return nil, fmt.Errorf("search_post_ids: empty element in %q — expected a comma-separated list of positive IDs", s)
-		}
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			return nil, fmt.Errorf("search_post_ids: invalid ID %q: %v", p, err)
-		}
-		// The error text below promises "positive IDs" — enforce it: a 0 or
-		// negative id in an order-significant list is never a real scraped
-		// post id, and accepting it would let a bad entry through that the
-		// CLI batch path (copySearchPostIDs) already rejects (id <= 0).
-		if n <= 0 {
-			return nil, fmt.Errorf("search_post_ids: %q is not a positive ID — expected a comma-separated list of positive IDs", p)
-		}
-		ids = append(ids, n)
-	}
-	return ids, nil
 }
 
 // --- list_accounts ---
@@ -1756,68 +1655,16 @@ func stopParsingResult(res *hooppy.StopParsingResult) (*mcp.CallToolResult, erro
 	})
 }
 
-// --- copy_search_post (DEPRECATED) ---
-
-type copySearchPostInput struct {
-	SearchPostID        int    `json:"search_post_id" jsonschema:"ID of the scraped post (from list_search_posts). REQUIRED. Deprecated: use import_search_post instead."`
-	PublicationWhenType int    `json:"publication_when_type" jsonschema:"Publication timing: 1=publish now, 2=at specific time, 3=by schedule."`
-	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default)."`
-	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
-	SchedulesIDs        string `json:"schedules_ids,omitempty" jsonschema:"Comma-separated schedule IDs (for when_type 3). Use list_schedules to get IDs."`
-	PublishDate         string `json:"publish_date,omitempty" jsonschema:"Publication date dd.mm.yyyy (for when_type 2)."`
-	PublishHours        string `json:"publish_hours,omitempty" jsonschema:"Publication hours HH (for when_type 2)."`
-	PublishMinutes      string `json:"publish_minutes,omitempty" jsonschema:"Publication minutes MM (for when_type 2)."`
-}
-
-// buildCopySearchPostPayload validates a copySearchPostInput and builds the
-// payload — the testable analogue of the CLI buildCopyPayload. Extracted from
-// the inline handler so the schedules/when-type contradiction guard (issue
-// #111) is reachable from a test: the prior inline form was untestable, so
-// deleting both contradiction guards left the MCP suite green (proven by
-// mutation). Mirrors buildRewriteSearchPostPayload's shape.
-func buildCopySearchPostPayload(in copySearchPostInput) (hooppy.CopySearchPostPayload, error) {
-	if in.SearchPostID == 0 {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id is required (use list_search_posts to find IDs)")
-	}
-	if err := checkPublicationWhenType(in.PublicationWhenType); err != nil {
-		return hooppy.CopySearchPostPayload{}, err
-	}
-	if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
-	}
-	if in.PublicationWhenType == 3 && in.SchedulesIDs == "" {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("schedules_ids is required for publication_when_type=3 (by schedule) — a schedule-driven copy targeted at no schedule publishes to nothing")
-	}
-	// A flag combination that cannot do what the caller asked must fail
-	// loudly before the request (issue #111): schedules_ids targets the
-	// by-schedule queue; every other when_type ignores it (the switch
-	// below sets SchedulesIDs only in case 3). Without this guard,
-	// schedules_ids with when_type 1/2 is silently dropped and the post
-	// is published to pages NOW — an irreversible publish the caller
-	// did not ask for.
-	if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
-		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids", "publication_when_type")
-	}
-	payload := hooppy.CopySearchPostPayload{
-		SearchPostID:        in.SearchPostID,
-		PublicationWhenType: in.PublicationWhenType,
-		PublicationHowType:  in.PublicationHowType,
-	}
-	switch in.PublicationWhenType {
-	case 3:
-		payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
-	case 2:
-		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
-		payload.PublicationDate = &hooppy.PublicationDate{
-			Date:    in.PublishDate,
-			Hours:   in.PublishHours,
-			Minutes: in.PublishMinutes,
-		}
-	default:
-		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
-	}
-	return payload, nil
-}
+// --- copy_search_post (DEPRECATED), import_search_post, rewrite_search_post ---
+//
+// All three are thin adapters over the ops layer (ops.CopySearchPost /
+// ops.ImportSearchPost / ops.RewriteSearchPost): the tool input IS the ops
+// input struct, and the op owns every validation and the request body — the
+// same validation the CLI runs, so the surfaces cannot drift apart again
+// (the drift produced issues #139/#140 and audit F-7). A *ops.ValidationError
+// is a local refusal that fired before any request → a tool error; a
+// *hooppy.PartialPostError is a partial batch → the status-discriminated
+// non-error result (an agent must not read it as success-or-retry, MAJOR 5).
 
 func registerCopySearchPost(server *mcp.Server) {
 	mcpserver.AddTool(server,
@@ -1825,16 +1672,12 @@ func registerCopySearchPost(server *mcp.Server) {
 			Name:        "hooppy_copy_search_post",
 			Description: "Deprecated: copy a scraped post (from list_search_posts) to your own pages. Now delegates to resolve+publish (the same path import_search_post uses), preserving text + attachments. Use import_search_post instead. UNDOCUMENTED endpoint.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in copySearchPostInput) (*mcp.CallToolResult, error) {
-			payload, err := buildCopySearchPostPayload(in)
-			if err != nil {
-				return errResult(err.Error())
-			}
+		func(ctx context.Context, _ *mcp.CallToolRequest, in ops.CopySearchPostInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.CopySearchPost(ctx, payload)
+			resp, err := ops.CopySearchPost(ctx, c, in)
 			if err != nil {
 				return errResult(err.Error())
 			}
@@ -1843,103 +1686,18 @@ func registerCopySearchPost(server *mcp.Server) {
 	)
 }
 
-// --- import_search_post ---
-
-type importSearchPostInput struct {
-	SearchPostID        int    `json:"search_post_id,omitempty" jsonschema:"ID of a single scraped post (from list_search_posts). Mutually exclusive with search_post_ids; pass exactly one."`
-	SearchPostIDs       string `json:"search_post_ids,omitempty" jsonschema:"Comma-separated IDs of scraped posts (from list_search_posts) for a batch import. Mutually exclusive with search_post_id; pass exactly one. Each post is resolved and published independently — text and attachments are preserved per post."`
-	PublicationWhenType int    `json:"publication_when_type" jsonschema:"Publication timing: 1=publish now, 2=at specific time, 3=by schedule."`
-	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default, 2=by schedule pages)."`
-	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
-	SchedulesIDs        string `json:"schedules_ids,omitempty" jsonschema:"Comma-separated schedule IDs (for when_type 3). Use list_schedules to get IDs."`
-	PublishDate         string `json:"publish_date,omitempty" jsonschema:"Publication date dd.mm.yyyy (for when_type 2)."`
-	PublishHours        string `json:"publish_hours,omitempty" jsonschema:"Publication hours HH (for when_type 2)."`
-	PublishMinutes      string `json:"publish_minutes,omitempty" jsonschema:"Publication minutes MM (for when_type 2)."`
-	NoAttachments       bool   `json:"no_attachments,omitempty" jsonschema:"Strip all attachments (photos, videos, links) — publish text only."`
-}
-
-// buildImportSearchPostPayload validates an importSearchPostInput and builds
-// the payload — the testable analogue of the CLI buildImportPayload. Extracted
-// from the inline handler so the schedules/when-type contradiction guard
-// (issue #111) and the when-type range guard are reachable from a test: the
-// prior inline form carried NEITHER guard, so schedules_ids with
-// publication_when_type=1 was silently dropped (the post published to pages
-// NOW instead of by schedule) and publication_when_type=0 (the zero value an
-// agent produces by omitting the field) fell through `default:` into the same
-// publish-now branch — the exact irreversible publishes the two siblings refuse
-// (buildCopySearchPostPayload:1752/1768, buildRewriteSearchPostPayload:1937/1952).
-// Mirrors the other two builders' guard order and shape.
-func buildImportSearchPostPayload(in importSearchPostInput) (hooppy.CopySearchPostPayload, error) {
-	if in.SearchPostID != 0 && in.SearchPostIDs != "" {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id and search_post_ids are mutually exclusive — pass only one")
-	}
-	if in.SearchPostID == 0 && in.SearchPostIDs == "" {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id or search_post_ids is required (use list_search_posts to find IDs)")
-	}
-	if err := checkPublicationWhenType(in.PublicationWhenType); err != nil {
-		return hooppy.CopySearchPostPayload{}, err
-	}
-	if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
-	}
-	if in.PublicationWhenType == 3 && in.SchedulesIDs == "" {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("schedules_ids is required for publication_when_type=3 (by schedule) — a schedule-driven import targeted at no schedule publishes to nothing")
-	}
-	// A flag combination that cannot do what the caller asked must fail loudly
-	// before the request (issue #111): schedules_ids targets the by-schedule
-	// queue; every other when_type ignores it (the switch below sets
-	// SchedulesIDs only in case 3). Without this guard, schedules_ids with
-	// when_type 1/2 is silently dropped and the post is published to pages NOW
-	// — an irreversible publish the caller did not ask for.
-	if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
-		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids", "publication_when_type")
-	}
-	payload := hooppy.CopySearchPostPayload{
-		PublicationWhenType: in.PublicationWhenType,
-		PublicationHowType:  in.PublicationHowType,
-	}
-	if in.SearchPostIDs != "" {
-		ids, err := parseOrderedIDListStr(in.SearchPostIDs)
-		if err != nil {
-			return hooppy.CopySearchPostPayload{}, err
-		}
-		payload.SearchPostIDs = ids
-	} else {
-		payload.SearchPostID = in.SearchPostID
-	}
-	switch in.PublicationWhenType {
-	case 3:
-		payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
-	case 2:
-		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
-		payload.PublicationDate = &hooppy.PublicationDate{
-			Date:    in.PublishDate,
-			Hours:   in.PublishHours,
-			Minutes: in.PublishMinutes,
-		}
-	default:
-		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
-	}
-	payload.NoAttachments = in.NoAttachments
-	return payload, nil
-}
-
 func registerImportSearchPost(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_import_search_post",
-			Description: "Import one or more scraped posts (from list_search_posts) to your own pages. Each post is resolved (text + attachments) and published independently via POST /posts. Pass a single id via search_post_id, or a batch via search_post_ids (comma-separated). Import keeps each post's original text. UNDOCUMENTED endpoint.",
+			Description: "Import one or more scraped posts (from list_search_posts) to your own pages. Each post is resolved (text + attachments) and published independently via POST /posts. Pass a single id via search_post_id, or a batch via search_post_ids. Import keeps each post's original text. UNDOCUMENTED endpoint.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in importSearchPostInput) (*mcp.CallToolResult, error) {
-			payload, err := buildImportSearchPostPayload(in)
-			if err != nil {
-				return errResult(err.Error())
-			}
+		func(ctx context.Context, _ *mcp.CallToolRequest, in ops.ImportSearchPostInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.ImportSearchPost(ctx, payload)
+			res, err := ops.ImportSearchPost(ctx, c, in)
 			if err != nil {
 				var ppe *hooppy.PartialPostError
 				if errors.As(err, &ppe) {
@@ -1947,134 +1705,32 @@ func registerImportSearchPost(server *mcp.Server) {
 					// status-discriminated non-error result so an agent can
 					// tell partial from clean success WITHOUT parsing the
 					// error string. A total failure (every post failed) does
-					// NOT reach here — resolvePublishBatch returns a plain
-					// error for it, which falls through to errResult below
-					// (IsError=true), so an agent re-running on ambiguity
-					// does not treat an empty all-failed batch as success and
-					// duplicate it (MAJOR 5).
-					return jsonResult(map[string]interface{}{"status": "partial", "result": resp, "partial_error": ppe.Error()})
+					// NOT reach here — the op returns a plain error for it,
+					// which falls through to errResult below (IsError=true),
+					// so an agent re-running on ambiguity does not treat an
+					// empty all-failed batch as success and duplicate it
+					// (MAJOR 5).
+					return jsonResult(map[string]interface{}{"status": "partial", "result": res, "partial_error": ppe.Error()})
 				}
 				return errResult(err.Error())
 			}
-			return jsonResult(resp)
+			return jsonResult(res)
 		},
 	)
-}
-
-// --- rewrite_search_post ---
-
-type rewriteSearchPostInput struct {
-	SearchPostID        int    `json:"search_post_id,omitempty" jsonschema:"ID of a single scraped post (from list_search_posts). Mutually exclusive with search_post_ids; pass exactly one."`
-	SearchPostIDs       string `json:"search_post_ids,omitempty" jsonschema:"Comma-separated IDs of scraped posts (from list_search_posts) for a batch rewrite. Mutually exclusive with search_post_id; pass exactly one. The server assigns schedule slots in the given order."`
-	Text                string `json:"text,omitempty" jsonschema:"New text overriding the original. REQUIRED with search_post_id; NOT allowed with search_post_ids — batch rewrite cannot express per-post text (omit text to keep each post's original text, like import)."`
-	PublicationWhenType int    `json:"publication_when_type" jsonschema:"Publication timing: 1=publish now, 2=at specific time, 3=by schedule."`
-	PublicationHowType  int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type (1=default)."`
-	SelectedPagesIDs    string `json:"selected_pages_ids,omitempty" jsonschema:"Comma-separated page IDs to publish to (for when_type 1 or 2). Use list_pages to get IDs."`
-	SchedulesIDs        string `json:"schedules_ids,omitempty" jsonschema:"Comma-separated schedule IDs (for when_type 3). Use list_schedules to get IDs."`
-	PublishDate         string `json:"publish_date,omitempty" jsonschema:"Publication date dd.mm.yyyy (for when_type 2)."`
-	PublishHours        string `json:"publish_hours,omitempty" jsonschema:"Publication hours HH (for when_type 2)."`
-	PublishMinutes      string `json:"publish_minutes,omitempty" jsonschema:"Publication minutes MM (for when_type 2)."`
-	NoAttachments       bool   `json:"no_attachments,omitempty" jsonschema:"Strip all attachments (photos, videos, links) — publish text only."`
-}
-
-// buildRewriteSearchPostPayload validates a rewriteSearchPostInput and builds
-// the payload — the testable analogue of the CLI buildRewritePayload.
-// RewriteSearchPost resolves each post via ResolveSearchPost and publishes via
-// PublishPost; single-post requires text (the override), batch rejects text
-// (each post keeps its own resolved text).
-func buildRewriteSearchPostPayload(in rewriteSearchPostInput) (hooppy.CopySearchPostPayload, error) {
-	if in.SearchPostID != 0 && in.SearchPostIDs != "" {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id and search_post_ids are mutually exclusive — pass only one (the scalar for a single post, the comma-separated list for a batch)")
-	}
-	if in.SearchPostID == 0 && in.SearchPostIDs == "" {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("search_post_id or search_post_ids is required (use list_search_posts to find IDs)")
-	}
-	batch := in.SearchPostIDs != ""
-	// Batch rewrite: each post keeps its own resolved text (per-post, from
-	// the resolve step). Single-post: text is the override.
-	if batch && in.Text != "" {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("text is not allowed with search_post_ids — batch rewrite keeps each post's original text (resolved per post); omit text, or rewrite one post at a time with search_post_id")
-	}
-	if !batch && in.Text == "" {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("text is required for search_post_id (rewrite overrides the single post's text)")
-	}
-	if err := checkPublicationWhenType(in.PublicationWhenType); err != nil {
-		return hooppy.CopySearchPostPayload{}, err
-	}
-	if in.PublicationWhenType == 2 && (in.PublishDate == "" || in.PublishHours == "" || in.PublishMinutes == "") {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("publish_date, publish_hours, publish_minutes are required for publication_when_type=2")
-	}
-	if in.PublicationWhenType == 3 && in.SchedulesIDs == "" {
-		return hooppy.CopySearchPostPayload{}, fmt.Errorf("schedules_ids is required for publication_when_type=3 (by schedule) — a schedule-driven rewrite targeted at no schedule publishes to nothing")
-	}
-	// A flag combination that cannot do what the caller asked must fail loudly
-	// before the request (issue #111): schedules_ids targets the by-schedule
-	// queue; every other when_type ignores it (the switch below sets
-	// SchedulesIDs only in case 3). Without this guard, schedules_ids with
-	// when_type 1/2 is silently dropped and the post is published to pages NOW
-	// — an irreversible publish the caller did not ask for.
-	if in.SchedulesIDs != "" && in.PublicationWhenType != 3 {
-		return hooppy.CopySearchPostPayload{}, errSchedulesWithoutWhenType3(in.PublicationWhenType, "schedules_ids", "publication_when_type")
-	}
-	// search_post_ids is ORDER-SIGNIFICANT (the server assigns schedule
-	// slots in the given order), so parse it STRICTLY: a lenient parse that
-	// skips a bad entry ("2001,abc,2003" → [2001,2003]) silently drops one
-	// post and shifts every later slot by one. The fully-invalid case errors
-	// via the both-empty guard above; the partial drop is the worse half and
-	// must error too, naming the bad token.
-	var batchIDs []int
-	if batch {
-		ids, err := parseOrderedIDListStr(in.SearchPostIDs)
-		if err != nil {
-			return hooppy.CopySearchPostPayload{}, err
-		}
-		batchIDs = ids
-	}
-	payload := hooppy.CopySearchPostPayload{
-		PublicationWhenType: in.PublicationWhenType,
-		PublicationHowType:  in.PublicationHowType,
-	}
-	if batch {
-		payload.SearchPostIDs = batchIDs
-		// Batch: Texts is empty — RewriteSearchPost ignores it and each post
-		// keeps its own resolved text (per-post, from the resolve step).
-	} else {
-		payload.SearchPostID = in.SearchPostID
-		payload.Texts = []hooppy.PostText{{Text: in.Text, SourceID: 0}}
-	}
-	switch in.PublicationWhenType {
-	case 3:
-		payload.SchedulesIDs = parseIntListStr(in.SchedulesIDs)
-	case 2:
-		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
-		payload.PublicationDate = &hooppy.PublicationDate{
-			Date:    in.PublishDate,
-			Hours:   in.PublishHours,
-			Minutes: in.PublishMinutes,
-		}
-	default:
-		payload.SelectedPagesIDs = parseIntListStr(in.SelectedPagesIDs)
-	}
-	payload.NoAttachments = in.NoAttachments
-	return payload, nil
 }
 
 func registerRewriteSearchPost(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_rewrite_search_post",
-			Description: "Rewrite one or more scraped posts (from list_search_posts) and publish to your pages. Pass a single id via search_post_id (text overrides the original), or a batch via search_post_ids (comma-separated). Each post is resolved and published independently — attachments are preserved per post from the resolve step. Batch rewrite keeps each post's original text (text is rejected with search_post_ids); use search_post_id for a single-post text override. UNDOCUMENTED endpoint.",
+			Description: "Rewrite one or more scraped posts (from list_search_posts) and publish to your pages. Pass a single id via search_post_id (text overrides the original), or a batch via search_post_ids. Each post is resolved and published independently — attachments are preserved per post from the resolve step. Batch rewrite keeps each post's original text (text is rejected with search_post_ids); use search_post_id for a single-post text override. UNDOCUMENTED endpoint.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in rewriteSearchPostInput) (*mcp.CallToolResult, error) {
-			payload, err := buildRewriteSearchPostPayload(in)
-			if err != nil {
-				return errResult(err.Error())
-			}
+		func(ctx context.Context, _ *mcp.CallToolRequest, in ops.RewriteSearchPostInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.RewriteSearchPost(ctx, payload)
+			resp, err := ops.RewriteSearchPost(ctx, c, in)
 			if err != nil {
 				var ppe *hooppy.PartialPostError
 				if errors.As(err, &ppe) {

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/anatolykoptev/go-hooppy"
+	"github.com/anatolykoptev/go-hooppy/ops"
 )
 
 // newStubClient builds a hooppy.Client pointed at an httptest server, so the
@@ -27,6 +28,11 @@ func newStubClient(t *testing.T, srv *httptest.Server) *hooppy.Client {
 	}
 	return c
 }
+
+// pids builds the pointer-presence []int fields the ops inputs take — the
+// test-side analogue of what FillOpInput produces when a list flag is given.
+// (pint/pstr live in schedule_update_test.go.)
+func pids(v ...int) *[]int { return &v }
 
 // searchStub answers the resolve+publish pair the collapsed copy family walks:
 // GET /posts-search/{id}/edit?as_copy=1 (the resolve) and POST /posts (the
@@ -215,17 +221,25 @@ func TestRunRewriteSearchPost_SchedulesDropped_NoRequest_F3(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	// Batch (--post-ids) so the only request, if the guard is broken, is the
-	// single RewriteSearchPost call (no per-post attachment download path).
+	// per-post RewriteSearchPost loop (no per-post attachment download path).
 	code := runRewriteSearchPost(context.Background(), newStubClient(t, srv), &out, &errOut,
-		0, "2001", "" /*text*/, 1, 1, "123", "10,11", "", "", "", false)
+		ops.RewriteSearchPostInput{
+			SearchPostIDs: pids(2001),
+			PublishSearchTarget: ops.PublishSearchTarget{
+				PublicationWhenType: pint(1),
+				PublicationHowType:  pint(1),
+				SelectedPagesIDs:    pids(123),
+				SchedulesIDs:        pids(10, 11),
+			},
+		})
 
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1 — schedules with when-type 1 must be refused before any request (issue #111)", code)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (usage refusal) — schedules with when-type 1 must be refused before any request (issue #111)", code, exitUsage)
 	}
 	if got := reqCount.Load(); got != 0 {
 		t.Fatalf("reqCount = %d, want 0 — the guard must fail BEFORE any request reaches the server; a request means the post was published with a different meaning than the caller asked (issue #111). stderr: %s", got, errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "--when-type 3") {
+	if !strings.Contains(errOut.String(), "--schedules") || !strings.Contains(errOut.String(), "when-type 3") {
 		t.Errorf("stderr should name the schedules/when-type-3 cause, got:\n%s", errOut.String())
 	}
 }
@@ -250,7 +264,14 @@ func TestRunRewriteSearchPost_SchedulesQueued_OK(t *testing.T) {
 	var out, errOut bytes.Buffer
 	// Batch (--post-ids) with when-type 3 + schedules.
 	code := runRewriteSearchPost(context.Background(), newStubClient(t, srv), &out, &errOut,
-		0, "2001", "" /*text*/, 3, 1, "", "10,11", "", "", "", false)
+		ops.RewriteSearchPostInput{
+			SearchPostIDs: pids(2001),
+			PublishSearchTarget: ops.PublishSearchTarget{
+				PublicationWhenType: pint(3),
+				PublicationHowType:  pint(1),
+				SchedulesIDs:        pids(10, 11),
+			},
+		})
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 — schedules with when-type 3 should queue and succeed:\nstderr: %s", code, errOut.String())
 	}
@@ -280,15 +301,23 @@ func TestRunCopySearchPost_SchedulesDropped_NoRequest_F4(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := runCopySearchPost(context.Background(), newStubClient(t, srv), &out, &errOut,
-		1001, 1, 1, "123", "10,11", "", "", "")
+		ops.CopySearchPostInput{
+			SearchPostID: pint(1001),
+			PublishSearchTarget: ops.PublishSearchTarget{
+				PublicationWhenType: pint(1),
+				PublicationHowType:  pint(1),
+				SelectedPagesIDs:    pids(123),
+				SchedulesIDs:        pids(10, 11),
+			},
+		})
 
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1 — schedules with when-type 1 must be refused before any request (issue #111)", code)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (usage refusal) — schedules with when-type 1 must be refused before any request (issue #111)", code, exitUsage)
 	}
 	if got := reqCount.Load(); got != 0 {
 		t.Fatalf("reqCount = %d, want 0 — the guard must fail BEFORE any request reaches the server; a request means the post was published with a different meaning than the caller asked (issue #111). stderr: %s", got, errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "--when-type 3") {
+	if !strings.Contains(errOut.String(), "--schedules") || !strings.Contains(errOut.String(), "when-type 3") {
 		t.Errorf("stderr should name the schedules/when-type-3 cause, got:\n%s", errOut.String())
 	}
 }
@@ -307,7 +336,14 @@ func TestRunCopySearchPost_SchedulesQueued_OK(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := runCopySearchPost(context.Background(), newStubClient(t, srv), &out, &errOut,
-		1001, 3, 1, "", "10,11", "", "", "")
+		ops.CopySearchPostInput{
+			SearchPostID: pint(1001),
+			PublishSearchTarget: ops.PublishSearchTarget{
+				PublicationWhenType: pint(3),
+				PublicationHowType:  pint(1),
+				SchedulesIDs:        pids(10, 11),
+			},
+		})
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 — schedules with when-type 3 should queue and succeed:\nstderr: %s", code, errOut.String())
 	}
@@ -342,16 +378,17 @@ func TestRunImport_SchedulesDropped_NoRequest_F6(t *testing.T) {
 	defer srv.Close()
 
 	var out, errOut bytes.Buffer
-	code := runImport(context.Background(), newStubClient(t, srv), &out, &errOut,
-		importArgs{postID: 1001, whenType: 1, howType: 1, schedules: "10,11"})
+	in := impIn(1001, nil, 1, 1, false)
+	in.SchedulesIDs = pids(10, 11)
+	code := runImport(context.Background(), newStubClient(t, srv), &out, &errOut, in)
 
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1 — schedules with when-type 1 must be refused before any request (issue #111)", code)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (usage refusal) — schedules with when-type 1 must be refused before any request (issue #111)", code, exitUsage)
 	}
 	if got := reqCount.Load(); got != 0 {
 		t.Fatalf("reqCount = %d, want 0 — the guard must fail BEFORE any request reaches the server; a request means the post was published with a different meaning than the caller asked (issue #111). stderr: %s", got, errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "schedules") || !strings.Contains(errOut.String(), "--when-type 3") {
+	if !strings.Contains(errOut.String(), "--schedules") || !strings.Contains(errOut.String(), "when-type 3") {
 		t.Errorf("stderr should name the schedules/when-type-3 cause, got:\n%s", errOut.String())
 	}
 }
@@ -367,8 +404,9 @@ func TestRunImport_SchedulesQueued_OK(t *testing.T) {
 	defer srv.Close()
 
 	var out, errOut bytes.Buffer
-	code := runImport(context.Background(), newStubClient(t, srv), &out, &errOut,
-		importArgs{postIDs: "3001,3002", whenType: 3, howType: 2, schedules: "10,11"})
+	in := impIn(0, []int{3001, 3002}, 3, 2, false)
+	in.SchedulesIDs = pids(10, 11)
+	code := runImport(context.Background(), newStubClient(t, srv), &out, &errOut, in)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 — schedules with when-type 3 should queue and succeed:\nstderr: %s", code, errOut.String())
 	}
@@ -405,7 +443,14 @@ func TestF22_RunRewriteSearchPost_BatchAllCreatedNoID_Exit0(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := runRewriteSearchPost(context.Background(), newStubClient(t, srv), &out, &errOut,
-		0, "11,22", "" /*text*/, 1, 1, "1", "", "", "", "", false)
+		ops.RewriteSearchPostInput{
+			SearchPostIDs: pids(11, 22),
+			PublishSearchTarget: ops.PublishSearchTarget{
+				PublicationWhenType: pint(1),
+				PublicationHowType:  pint(1),
+				SelectedPagesIDs:    pids(1),
+			},
+		})
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 — a batch of all-created-no-id must exit 0 (matching runImport's created_no_id → exit 0), not %d; the creates succeeded, the server omitted the ids (MAJOR 1)\nstderr: %s", code, code, errOut.String())
 	}
@@ -437,7 +482,14 @@ func TestRunCopySearchPost_DeprecationWarning(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := runCopySearchPost(context.Background(), newStubClient(t, srv), &out, &errOut,
-		1001, 1, 1, "1", "", "", "", "")
+		ops.CopySearchPostInput{
+			SearchPostID: pint(1001),
+			PublishSearchTarget: ops.PublishSearchTarget{
+				PublicationWhenType: pint(1),
+				PublicationHowType:  pint(1),
+				SelectedPagesIDs:    pids(1),
+			},
+		})
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0:\nstderr: %s", code, errOut.String())
 	}
@@ -481,7 +533,14 @@ func TestRunRewriteSearchPost_PartialEncodeError_HandlesIt(t *testing.T) {
 	// failingWriter always returns an error on Write, so enc.Encode fails.
 	var errOut bytes.Buffer
 	code := runRewriteSearchPost(context.Background(), newStubClient(t, srv), &failingWriter{}, &errOut,
-		0, "11,22", "" /*text*/, 1, 1, "1", "", "", "", "", false)
+		ops.RewriteSearchPostInput{
+			SearchPostIDs: pids(11, 22),
+			PublishSearchTarget: ops.PublishSearchTarget{
+				PublicationWhenType: pint(1),
+				PublicationHowType:  pint(1),
+				SelectedPagesIDs:    pids(1),
+			},
+		})
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 — a partial batch whose stdout encode fails must exit 1 (the operator's record could not be written), not 2 (partial with no record — the outcome the branch exists to prevent); stderr: %s", code, errOut.String())
 	}
@@ -523,11 +582,26 @@ func TestSinglePostCommands_AgreeOnCreateNoID_F24(t *testing.T) {
 	}{
 		{"rewrite", func(out, errOut *bytes.Buffer) int {
 			return runRewriteSearchPost(context.Background(), newStubClient(t, srv), out, errOut,
-				7001, "", "new text", 1, 1, "123", "", "", "", "", false)
+				ops.RewriteSearchPostInput{
+					SearchPostID: pint(7001),
+					Text:         pstr("new text"),
+					PublishSearchTarget: ops.PublishSearchTarget{
+						PublicationWhenType: pint(1),
+						PublicationHowType:  pint(1),
+						SelectedPagesIDs:    pids(123),
+					},
+				})
 		}},
 		{"copy", func(out, errOut *bytes.Buffer) int {
 			return runCopySearchPost(context.Background(), newStubClient(t, srv), out, errOut,
-				7001, 1, 1, "123", "", "", "", "")
+				ops.CopySearchPostInput{
+					SearchPostID: pint(7001),
+					PublishSearchTarget: ops.PublishSearchTarget{
+						PublicationWhenType: pint(1),
+						PublicationHowType:  pint(1),
+						SelectedPagesIDs:    pids(123),
+					},
+				})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
