@@ -32,7 +32,7 @@ func newStubClient(t *testing.T, srv *httptest.Server) *hooppy.Client {
 // pids builds the pointer-presence []int fields the ops inputs take — the
 // test-side analogue of what FillOpInput produces when a list flag is given.
 // (pint/pstr live in schedule_update_test.go.)
-func pids(v ...int) *[]int { return &v }
+func pids(v ...int) *ops.IDList { l := ops.IDList(v); return &l }
 
 // searchStub answers the resolve+publish pair the collapsed copy family walks:
 // GET /posts-search/{id}/edit?as_copy=1 (the resolve) and POST /posts (the
@@ -233,8 +233,8 @@ func TestRunRewriteSearchPost_SchedulesDropped_NoRequest_F3(t *testing.T) {
 			},
 		})
 
-	if code != exitUsage {
-		t.Fatalf("exit code = %d, want %d (usage refusal) — schedules with when-type 1 must be refused before any request (issue #111)", code, exitUsage)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want %d (local validation refusal — exit 1 like every sibling ops adapter) — schedules with when-type 1 must be refused before any request (issue #111)", code, 1)
 	}
 	if got := reqCount.Load(); got != 0 {
 		t.Fatalf("reqCount = %d, want 0 — the guard must fail BEFORE any request reaches the server; a request means the post was published with a different meaning than the caller asked (issue #111). stderr: %s", got, errOut.String())
@@ -311,8 +311,8 @@ func TestRunCopySearchPost_SchedulesDropped_NoRequest_F4(t *testing.T) {
 			},
 		})
 
-	if code != exitUsage {
-		t.Fatalf("exit code = %d, want %d (usage refusal) — schedules with when-type 1 must be refused before any request (issue #111)", code, exitUsage)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want %d (local validation refusal — exit 1 like every sibling ops adapter) — schedules with when-type 1 must be refused before any request (issue #111)", code, 1)
 	}
 	if got := reqCount.Load(); got != 0 {
 		t.Fatalf("reqCount = %d, want 0 — the guard must fail BEFORE any request reaches the server; a request means the post was published with a different meaning than the caller asked (issue #111). stderr: %s", got, errOut.String())
@@ -382,8 +382,8 @@ func TestRunImport_SchedulesDropped_NoRequest_F6(t *testing.T) {
 	in.SchedulesIDs = pids(10, 11)
 	code := runImport(context.Background(), newStubClient(t, srv), &out, &errOut, in)
 
-	if code != exitUsage {
-		t.Fatalf("exit code = %d, want %d (usage refusal) — schedules with when-type 1 must be refused before any request (issue #111)", code, exitUsage)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want %d (local validation refusal — exit 1 like every sibling ops adapter) — schedules with when-type 1 must be refused before any request (issue #111)", code, 1)
 	}
 	if got := reqCount.Load(); got != 0 {
 		t.Fatalf("reqCount = %d, want 0 — the guard must fail BEFORE any request reaches the server; a request means the post was published with a different meaning than the caller asked (issue #111). stderr: %s", got, errOut.String())

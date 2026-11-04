@@ -331,7 +331,11 @@ func TestF2_MCP_ImportDateUnderWhenType1And3(t *testing.T) {
 // Mutation: drop publication_date from the op's target/body → all three go
 // RED.
 func TestF3_MCP_ImportBodyMatchesCLI(t *testing.T) {
-	const golden = `{"as_copy":1,"publication_when_type":2,"publication_how_type":2,"publication_where_type":1,"selected_pages_ids":[99],"schedules_ids":[],"publication_date":{"date":"01.02.2027","hours":"10","minutes":"30"},"texts":[{"text":"x","source_id":0}],"attachments":[],"ids":"1001"}`
+	// Author-written expectation, derived from openapi.yaml POST /posts
+	// (publication_how_type, line 2020-2023): direct pages (selected_pages_ids)
+	// under when-type 2 is how_type 1; 2 would need a project_id. Not a
+	// recorded server exchange. Same literal as ops.goldenImportWhenType2Body.
+	const golden = `{"as_copy":1,"publication_when_type":2,"publication_how_type":1,"publication_where_type":1,"selected_pages_ids":[99],"schedules_ids":[],"publication_date":{"date":"01.02.2027","hours":"10","minutes":"30"},"texts":[{"text":"x","source_id":0}],"attachments":[],"ids":"1001"}`
 
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -39,6 +39,10 @@ func main() {
 }
 
 func registerTools(server *mcp.Server) {
+	// The id-list properties accept an int array OR a comma string (see
+	// idlist.go); the middleware keeps validation and the advertised schema
+	// in step with ops.IDList.
+	server.AddReceivingMiddleware(idListMiddleware())
 	registerListAccounts(server)
 	registerListPages(server)
 	registerListPosts(server)
@@ -1712,11 +1716,28 @@ func registerImportSearchPost(server *mcp.Server) {
 					// (MAJOR 5).
 					return jsonResult(map[string]interface{}{"status": "partial", "result": res, "partial_error": ppe.Error()})
 				}
-				return errResult(err.Error())
+				return importErrResult(err, res)
 			}
 			return jsonResult(res)
 		},
 	)
+}
+
+// importErrResult is the error result of a failed import. When the op got as
+// far as attempting posts (res non-nil: a total batch failure, or a single
+// post that failed) the text carries the per-post record after the summary —
+// which posts were attempted and why each failed, so an agent can retry the
+// right ones instead of re-running the whole batch. A refusal before any
+// request (res nil) is just the message.
+func importErrResult(err error, res *ops.ImportSearchPostResult) (*mcp.CallToolResult, error) {
+	if res == nil || len(res.PerPost) == 0 {
+		return errResult(err.Error())
+	}
+	rec, mErr := json.MarshalIndent(map[string]interface{}{"per_post": res.PerPost}, "", "  ")
+	if mErr != nil {
+		return errResult(err.Error())
+	}
+	return errResult(err.Error() + "\n" + string(rec))
 }
 
 func registerRewriteSearchPost(server *mcp.Server) {

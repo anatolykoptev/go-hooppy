@@ -46,9 +46,9 @@ import (
 // into each input's flag set and MCP input schema.
 type PublishSearchTarget struct {
 	PublicationWhenType *int    `json:"publication_when_type,omitempty" jsonschema:"Publication timing: 1=publish now, 2=at a specific time, 3=by schedule. Omit = 3 (the safe default — a published post cannot be un-published)." flag:"when-type" flagusage:"1=publish now, 2=at specific time, 3=by schedule (default 3 — a published post cannot be un-published; pass --when-type 1 explicitly to publish now)"`
-	PublicationHowType  *int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type. Omit = the operation default (1 for copy/rewrite, 2 for import)." flag:"how-type" flagusage:"publication how type (omit = the command default: 1 for copy/rewrite, 2 for import)"`
-	SelectedPagesIDs    *[]int  `json:"selected_pages_ids,omitempty" jsonschema:"Page IDs to publish to — only meaningful with publication_when_type 1 or 2; refused under 3 (a schedule already carries its own pages). Use list_pages to get IDs." flag:"to" flagusage:"comma-separated page IDs to publish to (only with --when-type 1 or 2; refused under --when-type 3)"`
-	SchedulesIDs        *[]int  `json:"schedules_ids,omitempty" jsonschema:"Schedule IDs — required for publication_when_type 3, refused under 1 or 2. Use list_schedules to get IDs." flag:"schedules" flagusage:"comma-separated schedule IDs (required for --when-type 3; refused under --when-type 1 or 2)"`
+	PublicationHowType  *int    `json:"publication_how_type,omitempty" jsonschema:"Publication how type: 1=the selected pages (selected_pages_ids), 2=a page set (needs a project_id, which this tool does not send — refused under publication_when_type 1 or 2). Omit = derived from the target: 1 for publication_when_type 1 or 2; under 3 (the server ignores it) 1 for copy/rewrite, 2 for import." flag:"how-type" flagusage:"publication how type (omit = derived from the target: 1 with --when-type 1 or 2; with --when-type 3 the server ignores it — 1 for copy/rewrite, 2 for import). 2 (a page set) needs a project_id this command does not send, so it is refused with --when-type 1 or 2"`
+	SelectedPagesIDs    *IDList `json:"selected_pages_ids,omitempty" jsonschema:"Page IDs to publish to — only meaningful with publication_when_type 1 or 2; refused under 3 (a schedule already carries its own pages). Use list_pages to get IDs." flag:"to" flagusage:"comma-separated page IDs to publish to (only with --when-type 1 or 2; refused under --when-type 3)"`
+	SchedulesIDs        *IDList `json:"schedules_ids,omitempty" jsonschema:"Schedule IDs — required for publication_when_type 3, refused under 1 or 2. Use list_schedules to get IDs." flag:"schedules" flagusage:"comma-separated schedule IDs (required for --when-type 3; refused under --when-type 1 or 2)"`
 	PublishDate         *string `json:"publish_date,omitempty" jsonschema:"Publication date dd.mm.yyyy — required for publication_when_type 2, refused under 1 or 3." flag:"date" flagusage:"publication date dd.mm.yyyy (required for --when-type 2; refused under --when-type 1 or 3)"`
 	PublishHours        *string `json:"publish_hours,omitempty" jsonschema:"Publication hours HH (with publish_date, for publication_when_type 2)." flag:"hours" flagusage:"publication hours HH (with --date, for --when-type 2)"`
 	PublishMinutes      *string `json:"publish_minutes,omitempty" jsonschema:"Publication minutes MM (with publish_date, for publication_when_type 2)." flag:"minutes" flagusage:"publication minutes MM (with --date, for --when-type 2)"`
@@ -66,7 +66,7 @@ type CopySearchPostInput struct {
 // RewriteSearchPostInput is the parameter set of ops.RewriteSearchPost.
 type RewriteSearchPostInput struct {
 	SearchPostID  *int    `json:"search_post_id,omitempty" jsonschema:"ID of a single scraped post (from list_search_posts). Mutually exclusive with search_post_ids; pass exactly one." flag:"post-id" flagusage:"scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)"`
-	SearchPostIDs *[]int  `json:"search_post_ids,omitempty" jsonschema:"IDs of scraped posts (from list_search_posts) for a batch rewrite — each post is resolved and published independently (client-side loop). Mutually exclusive with search_post_id; pass exactly one. Batch keeps each post's original text (text is refused with search_post_ids)." flag:"post-ids" flagusage:"comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Each post is resolved and published independently — attachments preserved per post. Batch keeps each post's original text (--text is rejected with --post-ids)."`
+	SearchPostIDs *IDList `json:"search_post_ids,omitempty" jsonschema:"IDs of scraped posts (from list_search_posts) for a batch rewrite — each post is resolved and published independently (client-side loop). Mutually exclusive with search_post_id; pass exactly one. Batch keeps each post's original text (text is refused with search_post_ids)." flag:"post-ids" flagusage:"comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Each post is resolved and published independently — attachments preserved per post. Batch keeps each post's original text (--text is rejected with --post-ids)."`
 	Text          *string `json:"text,omitempty" jsonschema:"New text for the post — REQUIRED for search_post_id, refused with search_post_ids (a batch cannot express per-post text)." flag:"text" flagusage:"new text for the post (required for --post-id; NOT allowed with --post-ids — batch keeps each post's original text)"`
 	NoAttachments *bool   `json:"no_attachments,omitempty" jsonschema:"Strip all attachments (photos, videos, links, etc.) — publish text only." flag:"no-attachments" flagusage:"strip all attachments (photos, videos, links, etc.) — publish text only"`
 	PublishSearchTarget
@@ -74,19 +74,37 @@ type RewriteSearchPostInput struct {
 
 // ImportSearchPostInput is the parameter set of ops.ImportSearchPost.
 type ImportSearchPostInput struct {
-	SearchPostID  *int   `json:"search_post_id,omitempty" jsonschema:"ID of a single scraped post (from list_search_posts). Mutually exclusive with search_post_ids; pass exactly one." flag:"post-id" flagusage:"scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)"`
-	SearchPostIDs *[]int `json:"search_post_ids,omitempty" jsonschema:"IDs of scraped posts (from list_search_posts) for a batch import — each post is resolved and published independently (client-side loop), so text and attachments are preserved per post. Mutually exclusive with search_post_id; pass exactly one." flag:"post-ids" flagusage:"comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Each post is resolved and published independently (client-side loop) — text and attachments preserved per post. Schedule slots are reported in publication order (the queue's own order), not the order given on the command line."`
-	NoAttachments *bool  `json:"no_attachments,omitempty" jsonschema:"Strip all attachments (photos, videos, links, etc.) — publish text only." flag:"no-attachments" flagusage:"strip all attachments (photos, videos, links, etc.)"`
-	StripVKMarkup *bool  `json:"strip_vk_markup,omitempty" jsonschema:"Convert VK wiki-link markup [url|text] to text (opt-in). Advertising disclosures (Erid/Реклама./ИНН) are NEVER auto-removed: a disclosure that genuinely is our advertising must stay, and the tool cannot tell the two apart." flag:"strip-vk-markup" flagusage:"convert VK wiki-link markup [url|text] to text (opt-in). Advertising disclosures (Erid/Реклама./ИНН) are NEVER auto-removed: a disclosure that genuinely is our advertising must stay, and the tool cannot tell the two apart."`
+	SearchPostID  *int    `json:"search_post_id,omitempty" jsonschema:"ID of a single scraped post (from list_search_posts). Mutually exclusive with search_post_ids; pass exactly one." flag:"post-id" flagusage:"scraped post ID from 'search posts' (single; mutually exclusive with --post-ids)"`
+	SearchPostIDs *IDList `json:"search_post_ids,omitempty" jsonschema:"IDs of scraped posts (from list_search_posts) for a batch import — each post is resolved and published independently (client-side loop), so text and attachments are preserved per post. Mutually exclusive with search_post_id; pass exactly one." flag:"post-ids" flagusage:"comma-separated scraped post IDs from 'search posts' (batch; mutually exclusive with --post-id). Each post is resolved and published independently (client-side loop) — text and attachments preserved per post. Schedule slots are reported in publication order (the queue's own order), not the order given on the command line."`
+	NoAttachments *bool   `json:"no_attachments,omitempty" jsonschema:"Strip all attachments (photos, videos, links, etc.) — publish text only." flag:"no-attachments" flagusage:"strip all attachments (photos, videos, links, etc.)"`
+	StripVKMarkup *bool   `json:"strip_vk_markup,omitempty" jsonschema:"Convert VK wiki-link markup [url|text] to text (opt-in). Advertising disclosures (Erid/Реклама./ИНН) are NEVER auto-removed: a disclosure that genuinely is our advertising must stay, and the tool cannot tell the two apart." flag:"strip-vk-markup" flagusage:"convert VK wiki-link markup [url|text] to text (opt-in). Advertising disclosures (Erid/Реклама./ИНН) are NEVER auto-removed: a disclosure that genuinely is our advertising must stay, and the tool cannot tell the two apart."`
 	PublishSearchTarget
 }
 
-// how-type defaults when the caller omits the field. The CLI defaults these
-// per command; the op owns them so MCP gets the same wire values (an omitted
-// publication_how_type previously reached the wire as 0 there).
+// how-type values and the per-command defaults the op applies when the caller
+// omits the field. The CLI defaults these per command; the op owns them so MCP
+// gets the same wire values (an omitted publication_how_type previously
+// reached the wire as 0 there).
+//
+// The oracle is the repo's official API reference, openapi.yaml POST /posts
+// (publication_how_type, line 2020-2023): "Куда публиковать при when 1/2:
+// 1 — в выбранные страницы (selected_pages_ids ...), 2 — в страницы набора
+// (project_id). При when=3 передайте 1, значение не используется". The
+// sibling schedule contract (openapi.yaml:2936-2946) says the same and adds
+// that project_id is mandatory for 2.
+//
+// So the default depends on the TARGET, not only on the command:
+//   - when-type 1/2 target pages directly → howTypeSelectedPages (1) for
+//     every command. Import's own default of 2 sent how_type 2 +
+//     selected_pages_ids with no project_id (it was only ever right for the
+//     by-schedule path, where the server does not read the value);
+//   - when-type 3 → the command's own default, unchanged from main
+//     (copy/rewrite 1, import 2): the server ignores it there.
 const (
-	howTypeDefault   = 1 // copy / rewrite
-	howTypeSchedPage = 2 // import (by schedule pages)
+	howTypeSelectedPages = 1 // direct pages (selected_pages_ids)
+	howTypePageSet       = 2 // a page set; the server then requires project_id
+	howTypeDefault       = 1 // copy / rewrite default under when-type 3
+	howTypeSchedPage     = 2 // import default under when-type 3
 )
 
 // fieldRef renders a field's name on BOTH surfaces: "--to
@@ -116,7 +134,7 @@ func derefInt(p *int, def int) int {
 	return *p
 }
 
-func derefIntSlice(p *[]int) []int {
+func derefIntSlice(p *IDList) []int {
 	if p == nil {
 		return nil
 	}
@@ -142,8 +160,10 @@ func derefStr(p *string) string {
 // a flag combination that cannot do what the caller asked fails before the
 // request, naming what would have happened.
 //
-// defaultHowType is the operation's own how-type (copy/rewrite 1, import 2)
-// applied when the caller omits the field.
+// defaultHowType is the operation's own how-type (copy/rewrite 1, import 2),
+// applied when the caller omits the field AND the target is by-schedule
+// (when-type 3). A direct-page target (when-type 1/2) always derives 1 —
+// see the howType constants.
 func resolveSearchTarget(in any, t PublishSearchTarget, defaultHowType int) (hooppy.PublishTarget, error) {
 	whenType := derefInt(t.PublicationWhenType, 3)
 	if whenType < 1 || whenType > 3 {
@@ -191,9 +211,25 @@ func resolveSearchTarget(in any, t PublishSearchTarget, defaultHowType int) (hoo
 			"%s, %s and %s are all required with when-type 2 (at a specific time)",
 			fieldRef(in, "PublishDate"), fieldRef(in, "PublishHours"), fieldRef(in, "PublishMinutes"))}
 	}
+	howType := defaultHowType
+	if whenType != 3 {
+		howType = howTypeSelectedPages
+	}
+	if t.PublicationHowType != nil {
+		howType = *t.PublicationHowType
+		// how_type 2 = "pages of a page set", for which the server requires a
+		// project_id (openapi.yaml:2946). None of these ops carries one, so an
+		// explicit 2 where the server reads the value would send a request it
+		// must reject. Under when-type 3 the value is unused and stays honoured.
+		if howType == howTypePageSet && whenType != 3 {
+			return hooppy.PublishTarget{}, &ValidationError{msg: fmt.Sprintf(
+				"%s 2 means \"pages of a page set\" and needs a project_id, which this command does not send — under when-type %d the pages go via %s with how-type 1. Drop %s (it derives 1 from the target) or set it to 1",
+				fieldRef(in, "PublicationHowType"), whenType, fieldRef(in, "SelectedPagesIDs"), fieldRef(in, "PublicationHowType"))}
+		}
+	}
 	target := hooppy.PublishTarget{
 		PublicationWhenType: whenType,
-		PublicationHowType:  derefInt(t.PublicationHowType, defaultHowType),
+		PublicationHowType:  howType,
 	}
 	switch whenType {
 	case 3:
@@ -212,17 +248,20 @@ func resolveSearchTarget(in any, t PublishSearchTarget, defaultHowType int) (hoo
 }
 
 // dateFlagsGiven lists the display names of the date fields the caller
-// actually supplied (pointer non-nil), so the #140 refusal names exactly
-// the flags that would have been dropped.
+// actually supplied, so the #140 refusal names exactly the flags that would
+// have been dropped. An explicit "" (a CLI `--date ""`, an MCP
+// "publish_date":"") carries no date — it is absent, exactly as the
+// when-type 2 required-field check already treats it — so it is not
+// "given" and cannot trip the refusal.
 func dateFlagsGiven(in any, t PublishSearchTarget) []string {
 	var names []string
-	if t.PublishDate != nil {
+	if derefStr(t.PublishDate) != "" {
 		names = append(names, fieldRef(in, "PublishDate"))
 	}
-	if t.PublishHours != nil {
+	if derefStr(t.PublishHours) != "" {
 		names = append(names, fieldRef(in, "PublishHours"))
 	}
-	if t.PublishMinutes != nil {
+	if derefStr(t.PublishMinutes) != "" {
 		names = append(names, fieldRef(in, "PublishMinutes"))
 	}
 	return names
@@ -232,7 +271,7 @@ func dateFlagsGiven(in any, t PublishSearchTarget) []string {
 // A batch (--post-ids / search_post_ids) keeps caller order — schedule
 // slots bind positionally to each id's own publish. Every id must be
 // positive (the server treats 0 as unset and a negative is never valid).
-func searchPostIDs(in any, single *int, batch *[]int) (ids []int, err error) {
+func searchPostIDs(in any, single *int, batch *IDList) (ids []int, err error) {
 	if single != nil && len(derefIntSlice(batch)) > 0 {
 		return nil, &ValidationError{msg: fieldRef(in, "SearchPostID") + " and " + fieldRef(in, "SearchPostIDs") +
 			" are mutually exclusive — pass only one (the scalar for a single post, the list for a batch)"}

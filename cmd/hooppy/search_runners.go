@@ -83,23 +83,19 @@ type stopParsingOutput struct {
 	Unconfirmed         bool `json:"unconfirmed,omitempty"`
 }
 
-// exitUsage is the process exit code for a local input refusal — an
-// *ops.ValidationError (EX_USAGE). The publishing ops refuse meaningless
-// flag combinations before any request; 64 tells a script it was a usage
-// error, not a server failure.
-const exitUsage = 64
-
 // printOpError routes an error from an ops-layer call: a *ops.ValidationError
-// is a local usage refusal (exit 64), anything else is a runtime error
-// (exit 1). Returns (exit code, handled) — handled=false means the error is
-// not an ops error the caller recognizes and it should apply its own
-// special-case handling (PartialPostError / CreateNoIDError) before falling
-// back to the generic print.
+// is a local refusal that fired before any request — printed as an error and
+// exit 1, like every sibling ops adapter (runScheduleUpdate, runPostsWhere)
+// and the repo's 0 = complete / 1 = error / 2 = partial convention. Returns
+// (exit code, handled) — handled=false means the error is not an ops
+// validation error and the caller should apply its own special-case handling
+// (PartialPostError / CreateNoIDError) before falling back to the generic
+// print.
 func printOpError(err error, errOut io.Writer) (int, bool) {
 	var ve *ops.ValidationError
 	if errors.As(err, &ve) {
 		fmt.Fprintf(errOut, "error: %v\n", err)
-		return exitUsage, true
+		return 1, true
 	}
 	return 0, false
 }

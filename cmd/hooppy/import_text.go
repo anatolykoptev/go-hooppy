@@ -16,7 +16,7 @@ import (
 // checks, the per-post resolve+publish loop, the VK-markup strip and the
 // hygiene scan; this function maps the result to stdout/stderr and an exit
 // code: 0 on success, 1 on error, 2 on partial (batch where some posts
-// succeeded and some failed), 64 on a local usage refusal.
+// succeeded and some failed). A local validation refusal is exit 1.
 //
 // The batch is N independent resolve+publish pairs (client-side), NOT one
 // server-side batch — a failure at post K of N leaves posts 1..K-1 already

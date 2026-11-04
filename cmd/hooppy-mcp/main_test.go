@@ -28,9 +28,9 @@ import (
 // JSON decode at the boundary; the zero/negative classes the ops still see
 // are asserted here and in ops/publish_search_test.go.
 
-func pint(v int) *int       { return &v }
-func pstr(v string) *string { return &v }
-func pids(v ...int) *[]int  { return &v }
+func pint(v int) *int           { return &v }
+func pstr(v string) *string     { return &v }
+func pids(v ...int) *ops.IDList { l := ops.IDList(v); return &l }
 
 // requireOpValidation asserts err is a *ops.ValidationError naming every
 // substring — the refusal a tool adapter maps to IsError=true before any

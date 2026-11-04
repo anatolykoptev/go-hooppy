@@ -454,7 +454,7 @@ func TestSearchBuilders_FlagValidation(t *testing.T) {
 			}
 			var ve *ops.ValidationError
 			if !errors.As(err, &ve) {
-				t.Fatalf("error = %v (%T), want *ops.ValidationError — a local refusal must be typed so the CLI can exit 64 and MCP can tool-error", err, err)
+				t.Fatalf("error = %v (%T), want *ops.ValidationError — a local refusal must be typed so the CLI can exit 1 and MCP can tool-error", err, err)
 			}
 			if !strings.Contains(err.Error(), tc.errSub) {
 				t.Errorf("error %q does not name the intended cause %q — a different error passed for this row (finding 5d)", err.Error(), tc.errSub)

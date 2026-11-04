@@ -16,8 +16,8 @@ import (
 	"github.com/anatolykoptev/go-hooppy"
 )
 
-func pbool(v bool) *bool   { return &v }
-func pids(v ...int) *[]int { return &v }
+func pbool(v bool) *bool    { return &v }
+func pids(v ...int) *IDList { l := IDList(v); return &l }
 
 // ---------------------------------------------------------------------------
 // VK wiki-markup strip + advertising-disclosure detection — moved verbatim
@@ -421,7 +421,7 @@ func requireValidation(t *testing.T, err error, requests int, subs ...string) {
 	t.Helper()
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
-		t.Fatalf("error = %v (%T), want a *ops.ValidationError — a local refusal must be typed so the surfaces can map it (CLI exit 64, MCP tool error)", err, err)
+		t.Fatalf("error = %v (%T), want a *ops.ValidationError — a local refusal must be typed so the surfaces can map it (CLI exit 1, MCP tool error)", err, err)
 	}
 	for _, sub := range subs {
 		if !strings.Contains(err.Error(), sub) {
@@ -679,21 +679,35 @@ func TestCopySearchPost_WhenType3SendsSchedules(t *testing.T) {
 }
 
 // F3 — a `search import --when-type 2 --date ... --to <page>` produces THE
-// SAME request body on both surfaces. The op-level pin is the golden below;
-// the two adapter tests (TestF3_CLIImportBodyMatchesMCPTool in cmd/hooppy,
-// TestF3_MCPImportBodyMatchesCLI in cmd/hooppy-mcp) assert the identical
-// literal from the recorded request each surface emitted. Byte-equality is
-// then a property of the shared op — the mutation that drops
-// publication_date from the body goes RED on both sides.
+// SAME request body on both surfaces. The op builds the body, so
+// byte-equality against one literal is a property of the shared op: the two
+// adapter tests (TestF3_CLI_ImportBodyMatchesMCPTool in cmd/hooppy,
+// TestF3_MCP_ImportBodyMatchesCLI in cmd/hooppy-mcp) assert the identical
+// literal from the POST each surface emitted. The mutation that drops
+// publication_date from the body goes RED on all three.
 //
-// goldenImportWhenType2Body is the exact POST /posts body for:
+// goldenImportWhenType2Body is an AUTHOR-WRITTEN expectation, not a recorded
+// server exchange: nothing in this repo captured the request. Its oracle is
+// the repo's official API reference, openapi.yaml, POST /posts
+// (publication_how_type, line 2020-2023):
+//
+//	"Куда публиковать при when 1/2: 1 — в выбранные страницы
+//	 (selected_pages_ids или selected_pages_by_source_ids), 2 — в страницы
+//	 набора (project_id). При when=3 передайте 1, значение не используется"
+//
+// and the sibling schedule contract (openapi.yaml:2936-2946):
+// publication_how_type "1 — вручную (selected_pages_* ниже), 2 — через набор
+// страниц (project_id)", project_id "обязателен при publication_how_type = 2".
+// So a direct-page target (selected_pages_ids, when-type 1 or 2) is how_type
+// 1; how_type 2 would need a project_id this body never carries.
+//
+// The body is for:
 //
 //	search import --post-id 1001 --when-type 2 --date 01.02.2027 \
 //	    --hours 10 --minutes 30 --to 99
 //
-// (publication_how_type 2 is import's own default — the op applies it when
-// the caller omits the field, so an agent never sees a 0 on the wire).
-const goldenImportWhenType2Body = `{"as_copy":1,"publication_when_type":2,"publication_how_type":2,"publication_where_type":1,"selected_pages_ids":[99],"schedules_ids":[],"publication_date":{"date":"01.02.2027","hours":"10","minutes":"30"},"texts":[{"text":"x","source_id":0}],"attachments":[],"ids":"1001"}`
+// with how-type omitted (the op derives it from the target).
+const goldenImportWhenType2Body = `{"as_copy":1,"publication_when_type":2,"publication_how_type":1,"publication_where_type":1,"selected_pages_ids":[99],"schedules_ids":[],"publication_date":{"date":"01.02.2027","hours":"10","minutes":"30"},"texts":[{"text":"x","source_id":0}],"attachments":[],"ids":"1001"}`
 
 func TestF3_ImportWhenType2_DatePages_GoldenBody(t *testing.T) {
 	srv, st := newSearchStubServer(t, "x")
@@ -903,34 +917,132 @@ func TestImportSearchPost_SingleCreateNoID(t *testing.T) {
 	}
 }
 
-// TestCopySearchPost_OmittedHowTypeDefaults pins the op-owned default: an
-// omitted publication_how_type reaches the wire as 1 for copy/rewrite and 2
-// for import (previously an omitted MCP field went to the wire as 0).
-func TestPublishSearch_OmittedHowTypeDefaults(t *testing.T) {
+// TestPublishSearch_HowTypeFollowsTarget pins the op-owned how-type default.
+// The oracle is openapi.yaml POST /posts publication_how_type (line
+// 2020-2023): 1 = the selected pages (selected_pages_ids), 2 = a page set
+// (project_id, mandatory); under when=3 "pass 1, the value is not used".
+//   - when-type 1/2 (direct pages) → 1 for EVERY command — import included,
+//     whose own default of 2 sent how_type 2 + selected_pages_ids with no
+//     project_id (F2: restore the constant 2 → RED);
+//   - when-type 3 → the command's own default (copy/rewrite 1, import 2),
+//     unchanged from main;
+//   - an explicit value is honoured where the server reads it.
+func TestPublishSearch_HowTypeFollowsTarget(t *testing.T) {
+	ctx := context.Background()
+	pages := func(when int) PublishSearchTarget {
+		return PublishSearchTarget{PublicationWhenType: pint(when), SelectedPagesIDs: pids(1)}
+	}
+	sched := PublishSearchTarget{PublicationWhenType: pint(3), SchedulesIDs: pids(10)}
+	withDate := func(tg PublishSearchTarget) PublishSearchTarget {
+		tg.PublishDate, tg.PublishHours, tg.PublishMinutes = pstr("01.02.2027"), pstr("10"), pstr("30")
+		return tg
+	}
+	howOf := func(tg PublishSearchTarget, h *int) PublishSearchTarget { tg.PublicationHowType = h; return tg }
+
+	cases := []struct {
+		name string
+		op   string // copy | rewrite | import
+		tg   PublishSearchTarget
+		want float64
+	}{
+		{"import, when 1 + pages", "import", pages(1), 1},
+		{"import, when 2 + pages + date", "import", withDate(pages(2)), 1},
+		{"copy, when 1 + pages", "copy", pages(1), 1},
+		{"rewrite, when 2 + pages + date", "rewrite", withDate(pages(2)), 1},
+		{"import, when 3 keeps import's own default", "import", sched, 2},
+		{"copy, when 3 keeps copy's own default", "copy", sched, 1},
+		{"rewrite, when 3 keeps rewrite's own default", "rewrite", sched, 1},
+		{"import, explicit 1 under when 3 is honoured", "import", howOf(sched, pint(1)), 1},
+		{"copy, explicit 2 under when 3 is honoured (the server ignores it there)", "copy", howOf(sched, pint(2)), 2},
+		{"import, explicit 1 under when 1 is honoured", "import", howOf(pages(1), pint(1)), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, st := newSearchStubServer(t, "x")
+			c := newTestClient(t, srv.URL)
+			var err error
+			switch tc.op {
+			case "copy":
+				_, err = CopySearchPost(ctx, c, CopySearchPostInput{SearchPostID: pint(1001), PublishSearchTarget: tc.tg})
+			case "rewrite":
+				_, err = RewriteSearchPost(ctx, c, RewriteSearchPostInput{SearchPostID: pint(1001), Text: pstr("t"), PublishSearchTarget: tc.tg})
+			default:
+				_, err = ImportSearchPost(ctx, c, ImportSearchPostInput{SearchPostID: pint(1001), PublishSearchTarget: tc.tg})
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", tc.op, err)
+			}
+			posts := st.postBodies()
+			if len(posts) != 1 {
+				t.Fatalf("POST count = %d, want 1", len(posts))
+			}
+			if got := decodePostBody(t, posts[0])["publication_how_type"]; got != tc.want {
+				t.Errorf("publication_how_type = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPublishSearch_ExplicitHowType2NeedsProject pins the other half: how_type
+// 2 means "pages of a page set" and the server requires project_id for it
+// (openapi.yaml:2946 "обязателен при publication_how_type = 2"). These ops
+// carry no project_id, so an explicit 2 where the server reads it (when-type
+// 1 or 2) is refused BEFORE any HTTP call, for all three commands, naming
+// both the flag and project_id. Under when-type 3 the value is unused by the
+// server and stays accepted (covered above).
+func TestPublishSearch_ExplicitHowType2NeedsProject(t *testing.T) {
+	ctx := context.Background()
 	srv, st := newSearchStubServer(t, "x")
 	c := newTestClient(t, srv.URL)
-	ctx := context.Background()
 
-	if _, err := CopySearchPost(ctx, c, CopySearchPostInput{
-		SearchPostID:        pint(1001),
-		PublishSearchTarget: PublishSearchTarget{PublicationWhenType: pint(1), SelectedPagesIDs: pids(1)},
-	}); err != nil {
-		t.Fatalf("CopySearchPost: %v", err)
+	for _, when := range []int{1, 2} {
+		tg := PublishSearchTarget{PublicationWhenType: pint(when), PublicationHowType: pint(2), SelectedPagesIDs: pids(99)}
+		if when == 2 {
+			tg.PublishDate, tg.PublishHours, tg.PublishMinutes = pstr("01.02.2027"), pstr("10"), pstr("30")
+		}
+		for name, run := range map[string]func() error{
+			"copy": func() error {
+				_, err := CopySearchPost(ctx, c, CopySearchPostInput{SearchPostID: pint(1001), PublishSearchTarget: tg})
+				return err
+			},
+			"rewrite": func() error {
+				_, err := RewriteSearchPost(ctx, c, RewriteSearchPostInput{SearchPostID: pint(1001), Text: pstr("t"), PublishSearchTarget: tg})
+				return err
+			},
+			"import": func() error {
+				_, err := ImportSearchPost(ctx, c, ImportSearchPostInput{SearchPostID: pint(1001), PublishSearchTarget: tg})
+				return err
+			},
+		} {
+			t.Run(fmt.Sprintf("%s/when-%d", name, when), func(t *testing.T) {
+				before := st.count()
+				err := run()
+				requireValidation(t, err, st.count()-before, "how-type", "project_id")
+			})
+		}
 	}
-	if _, err := ImportSearchPost(ctx, c, ImportSearchPostInput{
-		SearchPostID:        pint(1002),
-		PublishSearchTarget: PublishSearchTarget{PublicationWhenType: pint(1), SelectedPagesIDs: pids(1)},
-	}); err != nil {
-		t.Fatalf("ImportSearchPost: %v", err)
-	}
-	posts := st.postBodies()
-	if len(posts) != 2 {
-		t.Fatalf("POST count = %d, want 2", len(posts))
-	}
-	if got := decodePostBody(t, posts[0])["publication_how_type"]; got != float64(1) {
-		t.Errorf("copy publication_how_type = %v, want 1 (op default — never 0 on the wire)", got)
-	}
-	if got := decodePostBody(t, posts[1])["publication_how_type"]; got != float64(2) {
-		t.Errorf("import publication_how_type = %v, want 2 (import's own default)", got)
+}
+
+// TestPublishSearch_EmptyDateStringsAreAbsent pins finding 5: an explicit ""
+// date/hours/minutes (a CLI `--date ""`, an MCP "publish_date":"") carries no
+// date, so it must not trip the #140 "date flags dropped" refusal under
+// when-type 1 or 3 — the call proceeds exactly as if the field were omitted.
+// A real value still refuses (the existing F2 cases).
+func TestPublishSearch_EmptyDateStringsAreAbsent(t *testing.T) {
+	ctx := context.Background()
+	for name, tg := range map[string]PublishSearchTarget{
+		"when 3": {PublicationWhenType: pint(3), SchedulesIDs: pids(10), PublishDate: pstr(""), PublishHours: pstr(""), PublishMinutes: pstr("")},
+		"when 1": {PublicationWhenType: pint(1), SelectedPagesIDs: pids(99), PublishDate: pstr("")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, st := newSearchStubServer(t, "x")
+			c := newTestClient(t, srv.URL)
+			if _, err := ImportSearchPost(ctx, c, ImportSearchPostInput{SearchPostID: pint(1001), PublishSearchTarget: tg}); err != nil {
+				t.Fatalf("ImportSearchPost with empty-string date fields = %v, want success (an empty string is absent, not a dropped date)", err)
+			}
+			if n := len(st.postBodies()); n != 1 {
+				t.Fatalf("POST count = %d, want 1", n)
+			}
+		})
 	}
 }

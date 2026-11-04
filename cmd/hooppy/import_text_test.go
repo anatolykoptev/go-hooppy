@@ -35,7 +35,8 @@ func impIn(postID int, postIDs []int, whenType, howType int, stripVK bool) ops.I
 		in.SearchPostID = &postID
 	}
 	if len(postIDs) > 0 {
-		in.SearchPostIDs = &postIDs
+		ids := ops.IDList(postIDs)
+		in.SearchPostIDs = &ids
 	}
 	return in
 }
@@ -1071,7 +1072,7 @@ func countingImportStub(t *testing.T) (*httptest.Server, *int32) {
 // F1 — `hooppy search import --when-type 3 --to <page>`: the journey. Under
 // when-type 3 the schedule owns its page set, so --to was silently dropped
 // and the post published to the schedule's pages instead (issue #139). The
-// op refuses it BEFORE any HTTP call; the runner maps the refusal to exit 64.
+// op refuses it BEFORE any HTTP call; the runner maps the refusal to exit 1.
 //
 // Mutation: delete the `whenType == 3 && len(pages) > 0` check in
 // ops/publish_search.go (resolveSearchTarget) → the op proceeds to resolve →
@@ -1087,8 +1088,8 @@ func TestF1_CLI_ImportPagesUnderWhenType3(t *testing.T) {
 	in.SelectedPagesIDs = pids(99)
 	code := runImport(context.Background(), c, &out, &errOut, in)
 
-	if code != exitUsage {
-		t.Fatalf("exit = %d, want %d (usage refusal) — --to with --when-type 3 must be refused (issue #139). stderr: %s", code, exitUsage, errOut.String())
+	if code != 1 {
+		t.Fatalf("exit = %d, want %d (local validation refusal — exit 1 like every sibling ops adapter) — --to with --when-type 3 must be refused (issue #139). stderr: %s", code, 1, errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "--to") || !strings.Contains(errOut.String(), "when-type 3") {
 		t.Errorf("stderr should name the flag and the when-type, got: %s", errOut.String())
@@ -1134,8 +1135,8 @@ func TestF2_CLI_ImportDateUnderWhenType1And3(t *testing.T) {
 			var out, errOut strings.Builder
 			code := runImport(context.Background(), c, &out, &errOut, tc.build())
 
-			if code != exitUsage {
-				t.Fatalf("exit = %d, want %d (usage refusal) — date flags under this when-type must be refused (issue #140). stderr: %s", code, exitUsage, errOut.String())
+			if code != 1 {
+				t.Fatalf("exit = %d, want %d (local validation refusal — exit 1 like every sibling ops adapter) — date flags under this when-type must be refused (issue #140). stderr: %s", code, 1, errOut.String())
 			}
 			if !strings.Contains(errOut.String(), "--date") && !strings.Contains(errOut.String(), "--hours") {
 				t.Errorf("stderr should name the date flags, got: %s", errOut.String())
@@ -1158,13 +1159,18 @@ func TestF2_CLI_ImportDateUnderWhenType1And3(t *testing.T) {
 // Mutation: drop publication_date from the op's target (case 2 branch in
 // resolveSearchTarget) → all three go RED.
 func TestF3_CLI_ImportBodyMatchesMCPTool(t *testing.T) {
-	const golden = `{"as_copy":1,"publication_when_type":2,"publication_how_type":2,"publication_where_type":1,"selected_pages_ids":[99],"schedules_ids":[],"publication_date":{"date":"01.02.2027","hours":"10","minutes":"30"},"texts":[{"text":"x","source_id":0}],"attachments":[],"ids":"1001"}`
+	// Author-written expectation, derived from openapi.yaml POST /posts
+	// (publication_how_type, line 2020-2023): direct pages (selected_pages_ids)
+	// under when-type 2 is how_type 1; 2 would need a project_id. Not a
+	// recorded server exchange. Same literal as ops.goldenImportWhenType2Body.
+	const golden = `{"as_copy":1,"publication_when_type":2,"publication_how_type":1,"publication_where_type":1,"selected_pages_ids":[99],"schedules_ids":[],"publication_date":{"date":"01.02.2027","hours":"10","minutes":"30"},"texts":[{"text":"x","source_id":0}],"attachments":[],"ids":"1001"}`
 
 	srv, cap := importStubServer(t, map[int]string{1001: editBodyFor("x")})
 	c := newImportTestClient(t, srv)
 
 	var out, errOut strings.Builder
 	in := impIn(1001, nil, 2, 2, false)
+	in.PublicationHowType = nil // omitted: the op derives it from the target
 	in.SelectedPagesIDs = pids(99)
 	d, h, m := "01.02.2027", "10", "30"
 	in.PublishDate, in.PublishHours, in.PublishMinutes = &d, &h, &m
