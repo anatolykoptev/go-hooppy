@@ -3,6 +3,7 @@ package hooppy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -833,26 +834,238 @@ func TestBatchMovePosts_NonPositiveID_RefusesRequest(t *testing.T) {
 	}
 }
 
-// TestBatchMovePosts_SuccessFalse_IsError is the {"success":false} guard
-// (item A) for the batch path: a 2xx answering {"success":false} is a
-// failed move that used to exit 0 silently. BatchMovePosts MUST surface it
-// as an error.
-//
-// RED-on-revert: drop the !resp.Success guard and err is nil — the
-// assertion fails.
-func TestBatchMovePosts_SuccessFalse_IsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move" {
-			w.Write([]byte(`{"success":false}`))
-			return
+// moveGuardStub serves GET /posts/{id}/edit for any id as a schedule-driven
+// post, except that getStatus maps an id to the HTTP status its GET answers
+// instead, and getCalls/postCalls count the requests per kind. postResp is the
+// body POST /posts/batch/move answers.
+type moveGuardStub struct {
+	*httptest.Server
+	getStatus map[int]int
+	postResp  string
+	gets      []int
+	posts     int
+}
+
+func newMoveGuardStub(t *testing.T, postResp string) *moveGuardStub {
+	t.Helper()
+	st := &moveGuardStub{getStatus: map[int]int{}, postResp: postResp}
+	st.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move":
+			st.posts++
+			w.Write([]byte(st.postResp))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			id, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/posts/"), "/edit"))
+			st.gets = append(st.gets, id)
+			if code := st.getStatus[id]; code != 0 {
+				w.WriteHeader(code)
+				w.Write([]byte(`{"error":"no"}`))
+				return
+			}
+			w.Write([]byte(editBodyForID(scheduleDrivenEditBody, id)))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	t.Cleanup(st.Close)
+	return st
+}
+
+// TestBatchMovePosts_SuccessFalse_IsError is the success:false guard for the
+// batch path. The edit reads succeed (when_type=3), so the guard passes and
+// the POST IS reached; only then does the 2xx answer {"success":false}. Earlier
+// this test served 405 to every GET, so the when_type guard refused first and
+// the success branch was never executed.
+//
+// Two bodies reach two layers: an explicit {"success":false} is stopped by the
+// transport gate (client.checkSuccess) as a *SuccessFalseError; a 2xx without a
+// success key ({}) passes the gate and decodes to Success=false, which only the
+// !resp.Success check in BatchMovePosts catches.
+//
+// RED-on-revert: posts.go BatchMovePosts `if !resp.Success {` -> `if false {`
+// leaves err nil for the {} body — the assertion in the "no success key"
+// subtest fails. Removing checkSuccess from client.do fails the explicit
+// subtest.
+func TestBatchMovePosts_SuccessFalse_IsError(t *testing.T) {
+	for name, body := range map[string]string{
+		"explicit success:false": `{"success":false}`,
+		"no success key":         `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := newMoveGuardStub(t, body)
+			c := newTestClient(t, st.Server)
+
+			res, err := c.BatchMovePosts(context.Background(), []int{1, 2}, 55576)
+			if err == nil {
+				t.Fatalf("BatchMovePosts with a %s answer: expected an error, got %+v — a 2xx without success:true is a failed move, not a silent exit 0", name, res)
+			}
+			if st.posts != 1 {
+				t.Fatalf("POST /posts/batch/move reached %d times, want 1 — the test must get past the when_type guard to exercise the success check (err: %v)", st.posts, err)
+			}
+			if strings.Contains(err.Error(), "refusing the move") {
+				t.Fatalf("the when_type guard refused, not the success check: %v", err)
+			}
+			if len(st.gets) != 2 {
+				t.Errorf("GETs = %v, want only the 2 guard reads: no date recovery after a failed move", st.gets)
+			}
+		})
+	}
+}
+
+// TestBatchMovePosts_GuardReadFailure_FailsClosed pins the fail-closed arm of
+// the when_type guard: one unreadable edit state refuses the whole batch, the
+// error names that id, and nothing is moved. A transient 500 on one id is not
+// a stop signal (the loop goes on to the next id), so the third id is read.
+//
+// RED-on-revert: posts.go requireScheduleDriven, in `case err != nil:` replace
+// the body with `continue` (fail open) — the unreadable post is no longer
+// refused, the move POST is issued, and every assertion below fails.
+func TestBatchMovePosts_GuardReadFailure_FailsClosed(t *testing.T) {
+	st := newMoveGuardStub(t, `{"success":true}`)
+	st.getStatus[22] = http.StatusInternalServerError
+	c := newTestClient(t, st.Server)
+
+	res, err := c.BatchMovePosts(context.Background(), []int{21, 22, 23}, 55576)
+	if err == nil {
+		t.Fatalf("BatchMovePosts with an unreadable middle post: expected a refusal, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), "post 22") {
+		t.Errorf("the error does not name the unreadable id 22: %v", err)
+	}
+	if strings.Contains(err.Error(), "post 21") || strings.Contains(err.Error(), "post 23") {
+		t.Errorf("the error names a readable post: %v", err)
+	}
+	if st.posts != 0 {
+		t.Errorf("POST /posts/batch/move reached %d times, want 0 — the guard must fail closed before the move", st.posts)
+	}
+	if !reflect.DeepEqual(st.gets, []int{21, 22, 23}) {
+		t.Errorf("GETs = %v, want [21 22 23] — a single 500 must not stop the guard, so no other id goes unchecked", st.gets)
+	}
+}
+
+// TestBatchMovePosts_GuardStopsOnRateLimit: the first guard read answers 429.
+// Every further read would be refused the same way, so the guard stops, refuses
+// the batch with that one error naming how many ids were not checked, and no
+// POST is sent. The 429 stays reachable with errors.As.
+//
+// RED-on-revert: posts.go requireScheduleDriven, remove the
+// `if halt, _ := stop.Observe(err); halt { ... return ... }` early return —
+// the loop reads all 3 ids and len(gets) is 3, not 1.
+func TestBatchMovePosts_GuardStopsOnRateLimit(t *testing.T) {
+	st := newMoveGuardStub(t, `{"success":true}`)
+	st.getStatus[31] = http.StatusTooManyRequests
+	c := newTestClient(t, st.Server)
+
+	_, err := c.BatchMovePosts(context.Background(), []int{31, 32, 33}, 55576)
+	if err == nil {
+		t.Fatal("BatchMovePosts with a 429 on the first read: expected a refusal")
+	}
+	if len(st.gets) != 1 {
+		t.Errorf("GETs = %v, want exactly one — a 429 must stop the guard", st.gets)
+	}
+	if st.posts != 0 {
+		t.Errorf("POST reached %d times, want 0", st.posts)
+	}
+	if !IsRateLimited(err) {
+		t.Errorf("the 429 is not reachable from the error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "2 of 3 ids were not checked") {
+		t.Errorf("the error does not say how many ids were not checked: %v", err)
+	}
+}
+
+// TestBatchMovePosts_GuardStopsAfterConsecutiveServerErrors: three 5xx in a
+// row stop the guard (the server is down); the 4th id is never read.
+//
+// RED-on-revert: bulk_stop.go BulkStop.Observe, make the 5xx branch never
+// stop — all 4 ids are read.
+func TestBatchMovePosts_GuardStopsAfterConsecutiveServerErrors(t *testing.T) {
+	st := newMoveGuardStub(t, `{"success":true}`)
+	for _, id := range []int{41, 42, 43} {
+		st.getStatus[id] = http.StatusServiceUnavailable
+	}
+	c := newTestClient(t, st.Server)
+
+	_, err := c.BatchMovePosts(context.Background(), []int{41, 42, 43, 44}, 55576)
+	if err == nil || st.posts != 0 {
+		t.Fatalf("err = %v posts = %d, want a refusal and no POST", err, st.posts)
+	}
+	if !reflect.DeepEqual(st.gets, []int{41, 42, 43}) {
+		t.Errorf("GETs = %v, want [41 42 43]", st.gets)
+	}
+	if !strings.Contains(err.Error(), "1 of 4 ids were not checked") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+// TestBatchMovePosts_GuardStopsOnCancelledContext: a cancelled context ends the
+// guard at the first read.
+func TestBatchMovePosts_GuardStopsOnCancelledContext(t *testing.T) {
+	st := newMoveGuardStub(t, `{"success":true}`)
+	c := newTestClient(t, st.Server)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := c.BatchMovePosts(ctx, []int{51, 52, 53}, 55576)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if st.posts != 0 || len(st.gets) != 0 {
+		t.Errorf("requests reached the server: gets=%v posts=%d", st.gets, st.posts)
+	}
+	if !strings.Contains(err.Error(), "2 of 3 ids were not checked") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+// TestBatchMovePosts_DateRecoveryStopsOnRateLimit: after a committed move the
+// date reads stop at the first 429; the move is NOT reported as failed, and the
+// ids left unread say so in SlotLookupError.
+//
+// RED-on-revert: posts.go BatchMovePosts date-recovery loop, remove the
+// `if stopped != "" { ... continue }` block — all 3 post-move GETs are sent.
+func TestBatchMovePosts_DateRecoveryStopsOnRateLimit(t *testing.T) {
+	var gets, posted int
+	var postMoveGets []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move":
+			posted++
+			w.Write([]byte(`{"success":true}`))
+		case r.Method == http.MethodGet:
+			gets++
+			id, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/posts/"), "/edit"))
+			if posted == 0 {
+				w.Write([]byte(editBodyForID(scheduleDrivenEditBody, id)))
+				return
+			}
+			postMoveGets = append(postMoveGets, id)
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"slow down"}`))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	if _, err := c.BatchMovePosts(context.Background(), []int{1, 2}, 55576); err == nil {
-		t.Fatal("BatchMovePosts with {\"success\":false}: expected an error, got nil — a 2xx with success=false is a failed move, not a silent exit 0")
+	res, err := c.BatchMovePosts(context.Background(), []int{61, 62, 63}, 55576)
+	if err != nil {
+		t.Fatalf("BatchMovePosts: %v — the move committed; unreadable dates are reporting, not failure", err)
+	}
+	if !reflect.DeepEqual(postMoveGets, []int{61}) {
+		t.Errorf("post-move GETs = %v, want [61] — a 429 must stop the date recovery", postMoveGets)
+	}
+	if len(res.Moved) != 3 {
+		t.Fatalf("len(Moved) = %d, want 3", len(res.Moved))
+	}
+	for _, m := range res.Moved {
+		if m.SlotLookupError == "" {
+			t.Errorf("post %d: SlotLookupError is empty, want the unread-date reason", m.ID)
+		}
+	}
+	if !strings.Contains(res.Moved[2].SlotLookupError, "not attempted") {
+		t.Errorf("post 63: SlotLookupError = %q, want 'not attempted'", res.Moved[2].SlotLookupError)
 	}
 }
 

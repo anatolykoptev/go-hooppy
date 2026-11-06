@@ -11,7 +11,7 @@ import (
 // single id may also be given as the positional <post-id> (mutually
 // exclusive with --ids).
 type MovePostsInput struct {
-	IDs          IDList `json:"ids" jsonschema:"Post IDs to move: an integer array [10,11] or a comma-separated string \"10,11\". 1 to 1000 positive ids. Every post must be schedule-driven (publication_when_type=3); one that is not refuses the whole batch before anything moves." flag:"ids" flagusage:"comma-separated post IDs to move (batch; mutually exclusive with the positional post-id)"`
+	IDs          IDList `json:"ids" jsonschema:"Post IDs to move: an integer array [10,11] or a comma-separated string \"10,11\". 1 to 1000 positive ids. Every post must be schedule-driven (publication_when_type=3); one that is not refuses the whole batch before anything moves. Cost: N ids send 2N GET requests (a when_type read before the move, a date read after it) plus one POST." flag:"ids" flagusage:"comma-separated post IDs to move (batch; mutually exclusive with the positional post-id). N ids cost 2N GET requests (a when_type check before the move, a date read after it) plus one POST"`
 	ToScheduleID int    `json:"to_schedule_id" jsonschema:"Target schedule ID to move the posts to (REQUIRED, positive). Each post is re-slotted to the TAIL of the target queue; the server assigns each post's new publication_date, which is returned per post in the result." flag:"to-schedule" flagusage:"target schedule ID (required)"`
 }
 

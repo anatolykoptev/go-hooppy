@@ -215,6 +215,121 @@ func TestDeletePosts_ServerAnswerKinds(t *testing.T) {
 	})
 }
 
+// deletes returns the ids of the DELETE /posts/{id} requests the stub saw.
+func (a *postsAPI) deletes() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []string
+	for _, r := range a.requests {
+		if strings.HasPrefix(r, "DELETE /posts/") {
+			out = append(out, strings.TrimPrefix(r, "DELETE /posts/"))
+		}
+	}
+	return out
+}
+
+// TestDeletePosts_FallbackStopsAfterConsecutiveServerErrors: once the batch is
+// refused, three 5xx in a row end the one-by-one run; the ids after them are
+// marked "not attempted" and no DELETE is sent for them.
+//
+// RED-on-revert: bulk_stop.go BulkStop.Observe, make the 5xx branch never stop
+// — all six ids are sent (deletes() has 6 entries) and nothing is "not
+// attempted".
+func TestDeletePosts_FallbackStopsAfterConsecutiveServerErrors(t *testing.T) {
+	api := newPostsAPI(t)
+	api.batchStatus, api.batchResp = 500, `{"error":"boom"}`
+	for _, id := range []string{"5", "6", "7"} {
+		api.failSingle[id] = true
+	}
+	res, err := DeletePosts(context.Background(), newTestClient(t, api.URL), DeletePostsInput{IDs: IDList{5, 6, 7, 8, 9, 10}})
+	if err == nil || res == nil {
+		t.Fatalf("res = %+v err = %v, want an error with the record", res, err)
+	}
+	if got := api.deletes(); !reflect.DeepEqual(got, []string{"5", "6", "7"}) {
+		t.Fatalf("DELETEs = %v, want [5 6 7] — the run must stop after 3 consecutive 5xx", got)
+	}
+	if len(res.Failed) != 6 || len(res.Deleted) != 0 {
+		t.Fatalf("res = %+v, want 6 failed", res)
+	}
+	for _, f := range res.Failed[3:] {
+		if !strings.Contains(f.Error, "not attempted") || !strings.Contains(f.Error, "consecutive server errors") {
+			t.Errorf("id %d: %q, want 'not attempted' with the reason", f.ID, f.Error)
+		}
+	}
+}
+
+// TestDeletePosts_FallbackServerErrorsMustBeConsecutive: 5xx separated by a
+// success do not add up — every id is attempted.
+//
+// RED-on-revert: bulk_stop.go BulkStop.Observe, drop the `b.serverErrors = 0`
+// in the nil branch — the third 5xx (id 9) trips the stop and 10 is not sent.
+func TestDeletePosts_FallbackServerErrorsMustBeConsecutive(t *testing.T) {
+	api := newPostsAPI(t)
+	api.batchStatus, api.batchResp = 500, `{"error":"boom"}`
+	for _, id := range []string{"5", "7", "9"} {
+		api.failSingle[id] = true
+	}
+	res, _ := DeletePosts(context.Background(), newTestClient(t, api.URL), DeletePostsInput{IDs: IDList{5, 6, 7, 8, 9, 10}})
+	if got := api.deletes(); len(got) != 6 {
+		t.Fatalf("DELETEs = %v, want all 6 attempted", got)
+	}
+	if !reflect.DeepEqual(res.Deleted, []int{6, 8, 10}) {
+		t.Errorf("Deleted = %v, want [6 8 10]", res.Deleted)
+	}
+}
+
+// TestDeletePosts_FallbackNotFoundIsAlreadyGone: after a refused batch an id the
+// server no longer knows (404) was most likely removed by that batch: it is
+// AlreadyGone and counts as success. The single-id form has no batch before it,
+// so there a 404 stays a failure.
+//
+// RED-on-revert: posts_delete.go, remove the `case hooppy.IsNotFound(err):`
+// arm — id 6 lands in Failed, Success is false and the error is non-nil.
+func TestDeletePosts_FallbackNotFoundIsAlreadyGone(t *testing.T) {
+	ctx := context.Background()
+	t.Run("batch fallback", func(t *testing.T) {
+		api := newPostsAPI(t)
+		api.batchStatus, api.batchResp = 500, `{"error":"boom"}`
+		api.singleCode["6"] = http.StatusNotFound
+		res, err := DeletePosts(ctx, newTestClient(t, api.URL), DeletePostsInput{IDs: IDList{5, 6, 7}})
+		if err != nil || !res.Success {
+			t.Fatalf("res = %+v err = %v, want success: a 404 after a refused batch is already gone", res, err)
+		}
+		if !reflect.DeepEqual(res.Deleted, []int{5, 7}) || !reflect.DeepEqual(res.AlreadyGone, []int{6}) || len(res.Failed) != 0 {
+			t.Errorf("res = %+v, want deleted [5 7], already_gone [6]", res)
+		}
+	})
+	t.Run("a real failure beside it is still partial", func(t *testing.T) {
+		api := newPostsAPI(t)
+		api.batchStatus, api.batchResp = 500, `{"error":"boom"}`
+		api.singleCode["6"] = http.StatusNotFound
+		api.failSingle["7"] = true
+		res, err := DeletePosts(ctx, newTestClient(t, api.URL), DeletePostsInput{IDs: IDList{5, 6, 7}})
+		var pde *PartialDeleteError
+		if !errors.As(err, &pde) || !reflect.DeepEqual(res.AlreadyGone, []int{6}) || len(res.Failed) != 1 || res.Failed[0].ID != 7 {
+			t.Fatalf("res = %+v err = %v", res, err)
+		}
+	})
+	t.Run("every id gone is not 'every post failed'", func(t *testing.T) {
+		api := newPostsAPI(t)
+		api.batchStatus, api.batchResp = 500, `{"error":"boom"}`
+		api.singleCode["5"], api.singleCode["6"] = http.StatusNotFound, http.StatusNotFound
+		res, err := DeletePosts(ctx, newTestClient(t, api.URL), DeletePostsInput{IDs: IDList{5, 6}})
+		if err != nil || !res.Success || len(res.AlreadyGone) != 2 || len(res.Deleted) != 0 {
+			t.Fatalf("res = %+v err = %v", res, err)
+		}
+	})
+	t.Run("single id: a 404 stays a failure", func(t *testing.T) {
+		api := newPostsAPI(t)
+		api.singleCode["9"] = http.StatusNotFound
+		res, err := DeletePosts(ctx, newTestClient(t, api.URL), DeletePostsInput{IDs: IDList{9}})
+		var ae *hooppy.APIError
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound || res.Success || len(res.Failed) != 1 || len(res.AlreadyGone) != 0 {
+			t.Fatalf("res = %+v err = %v, want the 404 as a failure", res, err)
+		}
+	})
+}
+
 // TestMovePosts_RefusalsAreValidationErrorsBeforeAnyRequest: ids and target
 // are checked locally, with zero requests.
 func TestMovePosts_RefusalsAreValidationErrorsBeforeAnyRequest(t *testing.T) {

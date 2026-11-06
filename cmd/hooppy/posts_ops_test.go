@@ -208,6 +208,39 @@ func TestPostsDelete_EveryIDFailed_Exits1(t *testing.T) {
 	}
 }
 
+// TestPostsDelete_AlreadyGoneAfterRefusedBatchExits0: the server refuses the
+// batch but removed post 6 before it errored, so the one-by-one run gets a 404
+// for it. That is success (exit 0) with the id under already_gone. The same 404
+// on the single-id form is a failure (exit 1) and still prints the record.
+//
+// Mutation: ops/posts_delete.go, remove the `case hooppy.IsNotFound(err):` arm
+// — the batch case exits 2 instead of 0.
+func TestPostsDelete_AlreadyGoneAfterRefusedBatchExits0(t *testing.T) {
+	st := newDeleteStub(t, 500, `{"error":"boom"}`, map[string]int{"6": 404})
+	defer st.Close()
+	in, _ := deleteCmdInput(t, "--ids", "5,6,7")
+	var out, errOut bytes.Buffer
+	if code := runDeletePosts(context.Background(), newCLITestClient(t, st.Server), &out, &errOut, in); code != 0 {
+		t.Fatalf("exit = %d, want 0; stdout: %s stderr: %s", code, out.String(), errOut.String())
+	}
+	var res ops.DeletePostsResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil || !res.Success || !reflect.DeepEqual(res.Deleted, []int{5, 7}) || !reflect.DeepEqual(res.AlreadyGone, []int{6}) {
+		t.Errorf("stdout = %s (err %v), want success, deleted [5 7], already_gone [6]", out.String(), err)
+	}
+
+	st2 := newDeleteStub(t, 200, `{"success":true}`, map[string]int{"9": 404})
+	defer st2.Close()
+	in, _ = deleteCmdInput(t, "9")
+	out.Reset()
+	errOut.Reset()
+	if code := runDeletePosts(context.Background(), newCLITestClient(t, st2.Server), &out, &errOut, in); code != 1 {
+		t.Fatalf("single-id 404 exit = %d, want 1", code)
+	}
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil || len(res.Failed) != 1 || res.Failed[0].ID != 9 {
+		t.Errorf("single-id failure must print the failed record on stdout: %q (err %v)", out.String(), err)
+	}
+}
+
 // TestPostsEdit_F4_PrintsTheRecordedEditState is F4's CLI half: `posts edit`
 // prints the post's editable state as JSON, and every key it prints carries
 // the value of the recorded live GET /posts/{id}/edit response

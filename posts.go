@@ -537,8 +537,11 @@ const MaxBatchMoveIDs = 1000
 // post's new publication_date is recovered from a post-move GET /posts/{id}/edit
 // (one read per id). A read failure populates that entry's SlotLookupError and
 // leaves its PublicationDate nil — the move succeeded for that post; the date
-// is reporting. A per-post read failure does NOT abort the remaining reads. A
-// recovered date of 01.01.1970 or any past date populates that entry's Warning
+// is reporting. A per-post read failure does NOT abort the remaining reads,
+// except that the loop stops (BulkStop) at the first auth, rate-limit, cancelled
+// -context or no-answer failure and after MaxConsecutiveServerErrors 5xx in a
+// row; the ids left unread then carry a SlotLookupError saying "not attempted".
+// A recovered date of 01.01.1970 or any past date populates that entry's Warning
 // — the signature of a move into a stopped schedule (which parks posts at the
 // epoch and would otherwise exit silently).
 //
@@ -560,9 +563,13 @@ const MaxBatchMoveIDs = 1000
 // every id is read first (GET /posts/{id}/edit) and the whole batch is refused,
 // naming every offender, BEFORE the move when any post is not when_type=3, when
 // its edit response carries another id, or when its edit cannot be read (the
-// guard fails closed). Cost: one extra read per id on top of the post-move date
-// read. The guard checks when_type only: a when_type=3 post that has already
-// published is still re-armed by the move.
+// guard fails closed). Cost: a batch of N ids sends 2N GET requests (one
+// when_type read before the move, one date read after it) plus one POST. The
+// guard stops at the first auth, rate-limit, cancelled-context or no-answer
+// failure, or after MaxConsecutiveServerErrors 5xx in a row, and refuses the
+// batch with that one error naming how many ids were not checked. The guard
+// checks when_type only: a when_type=3 post that has already published is still
+// re-armed by the move.
 //
 // Retry: POST /posts/batch/move is idempotent (moving to the same schedule
 // twice is the same end state), but doPOST has no retryable parameter and
@@ -612,8 +619,21 @@ func (c *Client) BatchMovePosts(ctx context.Context, ids []int, toScheduleID int
 	// NOT fatal — the move succeeded for that post; record SlotLookupError
 	// and continue so a single unreadable post does not hide the rest.
 	moved := make([]MovedPost, 0, len(ids))
+	var stop BulkStop
+	var stopped string // why the remaining ids are not read, "" while going on
 	for _, id := range ids {
+		if stopped != "" {
+			moved = append(moved, MovedPost{
+				ID:              id,
+				ScheduleID:      toScheduleID,
+				SlotLookupError: fmt.Sprintf("post-move GetPostEdit(%d) not attempted: %s — move succeeded, publication_date not recovered", id, stopped),
+			})
+			continue
+		}
 		after, err := c.GetPostEdit(ctx, id)
+		if halt, why := stop.Observe(err); halt {
+			stopped = why
+		}
 		if err != nil {
 			moved = append(moved, MovedPost{
 				ID:              id,
@@ -638,11 +658,24 @@ func (c *Client) BatchMovePosts(ctx context.Context, ids []int, toScheduleID int
 // requireScheduleDriven is BatchMovePosts' when_type guard: it reads every id's
 // edit state and returns one error naming every post that cannot be moved
 // (not publication_when_type=3, a response for another post, or an unreadable
-// edit), or nil when all are schedule-driven. It issues only GETs.
+// edit), or nil when all are schedule-driven. It issues only GETs, and stops
+// reading at the first failure that would repeat on every id (BulkStop), so a
+// 401, a 429 or a cancelled context costs one request, not N.
 func (c *Client) requireScheduleDriven(ctx context.Context, ids []int) error {
 	var refused []string
-	for _, id := range ids {
+	var stop BulkStop
+	for i, id := range ids {
 		edit, err := c.GetPostEdit(ctx, id)
+		if halt, _ := stop.Observe(err); halt {
+			// Auth, rate limit, no answer, a cancelled context or a server that
+			// keeps failing: every further read would repeat it. Refuse the
+			// batch with this one error instead of sending the rest.
+			var already string
+			if len(refused) > 0 {
+				already = fmt.Sprintf(" (already refused: %s)", strings.Join(refused, "; "))
+			}
+			return fmt.Errorf("hooppy: BatchMovePosts: refusing the move, nothing was moved — the when_type guard stopped at post %d, whose edit state could not be read, and %d of %d ids were not checked: %w%s", id, len(ids)-i-1, len(ids), err, already)
+		}
 		switch {
 		case err != nil:
 			refused = append(refused, fmt.Sprintf("post %d: edit state could not be read (%v) — the when_type guard fails closed", id, err))

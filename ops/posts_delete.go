@@ -2,9 +2,7 @@ package ops
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/anatolykoptev/go-hooppy"
@@ -26,14 +24,18 @@ type DeleteFailure struct {
 }
 
 // DeletePostsResult is the per-id outcome of DeletePosts. Success is true
-// only when every id was deleted; Deleted and Failed partition the input.
-// Note is set when the batch request itself was refused and the ids were
-// therefore deleted one by one.
+// when no id failed: every id is either Deleted or AlreadyGone. Deleted,
+// AlreadyGone and Failed partition the input. AlreadyGone lists ids the
+// server answered 404 for during the one-by-one run that follows a refused
+// batch, i.e. most likely removed by that batch before it errored; it counts
+// as success. Note is set when the batch request itself was refused and the
+// ids were therefore deleted one by one.
 type DeletePostsResult struct {
-	Success bool            `json:"success"`
-	Deleted []int           `json:"deleted"`
-	Failed  []DeleteFailure `json:"failed,omitempty"`
-	Note    string          `json:"note,omitempty"`
+	Success     bool            `json:"success"`
+	Deleted     []int           `json:"deleted"`
+	AlreadyGone []int           `json:"already_gone,omitempty"`
+	Failed      []DeleteFailure `json:"failed,omitempty"`
+	Note        string          `json:"note,omitempty"`
 }
 
 // PartialDeleteError is returned by DeletePosts together with a populated
@@ -48,7 +50,11 @@ func (e *PartialDeleteError) Error() string {
 	for _, f := range e.Result.Failed {
 		parts = append(parts, fmt.Sprintf("%d: %s", f.ID, f.Error))
 	}
-	return fmt.Sprintf("hooppy: DeletePosts: partial: %d deleted %v, %d failed (%s)", len(e.Result.Deleted), e.Result.Deleted, len(e.Result.Failed), strings.Join(parts, "; "))
+	gone := ""
+	if len(e.Result.AlreadyGone) > 0 {
+		gone = fmt.Sprintf(", %d already gone %v", len(e.Result.AlreadyGone), e.Result.AlreadyGone)
+	}
+	return fmt.Sprintf("hooppy: DeletePosts: partial: %d deleted %v%s, %d failed (%s)", len(e.Result.Deleted), e.Result.Deleted, gone, len(e.Result.Failed), strings.Join(parts, "; "))
 }
 
 // DeletePosts is `posts delete` / hooppy_batch_delete_posts. It refuses an
@@ -62,8 +68,14 @@ func (e *PartialDeleteError) Error() string {
 // deleted. When the server refuses the batch (an HTTP error other than
 // 401/403/429, or success:false) the op cannot know which ids, if any, were
 // deleted, so it deletes them one by one with DELETE /posts/{id} and reports
-// each; an id already gone after a half-applied batch then shows up as failed
-// with the server's own answer. A transport error (no server answer) is
+// each. In that run a 404 means the id is already gone (a half-applied batch
+// removed it): it is listed in AlreadyGone and counts as success. A 404 on the
+// single-id form (no batch came first) is NOT read that way: nothing else
+// could have removed the post, so it stays a failure with the server's answer.
+// The one-by-one run stops, marking the rest "not attempted", at the first
+// failure that would repeat on every id (hooppy.BulkStop: 401, 403, 429, no
+// answer, a cancelled context) and after hooppy.MaxConsecutiveServerErrors 5xx
+// in a row. A transport error on the batch request (no server answer) is
 // returned as is: the outcome of the batch is unknown and nothing is retried
 // per id.
 func DeletePosts(ctx context.Context, c *hooppy.Client, in DeletePostsInput) (*DeletePostsResult, error) {
@@ -85,7 +97,7 @@ func DeletePosts(ctx context.Context, c *hooppy.Client, in DeletePostsInput) (*D
 		res.Success, res.Deleted = true, append(res.Deleted, ids...)
 		return res, nil
 	}
-	if err != nil && !serverRefused(err) {
+	if err != nil && !hooppy.IsServerAnswer(err) {
 		return nil, fmt.Errorf("hooppy: DeletePosts: the batch request got no server answer (%w) — which of the %d posts were deleted is unknown; list them before retrying", err, len(ids))
 	}
 	why := "the server answered without success:true"
@@ -93,49 +105,35 @@ func DeletePosts(ctx context.Context, c *hooppy.Client, in DeletePostsInput) (*D
 		why = err.Error()
 	}
 	res.Note = "the batch request was refused (" + why + "); the ids were deleted one by one"
-	var stop string // why the remaining ids are not attempted, "" while going on
+	var stop hooppy.BulkStop
+	var stopped string // why the remaining ids are not attempted, "" while going on
 	for _, id := range ids {
-		if stop == "" && ctx.Err() != nil {
-			stop = ctx.Err().Error()
+		if stopped == "" && ctx.Err() != nil {
+			stopped = ctx.Err().Error()
 		}
-		if stop != "" {
-			res.Failed = append(res.Failed, DeleteFailure{ID: id, Error: "not attempted: " + stop})
+		if stopped != "" {
+			res.Failed = append(res.Failed, DeleteFailure{ID: id, Error: "not attempted: " + stopped})
 			continue
 		}
-		if _, err := c.DeletePost(ctx, id); err != nil {
+		_, err := c.DeletePost(ctx, id)
+		if halt, why := stop.Observe(err); halt {
+			stopped = why
+		}
+		switch {
+		case err == nil:
+			res.Deleted = append(res.Deleted, id)
+		case hooppy.IsNotFound(err):
+			res.AlreadyGone = append(res.AlreadyGone, id)
+		default:
 			res.Failed = append(res.Failed, DeleteFailure{ID: id, Error: err.Error()})
-			if !serverRefused(err) { // auth, rate limit or no answer: every further id would repeat it
-				stop = "stopped after " + err.Error()
-			}
-			continue
 		}
-		res.Deleted = append(res.Deleted, id)
 	}
 	switch {
 	case len(res.Failed) == 0:
 		res.Success = true
 		return res, nil
-	case len(res.Deleted) == 0:
+	case len(res.Failed) == len(ids):
 		return res, fmt.Errorf("hooppy: DeletePosts: every post failed (%d/%d); first: post %d: %s", len(res.Failed), len(ids), res.Failed[0].ID, res.Failed[0].Error)
 	}
 	return res, &PartialDeleteError{Result: res}
-}
-
-// serverRefused reports whether err is the server's own answer to the batch
-// request (so per-id deletes can tell what happened), not a transport failure
-// and not an auth or rate-limit refusal that would repeat on every id.
-func serverRefused(err error) bool {
-	var sf *hooppy.SuccessFalseError
-	if errors.As(err, &sf) {
-		return true
-	}
-	var ae *hooppy.APIError
-	if !errors.As(err, &ae) {
-		return false
-	}
-	switch ae.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
-		return false
-	}
-	return true
 }

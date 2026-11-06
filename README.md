@@ -142,7 +142,8 @@ hooppy posts delete --ids 101,102,103
 hooppy posts edit <post-id>
 
 # Move posts to another schedule (only schedule-driven posts; one that is not
-# refuses the whole batch before anything moves)
+# refuses the whole batch before anything moves; N ids cost 2N GET requests
+# plus one POST: a when_type check before the move and a date read after it)
 hooppy posts move <post-id> --to-schedule <schedule-id>
 hooppy posts move --ids 101,102 --to-schedule <schedule-id>
 
