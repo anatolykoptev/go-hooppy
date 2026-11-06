@@ -310,13 +310,14 @@ func TestDeletePosts_FallbackNotFoundIsAlreadyGone(t *testing.T) {
 			t.Fatalf("res = %+v err = %v", res, err)
 		}
 	})
-	t.Run("every id gone is not 'every post failed'", func(t *testing.T) {
+	t.Run("every id gone proves nothing: an error, the record kept", func(t *testing.T) {
 		api := newPostsAPI(t)
 		api.batchStatus, api.batchResp = 500, `{"error":"boom"}`
 		api.singleCode["5"], api.singleCode["6"] = http.StatusNotFound, http.StatusNotFound
 		res, err := DeletePosts(ctx, newTestClient(t, api.URL), DeletePostsInput{IDs: IDList{5, 6}})
-		if err != nil || !res.Success || len(res.AlreadyGone) != 2 || len(res.Deleted) != 0 {
-			t.Fatalf("res = %+v err = %v", res, err)
+		var pde *PartialDeleteError
+		if err == nil || errors.As(err, &pde) || res == nil || res.Success || len(res.Deleted) != 0 || !reflect.DeepEqual(res.AlreadyGone, []int{5, 6}) || len(res.Failed) != 0 {
+			t.Fatalf("res = %+v err = %v, want a plain error, not success, with already_gone [5 6] kept", res, err)
 		}
 	})
 	t.Run("single id: a 404 stays a failure", func(t *testing.T) {
@@ -326,6 +327,63 @@ func TestDeletePosts_FallbackNotFoundIsAlreadyGone(t *testing.T) {
 		var ae *hooppy.APIError
 		if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound || res.Success || len(res.Failed) != 1 || len(res.AlreadyGone) != 0 {
 			t.Fatalf("res = %+v err = %v, want the 404 as a failure", res, err)
+		}
+	})
+}
+
+// TestDeletePosts_BatchNotFoundIsTerminal (R6): a 404 on POST /posts/batch/delete
+// means the base URL, route or account is wrong — a half-applied batch shows
+// as a 5xx or success:false. It is an error after exactly one request: no
+// per-id DELETE, whose 404s would be misread as "already gone".
+//
+// RED-on-revert: ops/posts_delete.go, remove the `if hooppy.IsNotFound(err)`
+// branch after the transport check — the per-id run starts: DELETEs are sent
+// and requests != [POST /posts/batch/delete].
+func TestDeletePosts_BatchNotFoundIsTerminal(t *testing.T) {
+	api := newPostsAPI(t)
+	api.batchStatus, api.batchResp = http.StatusNotFound, `{"error":"no route"}`
+	res, err := DeletePosts(context.Background(), newTestClient(t, api.URL), DeletePostsInput{IDs: IDList{5, 6, 7}})
+	var ae *hooppy.APIError
+	if err == nil || !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound || (res != nil && res.Success) {
+		t.Fatalf("res = %+v err = %v, want a terminal 404 error", res, err)
+	}
+	if !reflect.DeepEqual(api.requests, []string{"POST /posts/batch/delete"}) {
+		t.Errorf("requests = %v, want exactly the one batch POST and no DELETE", api.requests)
+	}
+}
+
+// TestDeletePosts_AllNotFoundNeedsOneDeleted (R7, R8): after a refused batch,
+// 404s count as already_gone only when something in this run was really
+// deleted. R7: every DELETE answers 404 — not a success, the Note names a wrong
+// base URL or account, the per-id record stays. R8: one DELETE succeeds and
+// another answers 404 — the legitimate half-applied batch still succeeds.
+//
+// RED-on-revert (R7): ops/posts_delete.go, change `case len(res.Failed) == 0 &&
+// len(res.Deleted) > 0:` to `case len(res.Failed) == 0:` — the all-404 run is
+// Success with a nil error.
+func TestDeletePosts_AllNotFoundNeedsOneDeleted(t *testing.T) {
+	ctx := context.Background()
+	t.Run("R7 batch 500 then every DELETE 404 is not success", func(t *testing.T) {
+		api := newPostsAPI(t)
+		api.batchStatus, api.batchResp = 500, `{"error":"boom"}`
+		for _, id := range []string{"5", "6", "7"} {
+			api.singleCode[id] = http.StatusNotFound
+		}
+		res, err := DeletePosts(ctx, newTestClient(t, api.URL), DeletePostsInput{IDs: IDList{5, 6, 7}})
+		if err == nil || res == nil || res.Success {
+			t.Fatalf("res = %+v err = %v, want not success and an error", res, err)
+		}
+		if !strings.Contains(res.Note, "base URL or account") || !reflect.DeepEqual(res.AlreadyGone, []int{5, 6, 7}) || len(res.Deleted) != 0 {
+			t.Errorf("res = %+v, want the Note naming a wrong base URL or account and already_gone [5 6 7] kept", res)
+		}
+	})
+	t.Run("R8 batch 500, DELETE 5 ok, DELETE 6 404 is success", func(t *testing.T) {
+		api := newPostsAPI(t)
+		api.batchStatus, api.batchResp = 500, `{"error":"boom"}`
+		api.singleCode["6"] = http.StatusNotFound
+		res, err := DeletePosts(ctx, newTestClient(t, api.URL), DeletePostsInput{IDs: IDList{5, 6}})
+		if err != nil || !res.Success || !reflect.DeepEqual(res.Deleted, []int{5}) || !reflect.DeepEqual(res.AlreadyGone, []int{6}) || len(res.Failed) != 0 {
+			t.Fatalf("res = %+v err = %v, want success, deleted [5], already_gone [6]", res, err)
 		}
 	})
 }

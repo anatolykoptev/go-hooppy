@@ -24,12 +24,15 @@ type DeleteFailure struct {
 }
 
 // DeletePostsResult is the per-id outcome of DeletePosts. Success is true
-// when no id failed: every id is either Deleted or AlreadyGone. Deleted,
+// when no id failed and at least one id was Deleted in this run. Deleted,
 // AlreadyGone and Failed partition the input. AlreadyGone lists ids the
 // server answered 404 for during the one-by-one run that follows a refused
 // batch, i.e. most likely removed by that batch before it errored; it counts
-// as success. Note is set when the batch request itself was refused and the
-// ids were therefore deleted one by one.
+// as success only beside at least one Deleted id, because a run in which every
+// id answered 404 proves nothing (a wrong base URL or account gives the same
+// answer): that run is an error and keeps this record. Note is set when the
+// batch request itself was refused and the ids were therefore deleted one by
+// one.
 type DeletePostsResult struct {
 	Success     bool            `json:"success"`
 	Deleted     []int           `json:"deleted"`
@@ -69,7 +72,10 @@ func (e *PartialDeleteError) Error() string {
 // 401/403/429, or success:false) the op cannot know which ids, if any, were
 // deleted, so it deletes them one by one with DELETE /posts/{id} and reports
 // each. In that run a 404 means the id is already gone (a half-applied batch
-// removed it): it is listed in AlreadyGone and counts as success. A 404 on the
+// removed it): it is listed in AlreadyGone and counts as success, provided at
+// least one id of the run was deleted; if none was, the run is an error with the
+// record kept. A 404 on the batch POST itself is terminal: it means the
+// endpoint, base URL or route is wrong, so there is no per-id run. A 404 on the
 // single-id form (no batch came first) is NOT read that way: nothing else
 // could have removed the post, so it stays a failure with the server's answer.
 // The one-by-one run stops, marking the rest "not attempted", at the first
@@ -100,6 +106,12 @@ func DeletePosts(ctx context.Context, c *hooppy.Client, in DeletePostsInput) (*D
 	if err != nil && !hooppy.IsServerAnswer(err) {
 		return nil, fmt.Errorf("hooppy: DeletePosts: the batch request got no server answer (%w) — which of the %d posts were deleted is unknown; list them before retrying", err, len(ids))
 	}
+	if hooppy.IsNotFound(err) {
+		// A 404 on the batch POST itself says the endpoint, base URL or route is
+		// wrong, not that ids are gone: a half-applied batch shows as a 5xx or
+		// success:false. Going on per id would only repeat the misconfiguration.
+		return nil, fmt.Errorf("hooppy: DeletePosts: the batch endpoint answered 404 (%w) — the base URL, route or account is wrong; nothing was sent per id", err)
+	}
 	why := "the server answered without success:true"
 	if err != nil {
 		why = err.Error()
@@ -128,10 +140,18 @@ func DeletePosts(ctx context.Context, c *hooppy.Client, in DeletePostsInput) (*D
 			res.Failed = append(res.Failed, DeleteFailure{ID: id, Error: err.Error()})
 		}
 	}
+	if len(res.Deleted) == 0 && len(res.AlreadyGone) > 0 {
+		res.Note += "; no id was deleted in this run and the server answered 404 for " + fmt.Sprint(len(res.AlreadyGone)) +
+			" of them: the posts may be already gone, but a wrong base URL or account gives the same answer — check where the client points before trusting this"
+	}
 	switch {
-	case len(res.Failed) == 0:
+	case len(res.Failed) == 0 && len(res.Deleted) > 0:
 		res.Success = true
 		return res, nil
+	case len(res.Failed) == 0:
+		// Every id answered 404 and none was deleted: no evidence this run did
+		// anything, so it is not a success. The per-id record stays in res.
+		return res, fmt.Errorf("hooppy: DeletePosts: nothing was deleted: all %d ids answered 404 (already_gone %v) — already deleted before, or the base URL or account is wrong", len(res.AlreadyGone), res.AlreadyGone)
 	case len(res.Failed) == len(ids):
 		return res, fmt.Errorf("hooppy: DeletePosts: every post failed (%d/%d); first: post %d: %s", len(res.Failed), len(ids), res.Failed[0].ID, res.Failed[0].Error)
 	}

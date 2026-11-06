@@ -396,7 +396,7 @@ func deletePostsResult(ctx context.Context, in ops.DeletePostsInput) (*mcp.CallT
 		if errors.As(err, &pde) {
 			return jsonResult(map[string]interface{}{"status": "partial", "result": res, "partial_error": pde.Error()})
 		}
-		if res != nil && len(res.Failed) > 0 {
+		if res != nil && (len(res.Failed) > 0 || len(res.AlreadyGone) > 0) {
 			if rec, mErr := json.MarshalIndent(res, "", "  "); mErr == nil {
 				return errResult(err.Error() + "\n" + string(rec))
 			}

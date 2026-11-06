@@ -241,6 +241,48 @@ func TestPostsDelete_AlreadyGoneAfterRefusedBatchExits0(t *testing.T) {
 	}
 }
 
+// TestPostsDelete_R6_BatchNotFoundExits1WithoutPerIDRun: the batch endpoint
+// answers 404 (wrong base URL or route): exit 1 after exactly one request, no
+// DELETE, nothing on stdout that reads as success.
+//
+// Mutation: ops/posts_delete.go, remove the `if hooppy.IsNotFound(err)` branch
+// after the transport check — DELETEs are sent and the run reports already_gone.
+func TestPostsDelete_R6_BatchNotFoundExits1WithoutPerIDRun(t *testing.T) {
+	st := newDeleteStub(t, 404, `{"error":"no route"}`, nil)
+	defer st.Close()
+	in, _ := deleteCmdInput(t, "--ids", "5,6,7")
+	var out, errOut bytes.Buffer
+	if code := runDeletePosts(context.Background(), newCLITestClient(t, st.Server), &out, &errOut, in); code != 1 {
+		t.Fatalf("exit = %d, want 1; stdout: %s stderr: %s", code, out.String(), errOut.String())
+	}
+	if !reflect.DeepEqual(st.requests, []string{"POST /posts/batch/delete"}) {
+		t.Errorf("requests = %v, want the single batch POST and no DELETE", st.requests)
+	}
+	if strings.Contains(out.String(), `"success": true`) {
+		t.Errorf("stdout must not read as success: %s", out.String())
+	}
+}
+
+// TestPostsDelete_R7_EveryIDNotFoundExits1KeepsRecord: the batch is refused (500)
+// and every DELETE answers 404 — nothing was deleted in this run, so exit 1, with
+// the per-id record (already_gone) and a Note naming the misconfiguration.
+//
+// Mutation: ops/posts_delete.go, change `case len(res.Failed) == 0 &&
+// len(res.Deleted) > 0:` to `case len(res.Failed) == 0:` — exit 0.
+func TestPostsDelete_R7_EveryIDNotFoundExits1KeepsRecord(t *testing.T) {
+	st := newDeleteStub(t, 500, `{"error":"boom"}`, map[string]int{"5": 404, "6": 404})
+	defer st.Close()
+	in, _ := deleteCmdInput(t, "--ids", "5,6")
+	var out, errOut bytes.Buffer
+	if code := runDeletePosts(context.Background(), newCLITestClient(t, st.Server), &out, &errOut, in); code != 1 {
+		t.Fatalf("exit = %d, want 1; stdout: %s stderr: %s", code, out.String(), errOut.String())
+	}
+	var res ops.DeletePostsResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil || res.Success || !reflect.DeepEqual(res.AlreadyGone, []int{5, 6}) || !strings.Contains(res.Note, "base URL or account") {
+		t.Errorf("stdout = %s (err %v), want not success, already_gone [5 6] and a Note naming base URL or account", out.String(), err)
+	}
+}
+
 // TestPostsEdit_F4_PrintsTheRecordedEditState is F4's CLI half: `posts edit`
 // prints the post's editable state as JSON, and every key it prints carries
 // the value of the recorded live GET /posts/{id}/edit response

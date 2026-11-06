@@ -32,13 +32,14 @@ type postsStub struct {
 		body   string
 	}
 	failDelete  map[string]bool
+	goneDelete  map[string]bool // DELETE /posts/{id} answers 404
 	whenTypes   map[int]int
 	editFixture []byte
 }
 
 func newPostsStub(t *testing.T) *postsStub {
 	t.Helper()
-	st := &postsStub{failDelete: map[string]bool{}, whenTypes: map[int]int{}}
+	st := &postsStub{failDelete: map[string]bool{}, goneDelete: map[string]bool{}, whenTypes: map[int]int{}}
 	st.batchDelete.status, st.batchDelete.body = 200, `{"success":true}`
 	st.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		st.mu.Lock()
@@ -53,6 +54,11 @@ func newPostsStub(t *testing.T) *postsStub {
 			w.Write([]byte(st.batchDelete.body))
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/posts/"):
 			id := strings.TrimPrefix(r.URL.Path, "/posts/")
+			if st.goneDelete[id] {
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(`{"error":"no post ` + id + `"}`))
+				return
+			}
 			if st.failDelete[id] {
 				w.WriteHeader(http.StatusInternalServerError)
 				w.Write([]byte(`{"error":"cannot delete post ` + id + `"}`))
@@ -203,6 +209,25 @@ func TestBatchDeleteTool_F2_PartialIsAStatusDiscriminatedResult(t *testing.T) {
 	}
 	if out.Result.Success || !reflect.DeepEqual(out.Result.Deleted, []int{5, 7}) || len(out.Result.Failed) != 1 || out.Result.Failed[0].ID != 6 || !strings.Contains(out.Result.Failed[0].Error, "cannot delete post 6") {
 		t.Errorf("result = %+v, want deleted [5 7] and failed [6: cannot delete post 6]", out.Result)
+	}
+}
+
+// TestBatchDeleteTool_R7_EveryIDNotFoundIsAToolErrorWithTheRecord: the batch is
+// refused (500) and every DELETE answers 404 — nothing was deleted in this run,
+// so it is a tool error that still carries the per-id record and the Note.
+//
+// Mutation: cmd/hooppy-mcp/main.go deletePostsResult, drop `|| len(res.AlreadyGone) > 0`
+// — the error text loses the record (no "already_gone").
+func TestBatchDeleteTool_R7_EveryIDNotFoundIsAToolErrorWithTheRecord(t *testing.T) {
+	st := newPostsStub(t)
+	defer st.Close()
+	st.batchDelete.status, st.batchDelete.body = 500, `{"error":"boom"}`
+	st.goneDelete["5"], st.goneDelete["6"] = true, true
+
+	res := callTool(t, "hooppy_batch_delete_posts", map[string]any{"ids": []int{5, 6}})
+	txt := toolResultText(res)
+	if !res.IsError || !strings.Contains(txt, `"already_gone"`) || !strings.Contains(txt, "base URL or account") {
+		t.Fatalf("IsError=%v %s, want a tool error carrying already_gone and the Note", res.IsError, txt)
 	}
 }
 

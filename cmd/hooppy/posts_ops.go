@@ -46,7 +46,7 @@ func runDeletePosts(ctx context.Context, c *hooppy.Client, out, errOut io.Writer
 		// Nothing was deleted, or one id failed: the per-id record still goes to
 		// stdout (the MCP tool carries it too) so the failing ids and their
 		// server errors are not lost. A refusal before any request has none.
-		if res != nil && len(res.Failed) > 0 {
+		if res != nil && (len(res.Failed) > 0 || len(res.AlreadyGone) > 0) {
 			if encErr := encodeJSON(out, res); encErr != nil {
 				fmt.Fprintf(errOut, "error encoding output: %v\n", encErr)
 			}
