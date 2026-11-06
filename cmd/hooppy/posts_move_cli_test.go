@@ -3,12 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/anatolykoptev/go-hooppy"
+	"github.com/anatolykoptev/go-hooppy/ops"
+	"github.com/spf13/cobra"
 )
 
 // newCLITestClient builds a hooppy.Client pointing at a httptest.Server,
@@ -22,165 +29,239 @@ func newCLITestClient(t *testing.T, srv *httptest.Server) *hooppy.Client {
 	return c
 }
 
-// scheduleDrivenEditBodyCLI is a GET /posts/{id}/edit fixture for a
-// schedule-driven post (when_type=3). The pre-move read recovers when_type
-// for the guard; the post-move read recovers the server-assigned date.
-const scheduleDrivenEditBodyCLI = `{"id":42,"publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":1,"texts":[{"text":"old","source_id":0}],"attachments":[],"selected_pages_by_source_ids":{},"all_pages_ids_by_source_ids":{},"schedule_id":7,"project_id":0}`
-
-// movedEditBodyCLI is the post-move read: schedule swapped to the target,
-// server-assigned publication_date 15.01.2027.
-const movedEditBodyCLI = `{"id":42,"publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":1,"texts":[{"text":"old","source_id":0}],"attachments":[],"selected_pages_by_source_ids":{},"all_pages_ids_by_source_ids":{},"schedule_id":55576,"project_id":0,"publication_date":{"date":"15.01.2027","hours":"12","minutes":"25"}}`
-
-// TestRunMovePost_ReportsPublicationDate verifies the CLI core surfaces
-// the server-assigned publication_date in its JSON output — the
-// load-bearing output of a move (a months-long delay is silent without
-// it). The stub returns a post-move edit with publication_date
-// 15.01.2027; the CLI must encode that in stdout.
-func TestRunMovePost_ReportsPublicationDate(t *testing.T) {
-	var getCalls int
-	var postCalled, putCalled bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			getCalls++
-			if getCalls == 1 {
-				w.Write([]byte(scheduleDrivenEditBodyCLI))
-			} else {
-				w.Write([]byte(movedEditBodyCLI))
-			}
-		case http.MethodPost:
-			if r.URL.Path == "/posts/batch/move" {
-				postCalled = true
-				w.Write([]byte(`{"success":true}`))
-				return
-			}
-			w.WriteHeader(http.StatusMethodNotAllowed)
-		case http.MethodPut:
-			putCalled = true
-		}
-	}))
-	defer srv.Close()
-	c := newCLITestClient(t, srv)
-
-	var out, errOut bytes.Buffer
-	code := runMovePost(context.Background(), c, &out, &errOut, 42, 55576)
-	if code != 0 {
-		t.Fatalf("runMovePost exit = %d, want 0; stderr: %s", code, errOut.String())
+// editFixtureCLI is a GET /posts/{id}/edit body for post id with the given
+// publication_when_type; date, when non-empty, is the server-assigned
+// publication_date (the post-move read).
+func editFixtureCLI(id, whenType int, date string) string {
+	pd := ""
+	if date != "" {
+		pd = `,"publication_date":{"date":"` + date + `","hours":"12","minutes":"25"}`
 	}
-	if !postCalled {
-		t.Fatal("POST /posts/batch/move was never issued — MovePost must move via the batch endpoint")
-	}
-	if putCalled {
-		t.Fatal("PUT /posts/{id} was issued — MovePost must NOT use the full-state PUT")
-	}
-	stdout := out.String()
-	if !strings.Contains(stdout, "\"schedule_id\": 55576") {
-		t.Errorf("stdout missing schedule_id 55576: %s", stdout)
-	}
-	if !strings.Contains(stdout, "15.01.2027") {
-		t.Errorf("stdout missing the recovered publication_date 15.01.2027 — the CLI MUST surface the server-assigned slot (a months-long delay is silent without it): %s", stdout)
-	}
+	return fmt.Sprintf(`{"id":%d,"publication_when_type":%d,"publication_how_type":1,"publication_where_type":1,"created_by":1,"texts":[{"text":"old","source_id":0}],"attachments":[],"selected_pages_by_source_ids":{},"all_pages_ids_by_source_ids":{},"schedule_id":55576,"project_id":0%s}`, id, whenType, pd)
 }
 
-// TestRunMovePost_ZeroTargetSchedule_Refuses verifies the CLI core refuses
-// a zero target schedule before any request.
-func TestRunMovePost_ZeroTargetSchedule_Refuses(t *testing.T) {
-	reached := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reached = true
-		w.Write([]byte(`{}`))
-	}))
-	defer srv.Close()
-	c := newCLITestClient(t, srv)
-
-	var out, errOut bytes.Buffer
-	code := runMovePost(context.Background(), c, &out, &errOut, 42, 0)
-	if code == 0 {
-		t.Fatal("runMovePost with toScheduleID=0: exit 0, want non-zero")
-	}
-	if reached {
-		t.Fatal("runMovePost with toScheduleID=0: a request was issued before the guard errored")
-	}
+// moveCLIStub serves the move flow for any ids: before POST /posts/batch/move
+// each post's edit reads with its configured when_type (default 3, by
+// schedule), after it the moved state with date. It records every request.
+type moveCLIStub struct {
+	*httptest.Server
+	whenTypes map[int]int
+	date      string
+	posted    int
+	gets      int
+	postBody  string
 }
 
-// TestRunMovePost_EpochDate_WarnsOnStderr verifies the CLI core surfaces
-// the stopped-schedule warning on stderr when the recovered date is
-// 01.01.1970 — the operator must see the stopped-schedule trap.
-func TestRunMovePost_EpochDate_WarnsOnStderr(t *testing.T) {
-	var getCalls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			getCalls++
-			if getCalls == 1 {
-				w.Write([]byte(scheduleDrivenEditBodyCLI))
-			} else {
-				w.Write([]byte(`{"id":42,"publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":1,"texts":[{"text":"old","source_id":0}],"attachments":[],"selected_pages_by_source_ids":{},"all_pages_ids_by_source_ids":{},"schedule_id":55576,"project_id":0,"publication_date":{"date":"01.01.1970","hours":"00","minutes":"00"}}`))
-			}
-		case http.MethodPost:
-			if r.URL.Path == "/posts/batch/move" {
-				w.Write([]byte(`{"success":true}`))
-				return
-			}
-			w.WriteHeader(http.StatusMethodNotAllowed)
-		}
-	}))
-	defer srv.Close()
-	c := newCLITestClient(t, srv)
-
-	var out, errOut bytes.Buffer
-	code := runMovePost(context.Background(), c, &out, &errOut, 42, 55576)
-	if code != 0 {
-		t.Fatalf("runMovePost exit = %d, want 0 — an epoch date is a successful move into a stopped schedule, not an error; stderr: %s", code, errOut.String())
-	}
-	stderr := errOut.String()
-	if !strings.Contains(stderr, "01.01.1970") {
-		t.Errorf("stderr missing the epoch date in the warning — the operator must see the stopped-schedule trap: %s", stderr)
-	}
-	if !strings.Contains(stderr, "STOPPED") {
-		t.Errorf("stderr missing \"STOPPED\" in the warning: %s", stderr)
-	}
-}
-
-// TestRunBatchMove_ReportsPerPostDates verifies the CLI core surfaces the
-// per-post publication_dates in its JSON output.
-func TestRunBatchMove_ReportsPerPostDates(t *testing.T) {
-	var postCalled bool
-	var getCalls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move" {
-			postCalled = true
+func newMoveCLIStub(t *testing.T, whenTypes map[int]int, date string) *moveCLIStub {
+	t.Helper()
+	st := &moveCLIStub{whenTypes: whenTypes, date: date}
+	st.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move":
+			st.posted++
+			b, _ := io.ReadAll(r.Body)
+			st.postBody = string(b)
 			w.Write([]byte(`{"success":true}`))
-			return
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+			st.gets++
+			id, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/posts/"), "/edit"))
+			if st.posted == 0 {
+				wt, ok := st.whenTypes[id]
+				if !ok {
+					wt = 3
+				}
+				w.Write([]byte(editFixtureCLI(id, wt, "")))
+				return
+			}
+			w.Write([]byte(editFixtureCLI(id, 3, st.date)))
+		default:
+			w.WriteHeader(http.StatusNotFound)
 		}
-		if r.Method == http.MethodGet {
-			getCalls++
-			w.Write([]byte(`{"id":0,"publication_when_type":3,"publication_how_type":1,"publication_where_type":1,"created_by":1,"texts":[],"attachments":[],"selected_pages_by_source_ids":{},"all_pages_ids_by_source_ids":{},"schedule_id":55576,"project_id":0,"publication_date":{"date":"15.01.2027","hours":"12","minutes":"25"}}`))
-			return
-		}
-		w.WriteHeader(http.StatusMethodNotAllowed)
 	}))
-	defer srv.Close()
-	c := newCLITestClient(t, srv)
+	return st
+}
+
+// TestRunMovePosts_Positional_ReportsPublicationDate: the single positional
+// form prints the flat PostMoveResult and surfaces the server-assigned
+// publication_date — the load-bearing output of a move (a months-long delay
+// is silent without it) — and moves via the batch endpoint, never a PUT.
+func TestRunMovePosts_Positional_ReportsPublicationDate(t *testing.T) {
+	st := newMoveCLIStub(t, nil, "15.01.2027")
+	defer st.Close()
+	c := newCLITestClient(t, st.Server)
 
 	var out, errOut bytes.Buffer
-	code := runBatchMove(context.Background(), c, &out, &errOut, []int{10, 20}, 55576)
+	code := runMovePosts(context.Background(), c, &out, &errOut, ops.MovePostsInput{IDs: ops.IDList{42}, ToScheduleID: 55576}, true)
 	if code != 0 {
-		t.Fatalf("runBatchMove exit = %d, want 0; stderr: %s", code, errOut.String())
+		t.Fatalf("runMovePosts exit = %d, want 0; stderr: %s", code, errOut.String())
 	}
-	if !postCalled {
-		t.Fatal("POST /posts/batch/move was never issued")
+	if st.posted != 1 || !strings.Contains(st.postBody, `"posts_ids":"42"`) {
+		t.Errorf("POST /posts/batch/move issued %d times with body %q, want once with posts_ids \"42\"", st.posted, st.postBody)
 	}
 	stdout := out.String()
-	if !strings.Contains(stdout, "\"schedule_id\": 55576") {
-		t.Errorf("stdout missing schedule_id 55576: %s", stdout)
+	if strings.Contains(stdout, `"moved"`) {
+		t.Errorf("positional form must print the flat PostMoveResult, got the batch shape: %s", stdout)
 	}
-	// Two moved entries, each carrying the date.
-	if !strings.Contains(stdout, "15.01.2027") {
-		t.Errorf("stdout missing the recovered publication_date 15.01.2027 — the CLI MUST surface the per-post server-assigned slots: %s", stdout)
+	if !strings.Contains(stdout, `"schedule_id": 55576`) || !strings.Contains(stdout, "15.01.2027") {
+		t.Errorf("stdout missing schedule_id 55576 or the recovered publication_date 15.01.2027: %s", stdout)
 	}
-	if getCalls != 2 {
-		t.Errorf("post-move GET issued %d times, want 2 (one per id)", getCalls)
+}
+
+// TestRunMovePosts_InvalidInput_RefusesBeforeAnyRequest: an empty list, an id
+// <= 0 and a target schedule <= 0 are refused with exit 1 before any request.
+func TestRunMovePosts_InvalidInput_RefusesBeforeAnyRequest(t *testing.T) {
+	cases := map[string]ops.MovePostsInput{
+		"target 0":        {IDs: ops.IDList{42}, ToScheduleID: 0},
+		"target negative": {IDs: ops.IDList{42}, ToScheduleID: -5},
+		"empty ids":       {IDs: nil, ToScheduleID: 55576},
+		"id 0":            {IDs: ops.IDList{5, 0}, ToScheduleID: 55576},
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			reached := false
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+			var out, errOut bytes.Buffer
+			if code := runMovePosts(context.Background(), newCLITestClient(t, srv), &out, &errOut, in, false); code != 1 {
+				t.Fatalf("exit = %d, want 1; stderr: %s", code, errOut.String())
+			}
+			if reached {
+				t.Fatal("a request was issued before the refusal")
+			}
+		})
+	}
+}
+
+// TestRunMovePosts_EpochDate_WarnsOnStderr: the stopped-schedule trap (a
+// recovered 01.01.1970) is a successful move (exit 0) with a loud stderr
+// warning.
+func TestRunMovePosts_EpochDate_WarnsOnStderr(t *testing.T) {
+	st := newMoveCLIStub(t, nil, "01.01.1970")
+	defer st.Close()
+	var out, errOut bytes.Buffer
+	code := runMovePosts(context.Background(), newCLITestClient(t, st.Server), &out, &errOut, ops.MovePostsInput{IDs: ops.IDList{42}, ToScheduleID: 55576}, true)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 — an epoch date is a successful move into a stopped schedule; stderr: %s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "01.01.1970") || !strings.Contains(errOut.String(), "STOPPED") {
+		t.Errorf("stderr must carry the stopped-schedule warning naming 01.01.1970 and STOPPED: %s", errOut.String())
+	}
+}
+
+// TestRunMovePosts_Batch_ReportsPerPostDates: --ids prints {success, moved:[…]}
+// with every post's date, for one id and for many alike (a script reading
+// .moved[] must not branch on the count).
+func TestRunMovePosts_Batch_ReportsPerPostDates(t *testing.T) {
+	for _, ids := range []ops.IDList{{10, 20}, {42}} {
+		st := newMoveCLIStub(t, nil, "15.01.2027")
+		var out, errOut bytes.Buffer
+		code := runMovePosts(context.Background(), newCLITestClient(t, st.Server), &out, &errOut, ops.MovePostsInput{IDs: ids, ToScheduleID: 55576}, false)
+		st.Close()
+		if code != 0 {
+			t.Fatalf("ids %v: exit = %d, want 0; stderr: %s", ids, code, errOut.String())
+		}
+		var got hooppy.BatchMovePostsResult
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("ids %v: stdout is not a BatchMovePostsResult: %v: %s", ids, err, out.String())
+		}
+		if len(got.Moved) != len(ids) {
+			t.Fatalf("ids %v: moved has %d entries, want %d: %s", ids, len(got.Moved), len(ids), out.String())
+		}
+		for i, m := range got.Moved {
+			if m.ID != ids[i] || m.PublicationDate == nil || m.PublicationDate.Date != "15.01.2027" {
+				t.Errorf("ids %v: moved[%d] = %+v, want id %d with publication_date 15.01.2027", ids, i, m, ids[i])
+			}
+		}
+	}
+}
+
+// TestRunMovePosts_F3_BatchHitsTheWhenTypeGuard is F3 on the CLI: a batch
+// containing a post that is not schedule-driven (publication_when_type=2) is
+// refused WHOLE — exit 1, the offender named, and no POST /posts/batch/move
+// issued, so the schedule-driven posts beside it are not moved either. The
+// single positional form is refused the same way.
+//
+// Mutation: remove the `c.requireScheduleDriven(ctx, ids)` call in
+// BatchMovePosts (posts.go) and the batch POSTs → posted == 1.
+func TestRunMovePosts_F3_BatchHitsTheWhenTypeGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		ids        ops.IDList
+		positional bool
+	}{
+		{"batch of three, one fixed-date", ops.IDList{41, 42, 43}, false},
+		{"single positional", ops.IDList{42}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newMoveCLIStub(t, map[int]int{42: 2}, "15.01.2027")
+			defer st.Close()
+			var out, errOut bytes.Buffer
+			code := runMovePosts(context.Background(), newCLITestClient(t, st.Server), &out, &errOut, ops.MovePostsInput{IDs: tc.ids, ToScheduleID: 55576}, tc.positional)
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1 — the when_type guard must refuse; stdout: %s stderr: %s", code, out.String(), errOut.String())
+			}
+			if st.posted != 0 {
+				t.Fatalf("POST /posts/batch/move issued %d time(s) — the guard must refuse the WHOLE batch before the move", st.posted)
+			}
+			if !strings.Contains(errOut.String(), "post 42: publication_when_type=2") {
+				t.Errorf("stderr must name post 42 and its when_type: %s", errOut.String())
+			}
+		})
+	}
+}
+
+// --- postIDsFromArgs: positional <post-id> vs --ids ---
+
+func idsTestCmd(t *testing.T, flags ...string) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "delete"}
+	if err := RegisterOpFlags(cmd, reflect.TypeOf(ops.DeletePostsInput{})); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.ParseFlags(flags); err != nil {
+		t.Fatal(err)
+	}
+	return cmd
+}
+
+func TestPostIDsFromArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		flags      []string
+		args       []string
+		want       ops.IDList
+		positional bool
+		wantErr    string
+	}{
+		{name: "positional only", args: []string{"42"}, want: ops.IDList{42}, positional: true},
+		{name: "ids only", flags: []string{"--ids", "1,2,3"}, want: ops.IDList{1, 2, 3}},
+		{name: "both", flags: []string{"--ids", "1,2"}, args: []string{"42"}, wantErr: "mutually exclusive"},
+		{name: "neither", wantErr: "requires a positional post-id or --ids"},
+		{name: "non-integer positional", args: []string{"abc"}, wantErr: "not a valid integer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := idsTestCmd(t, tc.flags...)
+			var in ops.DeletePostsInput
+			if err := FillOpInput(cmd, &in); err != nil {
+				t.Fatal(err)
+			}
+			got, positional, err := postIDsFromArgs(cmd, tc.args, in.IDs)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want it to contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) || positional != tc.positional {
+				t.Errorf("ids = %v positional = %v, want %v %v", got, positional, tc.want, tc.positional)
+			}
+		})
 	}
 }
 
@@ -420,175 +501,5 @@ func TestRunScheduleQueue_PagePastEnd_WarnsAndExits2(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"day_counts": []`) {
 		t.Errorf("stdout missing day_counts: [] — the overrun branch must emit an empty slice, not null: %s", stdout)
-	}
-}
-
-// TestRunBatchMove_SingleIDBatch_ShapeMatchesMultiID is the MAJOR-3 guard
-// (review round 4): --ids 42 prints a PostMoveResult
-// ({success,schedule_id,publication_date}) while --ids 42,43 prints a
-// BatchMovePostsResult ({success,moved:[…]}). A consumer reading .moved[]
-// gets nothing for the single-id case, silently. The single-id routing
-// (which closes the when_type asymmetry) MUST be kept, but the OUTPUT SHAPE
-// normalised: a single-id batch MUST produce a BatchMovePostsResult with a
-// moved array of len 1 — the SAME top-level shape as the multi-id case.
-// The `posts move <id>` single positional path keeps PostMoveResult (correct).
-//
-// RED-on-revert: revert runBatchMove's single-id branch to
-// `return runMovePost(...)` and the single-id stdout has no "moved" key —
-// the assertion fails.
-func TestRunBatchMove_SingleIDBatch_ShapeMatchesMultiID(t *testing.T) {
-	// Stub: pre-move GET (when_type guard, schedule-driven=3), POST move,
-	// post-move GET with publication_date 15.01.2027.
-	var getCalls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && getCalls == 0:
-			getCalls++
-			w.Write([]byte(`{"id":42,"publication_when_type":3,"schedule_id":55576}`))
-		case r.Method == http.MethodGet:
-			w.Write([]byte(`{"id":42,"publication_when_type":3,"schedule_id":55576,"publication_date":{"date":"15.01.2027","hours":"12","minutes":"25"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move":
-			w.Write([]byte(`{"success":true}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-	c := newCLITestClient(t, srv)
-
-	var out, errOut bytes.Buffer
-	code := runBatchMove(context.Background(), c, &out, &errOut, []int{42}, 55576)
-	if code != 0 {
-		t.Fatalf("runBatchMove single-id exit = %d, want 0; stderr: %s", code, errOut.String())
-	}
-	stdout := out.String()
-	// The top-level shape MUST be BatchMovePostsResult — a "moved" array,
-	// NOT the flat PostMoveResult. A consumer reading .moved[] must get the
-	// entry for the single id.
-	if !strings.Contains(stdout, `"moved"`) {
-		t.Fatalf("single-id batch stdout missing \"moved\" — the shape MUST be BatchMovePostsResult (same as multi-id), not the flat PostMoveResult: %s", stdout)
-	}
-	if !strings.Contains(stdout, `"moved": [`) {
-		t.Errorf("single-id batch stdout missing \"moved\": [ — moved must be an ARRAY, not a scalar: %s", stdout)
-	}
-	// moved MUST have exactly one entry carrying the id + the recovered date.
-	if !strings.Contains(stdout, `"id": 42`) {
-		t.Errorf("single-id batch stdout missing moved[].id 42: %s", stdout)
-	}
-	if !strings.Contains(stdout, "15.01.2027") {
-		t.Errorf("single-id batch stdout missing the recovered publication_date 15.01.2027 in moved[]: %s", stdout)
-	}
-	// The flat PostMoveResult-only keys MUST NOT appear at the top level
-	// (schedule_id at top level is the PostMoveResult shape, not the batch
-	// shape — the batch wraps schedule_id inside moved[]).
-	if strings.Contains(stdout, `"publication_date": {`) && !strings.Contains(stdout, `"moved"`) {
-		t.Errorf("single-id batch has top-level publication_date without moved — wrong shape: %s", stdout)
-	}
-}
-
-// --- resolveMoveTarget tests (item E: replace the stub) ---
-
-// TestResolveMoveTarget_PositionalOnly is the single-post path: a
-// positional arg with no --ids flag produces a non-batch target carrying
-// the parsed id.
-func TestResolveMoveTarget_PositionalOnly(t *testing.T) {
-	target, err := resolveMoveTarget([]string{"42"}, "")
-	if err != nil {
-		t.Fatalf("resolveMoveTarget: %v", err)
-	}
-	if target.batch {
-		t.Error("batch = true, want false — a positional arg is a single-post move")
-	}
-	if target.singleID != 42 {
-		t.Errorf("singleID = %d, want 42", target.singleID)
-	}
-}
-
-// TestResolveMoveTarget_IDsFlagOnly is the batch path: --ids with no
-// positional produces a batch target carrying the parsed ids.
-func TestResolveMoveTarget_IDsFlagOnly(t *testing.T) {
-	target, err := resolveMoveTarget(nil, "1,2,3")
-	if err != nil {
-		t.Fatalf("resolveMoveTarget: %v", err)
-	}
-	if !target.batch {
-		t.Error("batch = false, want true — the --ids flag is a batch move")
-	}
-	if len(target.ids) != 3 {
-		t.Fatalf("len(ids) = %d, want 3", len(target.ids))
-	}
-	if target.ids[0] != 1 || target.ids[2] != 3 {
-		t.Errorf("ids = %v, want [1,2,3]", target.ids)
-	}
-}
-
-// TestResolveMoveTarget_BothPresent_IsError is the mutual-exclusion guard:
-// passing BOTH a positional and --ids is an error.
-func TestResolveMoveTarget_BothPresent_IsError(t *testing.T) {
-	if _, err := resolveMoveTarget([]string{"42"}, "1,2"); err == nil {
-		t.Fatal("resolveMoveTarget with both positional and --ids: expected an error, got nil — they are mutually exclusive")
-	}
-}
-
-// TestResolveMoveTarget_NeitherPresent_IsError is the presence guard:
-// passing NEITHER a positional nor --ids is an error.
-func TestResolveMoveTarget_NeitherPresent_IsError(t *testing.T) {
-	if _, err := resolveMoveTarget(nil, ""); err == nil {
-		t.Fatal("resolveMoveTarget with neither positional nor --ids: expected an error, got nil — one is required")
-	}
-}
-
-// TestResolveMoveTarget_NonIntegerPositional_IsError verifies a
-// non-integer positional is refused with a clear error.
-func TestResolveMoveTarget_NonIntegerPositional_IsError(t *testing.T) {
-	if _, err := resolveMoveTarget([]string{"abc"}, ""); err == nil {
-		t.Fatal("resolveMoveTarget with positional \"abc\": expected an error, got nil — the positional must be an integer")
-	}
-}
-
-// TestRunBatchMove_SingleIDBatch_RoutesToMovePost is the single-id routing
-// guard (item E): a single-id batch (`posts move --ids 42`) MUST route to
-// runMovePost (and thus MovePost) so the when_type guard fires — closing the
-// asymmetry where `posts move 42` guards when_type but `posts move --ids 42`
-// did not, for the same post. The signal that routing happened is the
-// when_type guard's GET /posts/{id}/edit: the batch path does NOT issue a
-// pre-move GET, the single-post path does.
-//
-// RED-on-revert: drop the `len(ids) == 1` routing branch in runBatchMove
-// and the batch path runs — no pre-move GET is issued (getCalls != 1) and
-// the POST runs without the when_type guard.
-func TestRunBatchMove_SingleIDBatch_RoutesToMovePost(t *testing.T) {
-	var getCalls int
-	var postCalled bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/posts/42/edit":
-			getCalls++
-			// when_type=2 (fixed date) — the single-post path refuses this
-			// BEFORE the move. The batch path would NOT refuse it.
-			w.Write([]byte(`{"id":42,"publication_when_type":2,"schedule_id":55576}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move":
-			postCalled = true
-			w.Write([]byte(`{"success":true}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-	c := newCLITestClient(t, srv)
-
-	var out, errOut bytes.Buffer
-	code := runBatchMove(context.Background(), c, &out, &errOut, []int{42}, 55576)
-	// The when_type guard refuses a non-schedule post → exit 1.
-	if code != 1 {
-		t.Fatalf("runBatchMove single-id exit = %d, want 1 — the when_type guard (when_type=2) must refuse the move; stderr: %s", code, errOut.String())
-	}
-	// The pre-move GET is the signal that routing to MovePost happened.
-	if getCalls != 1 {
-		t.Errorf("pre-move GET /posts/42/edit issued %d times, want 1 — a single-id batch MUST route to MovePost, which issues a pre-move GET for the when_type guard (item E)", getCalls)
-	}
-	// The POST must NOT have been issued — the when_type guard refused first.
-	if postCalled {
-		t.Error("POST /posts/batch/move was issued — the when_type guard must refuse BEFORE the move; a single-id batch routing to MovePost catches this")
 	}
 }

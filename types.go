@@ -1406,6 +1406,20 @@ type BatchMovePostsResult struct {
 	Moved   []MovedPost `json:"moved"`
 }
 
+// SingleResult narrows a one-post batch result to the flat PostMoveResult the
+// single-post surfaces (MovePost, `posts move <id>`, hooppy_move_post) return.
+// It panics on a result with no moved entries; BatchMovePosts never returns one.
+func (r *BatchMovePostsResult) SingleResult() *PostMoveResult {
+	m := r.Moved[0]
+	return &PostMoveResult{
+		Success:         r.Success,
+		ScheduleID:      m.ScheduleID,
+		PublicationDate: m.PublicationDate,
+		SlotLookupError: m.SlotLookupError,
+		Warning:         m.Warning,
+	}
+}
+
 // ScheduleDay is one day's cell in the calendar returned by
 // GET /posts/schedules/{id}/posts. The day's dd.mm.yyyy date is the MAP KEY;
 // DayName and DayDate are the server's DISPLAY strings for that same date,

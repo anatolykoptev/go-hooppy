@@ -11,10 +11,14 @@ import (
 // CLILeaf, the flag set from Input's `flag` tags, the MCP tool name from
 // MCPTool and the tool input schema from Input's `json`/`jsonschema` tags.
 type Entry struct {
-	Name    string       // operation name, e.g. "UpdateSchedule" — the stable lookup key
-	CLIPath string       // space-separated command path from the root, e.g. "schedules update"
-	MCPTool string       // MCP tool name, e.g. "hooppy_update_schedule"
-	Input   reflect.Type // the ops input struct type carrying the field tags
+	Name    string // operation name, e.g. "UpdateSchedule" — the stable lookup key
+	CLIPath string // space-separated command path from the root, e.g. "schedules update"
+	MCPTool string // MCP tool name, e.g. "hooppy_update_schedule"
+	// MCPSingle names a single-id convenience tool ({id} instead of {ids})
+	// that adapts the same op, "" when there is none. It must be registered
+	// on the server; it is not counted as unmigrated.
+	MCPSingle string
+	Input     reflect.Type // the ops input struct type carrying the field tags
 }
 
 // Registry lists every operation migrated onto the ops layer. Operations
@@ -51,6 +55,26 @@ var Registry = []Entry{
 		CLIPath: "search import",
 		MCPTool: "hooppy_import_search_post",
 		Input:   reflect.TypeOf(ImportSearchPostInput{}),
+	},
+	{
+		Name:      "DeletePosts",
+		CLIPath:   "posts delete",
+		MCPTool:   "hooppy_batch_delete_posts",
+		MCPSingle: "hooppy_delete_post",
+		Input:     reflect.TypeOf(DeletePostsInput{}),
+	},
+	{
+		Name:      "MovePosts",
+		CLIPath:   "posts move",
+		MCPTool:   "hooppy_batch_move_posts",
+		MCPSingle: "hooppy_move_post",
+		Input:     reflect.TypeOf(MovePostsInput{}),
+	},
+	{
+		Name:    "GetPostEdit",
+		CLIPath: "posts edit",
+		MCPTool: "hooppy_get_post_edit",
+		Input:   reflect.TypeOf(GetPostEditInput{}),
 	},
 }
 

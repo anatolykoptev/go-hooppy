@@ -79,6 +79,7 @@ func registerTools(server *mcp.Server) {
 	registerMovePost(server)
 	registerBatchMovePosts(server)
 	registerPostWhere(server)
+	registerGetPostEdit(server)
 	// Posts search (scraping external pages) — UNDOCUMENTED
 	registerListSearchPosts(server)
 	registerListSourceResources(server)
@@ -341,56 +342,68 @@ func registerCreatePost(server *mcp.Server) {
 	)
 }
 
-// --- delete_post ---
+// --- delete_post, batch_delete_posts ---
+//
+// Both tools are thin adapters over ops.DeletePosts: the op owns the id
+// validation (non-empty, positive, no repeats), the single/batch request
+// choice and the per-id outcomes. hooppy_delete_post is the single-id
+// convenience form of hooppy_batch_delete_posts.
 
 type deletePostInput struct {
 	ID int `json:"id" jsonschema:"Post ID to delete."`
 }
 
 func registerDeletePost(server *mcp.Server) {
+	entry := ops.MustEntry("DeletePosts")
 	mcpserver.AddTool(server,
 		&mcp.Tool{
-			Name:        "hooppy_delete_post",
-			Description: "Delete a single post by ID from Hooppy.",
+			Name:        entry.MCPSingle,
+			Description: "Delete a single post by ID from Hooppy. The result lists the id under `deleted` (or under `failed` with the server's error).",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in deletePostInput) (*mcp.CallToolResult, error) {
-			c, err := client()
-			if err != nil {
-				return errResult(err.Error())
-			}
-			resp, err := c.DeletePost(ctx, in.ID)
-			if err != nil {
-				return errResult(err.Error())
-			}
-			return jsonResult(resp)
+			return deletePostsResult(ctx, ops.DeletePostsInput{IDs: ops.IDList{in.ID}})
 		},
 	)
-}
-
-// --- batch_delete_posts ---
-
-type batchDeletePostsInput struct {
-	IDs []int `json:"ids" jsonschema:"Post IDs to delete."`
 }
 
 func registerBatchDeletePosts(server *mcp.Server) {
+	entry := ops.MustEntry("DeletePosts")
 	mcpserver.AddTool(server,
 		&mcp.Tool{
-			Name:        "hooppy_batch_delete_posts",
-			Description: "Delete multiple posts by ID in a single request.",
+			Name: entry.MCPTool,
+			Description: "Delete multiple posts by ID in a single request. ids is 1 to 1000 positive post ids (an integer array or a comma-separated string), none repeated; an empty list, an id <= 0 or a repeated id is refused before anything is deleted. " +
+				"The result reports every id: `deleted` and `failed` (with the server's error). When the server refuses the whole batch, the ids are deleted one by one and the result says so in `note`. " +
+				"A batch where some ids were deleted and others failed returns {status:\"partial\", result, partial_error} — NOT an error: do not re-run the ids listed under `deleted`.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in batchDeletePostsInput) (*mcp.CallToolResult, error) {
-			c, err := client()
-			if err != nil {
-				return errResult(err.Error())
-			}
-			resp, err := c.BatchDeletePosts(ctx, in.IDs)
-			if err != nil {
-				return errResult(err.Error())
-			}
-			return jsonResult(resp)
+		func(ctx context.Context, _ *mcp.CallToolRequest, in ops.DeletePostsInput) (*mcp.CallToolResult, error) {
+			return deletePostsResult(ctx, in)
 		},
 	)
+}
+
+// deletePostsResult runs ops.DeletePosts and shapes the MCP result: the
+// per-id record on success, a status-discriminated non-error result on a
+// partial outcome (an agent must not read it as success-or-retry), and a tool
+// error — carrying the per-id record when one exists — otherwise.
+func deletePostsResult(ctx context.Context, in ops.DeletePostsInput) (*mcp.CallToolResult, error) {
+	c, err := client()
+	if err != nil {
+		return errResult(err.Error())
+	}
+	res, err := ops.DeletePosts(ctx, c, in)
+	if err != nil {
+		var pde *ops.PartialDeleteError
+		if errors.As(err, &pde) {
+			return jsonResult(map[string]interface{}{"status": "partial", "result": res, "partial_error": pde.Error()})
+		}
+		if res != nil && (len(res.Failed) > 0 || len(res.AlreadyGone) > 0) {
+			if rec, mErr := json.MarshalIndent(res, "", "  "); mErr == nil {
+				return errResult(err.Error() + "\n" + string(rec))
+			}
+		}
+		return errResult(err.Error())
+	}
+	return jsonResult(res)
 }
 
 // --- upload_media ---
@@ -1003,26 +1016,28 @@ func registerUpdatePostText(server *mcp.Server) {
 	)
 }
 
-// --- move_post (schedule-safe) ---
+// --- move_post, batch_move_posts ---
+//
+// Both tools are thin adapters over ops.MovePosts: the op owns the id and
+// target validation and hooppy.BatchMovePosts, the one move implementation for
+// a single post and for many (POST /posts/batch/move with posts_ids as a
+// comma-joined STRING — a JSON array makes the live server 500 — the per-post
+// when_type guard, and the per-post publication_date recovery). The date is
+// the load-bearing output: a move re-slots to the tail, and moving into a
+// booked schedule is a silent months-long delay otherwise. hooppy_move_post is
+// the single-id form and returns the flat PostMoveResult; hooppy_batch_move_posts
+// always returns {success, moved:[…]}, even for one id.
 
 type movePostInput struct {
 	ID           int `json:"id" jsonschema:"Post ID to move."`
 	ToScheduleID int `json:"to_schedule_id" jsonschema:"Target schedule ID to move the post to (REQUIRED). The post is re-slotted to the TAIL of the target queue; the server assigns the new publication_date, which is returned in the result."`
 }
 
-// registerMovePost wires the single-post move path. It delegates to
-// hooppy.MovePost, which guards publication_when_type==3 via a pre-move
-// GET /posts/{id}/edit, then moves via POST /posts/batch/move (the same
-// server-side move the batch path uses, passing the single id) — the server
-// re-slots the post to the tail and preserves texts/attachments/page
-// selection (the body carries only posts_ids + schedule_id). The new
-// publication_date is recovered from a post-move GET /posts/{id}/edit. The
-// date is the load-bearing output: a move re-slots to the tail, and moving
-// into a booked schedule is a silent months-long delay otherwise.
 func registerMovePost(server *mcp.Server) {
+	entry := ops.MustEntry("MovePosts")
 	mcpserver.AddTool(server,
 		&mcp.Tool{
-			Name: "hooppy_move_post",
+			Name: entry.MCPSingle,
 			Description: "Move a single existing post to another schedule, preserving its texts, attachments, page selection and per-source text variants. " +
 				"A move RE-SLOTS the post to the TAIL of the target queue — the server assigns the new publication_date, which is returned in the result. " +
 				"Moving into a booked schedule can delay the post by months; the returned publication_date is how the caller sees that delay. " +
@@ -1030,97 +1045,71 @@ func registerMovePost(server *mcp.Server) {
 				"Documented in the official API reference.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in movePostInput) (*mcp.CallToolResult, error) {
-			if in.ID <= 0 {
-				return errResult("id is required (a positive post id) — an impossible id is accepted by the server and fabricates a success entry")
-			}
-			if in.ToScheduleID <= 0 {
-				return errResult("to_schedule_id is required (a positive schedule id) — a move targeted at no schedule (0) or a negative id would publish to nothing; the server accepts a negative and fabricates a success entry")
-			}
-			c, err := client()
+			res, err := movePosts(ctx, ops.MovePostsInput{IDs: ops.IDList{in.ID}, ToScheduleID: in.ToScheduleID})
 			if err != nil {
 				return errResult(err.Error())
 			}
-			resp, err := c.MovePost(ctx, in.ID, in.ToScheduleID)
-			if err != nil {
-				return errResult(err.Error())
-			}
-			return jsonResult(resp)
+			return jsonResult(res.SingleResult())
 		},
 	)
 }
 
-// --- batch_move_posts ---
-
-type batchMovePostsInput struct {
-	IDs          []int `json:"ids" jsonschema:"Post IDs to move (1 to 1000)."`
-	ToScheduleID int   `json:"to_schedule_id" jsonschema:"Target schedule ID to move the posts to (REQUIRED). Each post is re-slotted to the TAIL of the target queue; the server assigns each post's new publication_date, which is returned per post in the result."`
-}
-
-// registerBatchMovePosts wires the batch move path. It delegates to
-// hooppy.BatchMovePosts, which POSTs /posts/batch/move with posts_ids as a
-// comma-joined STRING (NOT a JSON array — a JSON array makes the live
-// server 500) and then recovers each post's new publication_date from a
-// post-move GET /posts/{id}/edit. The per-post dates are the load-bearing
-// output.
-//
-// A single-id batch is routed to MovePost (so the when_type guard fires —
-// item E) and the result is WRAPPED into a BatchMovePostsResult so the
-// output shape is identical for one id and many: a consumer reading
-// .moved[] gets the entry either way. The result is ALWAYS a
-// BatchMovePostsResult {success, moved:[{id, schedule_id, publication_date,
-// …}]}.
 func registerBatchMovePosts(server *mcp.Server) {
+	entry := ops.MustEntry("MovePosts")
 	mcpserver.AddTool(server,
 		&mcp.Tool{
-			Name: "hooppy_batch_move_posts",
+			Name: entry.MCPTool,
 			Description: "Move multiple existing posts to another schedule in a single request. " +
 				"Each post is RE-SLOTTED to the TAIL of the target queue — the server assigns each post's new publication_date, which is returned per post in the `moved` array of the result (one entry per id, even for a single-id call). " +
 				"Moving into a booked schedule can delay posts by months; the returned per-post publication_date values are how the caller sees that delay. " +
+				"Only schedule-driven posts (publication_when_type=3) can be moved: every post is checked first, and if any is not (or cannot be read) the WHOLE batch is refused and nothing moves, because a move would re-publish a published post or drop a fixed-date post's pages. " +
 				"Documented in the official API reference.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in batchMovePostsInput) (*mcp.CallToolResult, error) {
-			if len(in.IDs) == 0 {
-				return errResult("ids is required (at least one post ID)")
+		func(ctx context.Context, _ *mcp.CallToolRequest, in ops.MovePostsInput) (*mcp.CallToolResult, error) {
+			res, err := movePosts(ctx, in)
+			if err != nil {
+				return errResult(err.Error())
 			}
-			for _, id := range in.IDs {
-				if id <= 0 {
-					return errResult(fmt.Sprintf("ids must all be positive post ids (got %d) — an impossible id is accepted by the server and fabricates a success entry", id))
-				}
-			}
-			if in.ToScheduleID <= 0 {
-				return errResult("to_schedule_id is required (a positive schedule id) — a move targeted at no schedule (0) or a negative id would publish to nothing; the server accepts a negative and fabricates a success entry")
-			}
+			return jsonResult(res)
+		},
+	)
+}
+
+// movePosts runs ops.MovePosts with the environment's client.
+func movePosts(ctx context.Context, in ops.MovePostsInput) (*hooppy.BatchMovePostsResult, error) {
+	c, err := client()
+	if err != nil {
+		return nil, err
+	}
+	return ops.MovePosts(ctx, c, in)
+}
+
+// --- get_post_edit ---
+
+// getPostEditInput is the tool input: the post id stays an explicit field on
+// this surface, like the CLI's positional <post-id> argument.
+type getPostEditInput struct {
+	ID int `json:"id" jsonschema:"Post ID to inspect."`
+}
+
+// registerGetPostEdit is a thin adapter over ops.GetPostEdit.
+func registerGetPostEdit(server *mcp.Server) {
+	entry := ops.MustEntry("GetPostEdit")
+	mcpserver.AddTool(server,
+		&mcp.Tool{
+			Name:        entry.MCPTool,
+			Description: "Get a post's current state in editable form: texts (per social network), attachments, schedule_id, project_id, publication_when_type (1=now, 2=fixed date, 3=by schedule), publication_date, and the selected pages per network (empty for a schedule-driven post — its pages come from the schedule). Use it to inspect a post before moving, editing or deleting it. Documented in the official API reference.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in getPostEditInput) (*mcp.CallToolResult, error) {
 			c, err := client()
 			if err != nil {
 				return errResult(err.Error())
 			}
-			// Route a single-id batch to MovePost so the when_type guard
-			// fires (item E): a single-id batch and a single-post move now
-			// behave identically. WRAP the result into a
-			// BatchMovePostsResult so the output shape matches the multi-id
-			// case — a consumer reading .moved[] gets the entry for the
-			// single id. Zero extra requests for N>1.
-			if len(in.IDs) == 1 {
-				resp, err := c.MovePost(ctx, in.IDs[0], in.ToScheduleID)
-				if err != nil {
-					return errResult(err.Error())
-				}
-				return jsonResult(&hooppy.BatchMovePostsResult{
-					Success: resp.Success,
-					Moved: []hooppy.MovedPost{{
-						ID:              in.IDs[0],
-						ScheduleID:      resp.ScheduleID,
-						PublicationDate: resp.PublicationDate,
-						SlotLookupError: resp.SlotLookupError,
-						Warning:         resp.Warning,
-					}},
-				})
-			}
-			resp, err := c.BatchMovePosts(ctx, in.IDs, in.ToScheduleID)
+			edit, err := ops.GetPostEdit(ctx, c, in.ID, ops.GetPostEditInput{})
 			if err != nil {
 				return errResult(err.Error())
 			}
-			return jsonResult(resp)
+			return jsonResult(edit)
 		},
 	)
 }

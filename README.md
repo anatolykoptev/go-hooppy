@@ -133,8 +133,19 @@ hooppy posts create --text "Hello world" --to <page-id>,<page-id>
 # List unpublished posts
 hooppy posts list --unpublished
 
-# Delete a post
+# Delete a post, or several (--ids: positive ids, none repeated). Exit 0 = all
+# deleted, 1 = error, 2 = partial (some deleted, some failed; stdout lists both)
 hooppy posts delete <post-id>
+hooppy posts delete --ids 101,102,103
+
+# A post's full editable state (texts, attachments, schedule, page selection)
+hooppy posts edit <post-id>
+
+# Move posts to another schedule (only schedule-driven posts; one that is not
+# refuses the whole batch before anything moves; N ids cost 2N GET requests
+# plus one POST: a when_type check before the move and a date read after it)
+hooppy posts move <post-id> --to-schedule <schedule-id>
+hooppy posts move --ids 101,102 --to-schedule <schedule-id>
 
 # Where is a post published? Per page of one network (default 1 = VK):
 # the page, the public URL of the published copy, scheduled-by-network marker, last errors
@@ -267,8 +278,9 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 | `hooppy_list_posts` | List posts with filters (status, date, source, etc.) |
 | `hooppy_create_post` | Create and publish a post (immediate, scheduled, by project, or by schedule) |
 | `hooppy_delete_post` | Delete a single post |
+| `hooppy_get_post_edit` | A post's full editable state: texts, attachments, schedule_id, project_id, publication type and date, page selection |
 | `hooppy_post_where` | Per page of one network (default VK): where a post is published, with the public URL of each published copy |
-| `hooppy_batch_delete_posts` | Delete multiple posts |
+| `hooppy_batch_delete_posts` | Delete multiple posts; reports every id (`deleted` / `failed`) |
 | `hooppy_upload_media` | Upload a photo or video file |
 | `hooppy_upload_document` | Upload a document file |
 | `hooppy_list_projects` | List post projects |
@@ -302,7 +314,7 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 
 > **Note — `hooppy_copy_search_post` is deprecated.** The historical `CopySearchPost` (PUT /posts/copy) created empty posts; the restored shim now delegates to resolve+publish (the same path `hooppy_import_search_post` uses), preserving text + attachments. Use `hooppy_import_search_post` for the non-deprecated name, or `hooppy_rewrite_search_post` for a text override. Batch import is fully exposed via MCP (`hooppy_import_search_post` with `search_post_ids`).
 
-> **Id lists accept an int array or a comma string.** `search_post_ids`, `selected_pages_ids` and `schedules_ids` take `[10, 11]` or `"10,11"` — both reach the API as the same list (the tools used to take only the comma string; old agent calls keep working). Examples:
+> **Id lists accept an int array or a comma string.** `search_post_ids`, `selected_pages_ids`, `schedules_ids` and the `ids` of `hooppy_batch_delete_posts` / `hooppy_batch_move_posts` take `[10, 11]` or `"10,11"` — both reach the API as the same list (the tools used to take only the comma string; old agent calls keep working). Examples:
 >
 > ```json
 > {"search_post_ids": [2001, 2002], "schedules_ids": [10, 11]}
@@ -324,8 +336,8 @@ surface — so both surfaces get it from a single change:
 2. The input struct is the single source of the parameter set. Field tags:
    `json` (wire/MCP property), `jsonschema` (tool description),
    `flag` + `flagusage` (CLI flag). `flag:"-"` opts a field out of the CLI.
-3. `ops.Registry` — one entry per migrated op (`CLIPath`, `MCPTool`,
-   `Input` type). The CLI command binds its flags from the Input type via
+3. `ops.Registry` — one entry per migrated op (`CLIPath`, `MCPTool`, an
+   optional single-id `MCPSingle` tool, `Input` type). The CLI command binds its flags from the Input type via
    `RegisterOpFlags`/`FillOpInput`; the MCP tool uses the Input type as its
    `AddTool` schema. Both register **from** the registry entry.
 4. Parity tests (`TestOpsRegistry_*` in both `cmd/` packages) derive from
@@ -334,8 +346,9 @@ surface — so both surfaces get it from a single change:
    gate. The `*BacklogReport` tests log how many commands/tools are not yet
    migrated — adding one to the registry shrinks the count.
 
-Piloted on `schedules update` / `hooppy_update_schedule`. Everything else
-still lives per-surface and is migrated one op at a time.
+Piloted on `schedules update` / `hooppy_update_schedule`; search copy/rewrite/import,
+`posts where`, `posts delete`, `posts move` and `posts edit` have followed. Everything
+else still lives per-surface and is migrated one op at a time.
 
 ## Social network source IDs
 
@@ -411,7 +424,7 @@ Which documented operation has a client method, a CLI command and an MCP tool. T
 | `PUT /notifications/{id}/is_viewed` | — | — | — |
 | `GET /posts` | `ListPosts` | `hooppy posts list`, `hooppy search copy`, `hooppy search import`, `hooppy search rewrite` | `hooppy_copy_search_post`, `hooppy_import_search_post`, `hooppy_list_posts`, `hooppy_rewrite_search_post` |
 | `POST /posts` | `CreatePost`, `PublishPost` | `hooppy posts create`, `hooppy search copy`, `hooppy search import`, `hooppy search rewrite` | `hooppy_copy_search_post`, `hooppy_create_post`, `hooppy_import_search_post`, `hooppy_rewrite_search_post` |
-| `POST /posts/batch/delete` | `BatchDeletePosts` | — | `hooppy_batch_delete_posts` |
+| `POST /posts/batch/delete` | `BatchDeletePosts` | `hooppy posts delete` | `hooppy_batch_delete_posts`, `hooppy_delete_post` |
 | `POST /posts/batch/move` | `BatchMovePosts` | `hooppy posts move` | `hooppy_batch_move_posts`, `hooppy_move_post` |
 | `POST /posts/batch_uploading` | — | — | — |
 | `GET /posts/projects` | `ListProjects` | `hooppy projects list` | `hooppy_list_projects` |
@@ -444,9 +457,9 @@ Which documented operation has a client method, a CLI command and an MCP tool. T
 | `GET /posts/social` | — | — | — |
 | `GET /posts/statistics/fast` | — | — | — |
 | `GET /posts/statistics/full` | — | — | — |
-| `DELETE /posts/{id}` | `DeletePost` | `hooppy posts delete` | `hooppy_delete_post` |
+| `DELETE /posts/{id}` | `DeletePost` | `hooppy posts delete` | `hooppy_batch_delete_posts`, `hooppy_delete_post` |
 | `PUT /posts/{id}` | `UpdatePost` | `hooppy posts update` | `hooppy_update_post`, `hooppy_update_post_text` |
-| `GET /posts/{id}/edit` | `GetPostEdit` | `hooppy posts edit`, `hooppy posts move`, `hooppy posts update` | `hooppy_batch_move_posts`, `hooppy_move_post`, `hooppy_update_post_text` |
+| `GET /posts/{id}/edit` | `GetPostEdit` | `hooppy posts edit`, `hooppy posts move`, `hooppy posts update` | `hooppy_batch_move_posts`, `hooppy_get_post_edit`, `hooppy_move_post`, `hooppy_update_post_text` |
 | `GET /rss-import` | — | — | — |
 | `POST /rss-import` | — | — | — |
 | `POST /rss-import/batch/delete` | — | — | — |

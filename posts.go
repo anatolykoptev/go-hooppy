@@ -444,48 +444,21 @@ func buildPostUpdatePayload(op string, postID int, edit *PostEditResponse, texts
 	}, nil
 }
 
-// MovePost moves a single existing post to another schedule via
-// POST /posts/batch/move — the SAME server-side move the batch path uses,
-// passing the single id. The server re-slots the post to the TAIL of the
-// target queue, assigns the new publication_date, and preserves the post's
-// texts, attachments, page selection and per-source text variants (the batch
-// body carries only posts_ids + schedule_id, so nothing is overwritten).
+// MovePost moves a single existing post to another schedule: a batch of one
+// through BatchMovePosts, so the single and the batch path cannot differ.
+// See BatchMovePosts for the wire contract (POST /posts/batch/move, comma-joined
+// posts_ids STRING), the per-post when_type guard that refuses a post that is
+// not schedule-driven BEFORE the move, and the post-move date recovery; this
+// wrapper only narrows the result to the flat PostMoveResult and prefixes
+// errors with "hooppy: MovePost: post N:".
 //
-// This replaces a former read-modify-write through GET /posts/{id}/edit →
-// full-state PUT /posts/{id}. The PUT path round-tripped the whole edit
-// response, and the edit response drops 7 of 19 top-level keys; most are
-// form pickers but the round-trip could wipe fields the edit response omits
-// (texts:[] on a post whose edit returned no texts got "texts":[] on the PUT
-// — the wipe class the null-normalisation comment warns about). The
-// server-side move is strictly better: it touches only the schedule
-// association. No PUT is issued from this path.
-//
-// Note on buildPostUpdatePayload's schedule_id guard: that guard (non-zero
-// schedule_id on when_type=3) no longer runs on the move path — it existed
-// to stop a PUT writing schedule_id=0, while the batch move writes the
-// TARGET, so moving a post whose edit returned schedule_id=0 REPAIRS it
-// rather than wiping it. Do NOT re-add the guard here as a regression; the
-// move path is correct without it.
-//
-// when_type guard: only a schedule-driven post (publication_when_type=3) can
-// be moved between schedules. A non-schedule post (when_type 1=publish-now,
-// 2=at-a-fixed-date) is not schedule-bound; "moving" it is not meaningful.
-// One pre-move GET /posts/{id}/edit recovers when_type, and a non-3 value is
-// refused BEFORE the move, naming the actual when_type. BatchMovePosts does
-// NOT guard this (it would cost N pre-move GETs before the write); that
-// asymmetry is documented on BatchMovePosts.
-//
-// A move RE-SLOTS the post to the TAIL of the target queue, and the server
-// assigns the new publication_date. The batch endpoint returns just
-// {"success":true} with no per-post dates, so the new date is recovered from
-// a post-move GET /posts/{id}/edit — moving into a booked schedule is a
-// silent months-long delay otherwise (measured: into a booked schedule → a
-// date months out; into a stopped schedule → 01.01.1970). A failed date read
-// populates SlotLookupError and leaves PublicationDate nil — the move
-// succeeded (the post exists in the target schedule); the date is reporting.
-// A recovered date of 01.01.1970 or any past date populates Warning — the
-// signature of a move into a stopped schedule, which parks posts at the epoch
-// and would otherwise exit silently.
+// The server-side move re-slots the post to the TAIL of the target queue,
+// assigns the new publication_date, and preserves the post's texts,
+// attachments, page selection and per-source text variants (the body carries
+// only posts_ids + schedule_id, so nothing is overwritten). It replaced a
+// read-modify-write through GET /posts/{id}/edit -> full-state PUT /posts/{id}
+// that could wipe fields the edit response omits; no PUT is issued from this
+// path.
 //
 // Do NOT add a --date flag: an explicit publication_date on a when_type=3
 // post is rejected by the server, which still answers {"success":true} and
@@ -494,48 +467,11 @@ func buildPostUpdatePayload(op string, postID int, edit *PostEditResponse, texts
 // Documented in the official API reference (openapi.yaml): POST
 // /posts/batch/move and GET /posts/{id}/edit.
 func (c *Client) MovePost(ctx context.Context, postID, toScheduleID int) (*PostMoveResult, error) {
-	if postID <= 0 {
-		return nil, fmt.Errorf("hooppy: MovePost: postID must be a positive id (got %d) — an impossible id is accepted by the server and fabricates a success entry; pass a real post id", postID)
-	}
-	if toScheduleID <= 0 {
-		return nil, fmt.Errorf("hooppy: MovePost: toScheduleID must be a positive id (got %d) — a move targeted at no schedule (0) or a negative id would publish to nothing; the server accepts a negative and fabricates a success entry", toScheduleID)
-	}
-	// when_type guard: refuse a non-schedule-driven post BEFORE the move.
-	// The pre-move GET is the one place when_type is recoverable on the
-	// single-post path; the batch path skips this (N GETs before the write).
-	edit, err := c.GetPostEdit(ctx, postID)
-	if err != nil {
-		return nil, err
-	}
-	if edit.ID != 0 && edit.ID != postID {
-		return nil, fmt.Errorf("hooppy: MovePost: post %d /edit response carries id %d, not the requested post — not a recognisable post edit state; refusing the move", postID, edit.ID)
-	}
-	if edit.PublicationWhenType != 3 {
-		return nil, fmt.Errorf("hooppy: MovePost: post %d: publication_when_type=%d is not 3 (by schedule) — only a schedule-driven post can be moved between schedules; this post is %s and is not schedule-bound",
-			postID, edit.PublicationWhenType, whenTypeLabel(edit.PublicationWhenType))
-	}
-	// Reuse the batch move path: POST /posts/batch/move with the single id.
-	// BatchMovePosts guards the id/count/target, checks success==false, and
-	// recovers the per-post date (with the stopped-schedule warning). The
-	// server-side move preserves texts/attachments/page-selection because the
-	// body carries only posts_ids + schedule_id.
 	res, err := c.BatchMovePosts(ctx, []int{postID}, toScheduleID)
 	if err != nil {
-		// Wrap with MovePost's op and id so a BatchMovePosts failure surfaces
-		// as "hooppy: MovePost: post N: ..." — the same shape
-		// buildPostUpdatePayload uses one level down. Without this a MovePost
-		// guard failure reads "hooppy: BatchMovePosts: ..." while its own
-		// guards ten lines up say "hooppy: MovePost: ...".
 		return nil, fmt.Errorf("hooppy: MovePost: post %d: %w", postID, err)
 	}
-	m := res.Moved[0]
-	return &PostMoveResult{
-		Success:         res.Success,
-		ScheduleID:      m.ScheduleID,
-		PublicationDate: m.PublicationDate,
-		SlotLookupError: m.SlotLookupError,
-		Warning:         m.Warning,
-	}, nil
+	return res.SingleResult(), nil
 }
 
 // whenTypeLabel names a publication_when_type value for a refusal message.
@@ -601,8 +537,11 @@ const MaxBatchMoveIDs = 1000
 // post's new publication_date is recovered from a post-move GET /posts/{id}/edit
 // (one read per id). A read failure populates that entry's SlotLookupError and
 // leaves its PublicationDate nil — the move succeeded for that post; the date
-// is reporting. A per-post read failure does NOT abort the remaining reads. A
-// recovered date of 01.01.1970 or any past date populates that entry's Warning
+// is reporting. A per-post read failure does NOT abort the remaining reads,
+// except that the loop stops (BulkStop) at the first auth, rate-limit, cancelled
+// -context or no-answer failure and after MaxConsecutiveServerErrors 5xx in a
+// row; the ids left unread then carry a SlotLookupError saying "not attempted".
+// A recovered date of 01.01.1970 or any past date populates that entry's Warning
 // — the signature of a move into a stopped schedule (which parks posts at the
 // epoch and would otherwise exit silently).
 //
@@ -616,17 +555,21 @@ const MaxBatchMoveIDs = 1000
 // defect class ListPosts documents ("an impossible id returns the full
 // collection that looks filtered"). Refuse before the wire.
 //
-// when_type ASYMMETRY: unlike MovePost, BatchMovePosts does NOT refuse a
-// non-schedule-driven post (when_type != 3). Guarding it would cost one
-// pre-move GET /posts/{id}/edit PER id before the write — N extra requests
-// against a batch that exists to be one write. The single-post MovePost can
-// afford the one GET (it already needs a pre-move read for the guard and a
-// post-move read for the date); the batch path trades that guard for the
-// one-write contract. A caller moving a mixed batch should filter
-// non-schedule posts client-side first. The CLI and MCP handlers route a
-// single-id batch to MovePost so the when_type guard fires for N==1; for
-// N>1 this path runs and when_type is UNCHECKED — a non-schedule post in a
-// multi-id batch is moved without refusal.
+// when_type guard: the server's move turns ANY post into a schedule-driven one
+// (openapi.yaml: the post becomes publication_when_type=3, its old pages, sets
+// and schedules are unbound, and an already published post is re-armed). For a
+// publish-now (when_type=1) post that means publishing it a second time; for a
+// fixed-date (when_type=2) post it silently drops its own pages and date. So
+// every id is read first (GET /posts/{id}/edit) and the whole batch is refused,
+// naming every offender, BEFORE the move when any post is not when_type=3, when
+// its edit response carries another id, or when its edit cannot be read (the
+// guard fails closed). Cost: a batch of N ids sends 2N GET requests (one
+// when_type read before the move, one date read after it) plus one POST. The
+// guard stops at the first auth, rate-limit, cancelled-context or no-answer
+// failure, or after MaxConsecutiveServerErrors 5xx in a row, and refuses the
+// batch with that one error naming how many ids were not checked. The guard
+// checks when_type only: a when_type=3 post that has already published is still
+// re-armed by the move.
 //
 // Retry: POST /posts/batch/move is idempotent (moving to the same schedule
 // twice is the same end state), but doPOST has no retryable parameter and
@@ -649,6 +592,9 @@ func (c *Client) BatchMovePosts(ctx context.Context, ids []int, toScheduleID int
 	}
 	if toScheduleID <= 0 {
 		return nil, fmt.Errorf("hooppy: BatchMovePosts: toScheduleID must be a positive id (got %d) — a move targeted at no schedule (0) or a negative id would publish to nothing; the server accepts a negative and fabricates a success entry", toScheduleID)
+	}
+	if err := c.requireScheduleDriven(ctx, ids); err != nil {
+		return nil, err
 	}
 	strs := make([]string, len(ids))
 	for i, id := range ids {
@@ -673,8 +619,21 @@ func (c *Client) BatchMovePosts(ctx context.Context, ids []int, toScheduleID int
 	// NOT fatal — the move succeeded for that post; record SlotLookupError
 	// and continue so a single unreadable post does not hide the rest.
 	moved := make([]MovedPost, 0, len(ids))
+	var stop BulkStop
+	var stopped string // why the remaining ids are not read, "" while going on
 	for _, id := range ids {
+		if stopped != "" {
+			moved = append(moved, MovedPost{
+				ID:              id,
+				ScheduleID:      toScheduleID,
+				SlotLookupError: fmt.Sprintf("post-move GetPostEdit(%d) not attempted: %s — move succeeded, publication_date not recovered", id, stopped),
+			})
+			continue
+		}
 		after, err := c.GetPostEdit(ctx, id)
+		if halt, why := stop.Observe(err); halt {
+			stopped = why
+		}
 		if err != nil {
 			moved = append(moved, MovedPost{
 				ID:              id,
@@ -696,8 +655,48 @@ func (c *Client) BatchMovePosts(ctx context.Context, ids []int, toScheduleID int
 	return &BatchMovePostsResult{Success: resp.Success, Moved: moved}, nil
 }
 
-// DeletePost removes a single post by ID.
+// requireScheduleDriven is BatchMovePosts' when_type guard: it reads every id's
+// edit state and returns one error naming every post that cannot be moved
+// (not publication_when_type=3, a response for another post, or an unreadable
+// edit), or nil when all are schedule-driven. It issues only GETs, and stops
+// reading at the first failure that would repeat on every id (BulkStop), so a
+// 401, a 429 or a cancelled context costs one request, not N.
+func (c *Client) requireScheduleDriven(ctx context.Context, ids []int) error {
+	var refused []string
+	var stop BulkStop
+	for i, id := range ids {
+		edit, err := c.GetPostEdit(ctx, id)
+		if halt, _ := stop.Observe(err); halt {
+			// Auth, rate limit, no answer, a cancelled context or a server that
+			// keeps failing: every further read would repeat it. Refuse the
+			// batch with this one error instead of sending the rest.
+			var already string
+			if len(refused) > 0 {
+				already = fmt.Sprintf(" (already refused: %s)", strings.Join(refused, "; "))
+			}
+			return fmt.Errorf("hooppy: BatchMovePosts: refusing the move, nothing was moved — the when_type guard stopped at post %d, whose edit state could not be read, and %d of %d ids were not checked: %w%s", id, len(ids)-i-1, len(ids), err, already)
+		}
+		switch {
+		case err != nil:
+			refused = append(refused, fmt.Sprintf("post %d: edit state could not be read (%v) — the when_type guard fails closed", id, err))
+		case edit.ID != 0 && edit.ID != id:
+			refused = append(refused, fmt.Sprintf("post %d: /edit response carries id %d, not the requested post — not a recognisable post edit state", id, edit.ID))
+		case edit.PublicationWhenType != 3:
+			refused = append(refused, fmt.Sprintf("post %d: publication_when_type=%d is not 3 (by schedule) — this post is %s and is not schedule-bound", id, edit.PublicationWhenType, whenTypeLabel(edit.PublicationWhenType)))
+		}
+	}
+	if len(refused) == 0 {
+		return nil
+	}
+	return fmt.Errorf("hooppy: BatchMovePosts: refusing the move, nothing was moved — only a schedule-driven post (publication_when_type=3) can be moved between schedules, because the move would re-publish a published post or drop a fixed-date post's own pages and date: %s", strings.Join(refused, "; "))
+}
+
+// DeletePost removes a single post by ID. An id <= 0 is refused before any
+// request (it builds an invalid path).
 func (c *Client) DeletePost(ctx context.Context, id int) (*DeletePostResponse, error) {
+	if id <= 0 {
+		return nil, fmt.Errorf("hooppy: DeletePost: id must be a positive post id (got %d); a zero or negative id builds an invalid path (/posts/%d)", id, id)
+	}
 	var resp DeletePostResponse
 	if err := c.doDELETE(ctx, fmt.Sprintf(pathPostDelete, id), &resp, true); err != nil {
 		return nil, err
@@ -712,13 +711,20 @@ const MaxBatchDeleteIDs = 1000
 
 // BatchDeletePosts removes multiple posts by ID. IDs are joined with commas.
 // A maximum of MaxBatchDeleteIDs IDs (1000) may be passed in a single call;
-// larger batches must be split by the caller.
+// larger batches must be split by the caller. An id <= 0 is refused before any
+// request: the server accepts an impossible id and fabricates a success entry
+// for it. The response carries no per-id result (openapi.yaml: {"success":true}).
 func (c *Client) BatchDeletePosts(ctx context.Context, ids []int) (*DeletePostResponse, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("hooppy: BatchDeletePosts requires at least one ID")
 	}
 	if len(ids) > MaxBatchDeleteIDs {
 		return nil, fmt.Errorf("hooppy: BatchDeletePosts received %d IDs, max is %d — split into multiple calls", len(ids), MaxBatchDeleteIDs)
+	}
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, fmt.Errorf("hooppy: BatchDeletePosts: id must be a positive post id (got %d) — an impossible id is accepted by the server, which fabricates a success entry for it; pass only real post ids", id)
+		}
 	}
 	strs := make([]string, len(ids))
 	for i, id := range ids {
