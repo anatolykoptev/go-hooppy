@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -149,6 +150,54 @@ func moveTestServer(t *testing.T, preBody, postResp, postBody string,
 		}
 	}))
 	return srv, &requests, &postCalled, &getCalls
+}
+
+// editBodyForID rewrites the fixture's top-level post id so a stub can serve
+// the same edit state for any requested id (BatchMovePosts rejects an /edit
+// response that carries another post's id).
+func editBodyForID(body string, id int) string {
+	return strings.Replace(body, `"id":42,`, `"id":`+strconv.Itoa(id)+`,`, 1)
+}
+
+// batchMoveStub serves the batch-move flow for any ids: GET /posts/{id}/edit
+// answers preBody before POST /posts/batch/move and movedBody after it (both
+// with the requested id), failing the post-move read of failID (0 = none).
+// gets counts the reads per phase.
+type batchMoveStub struct {
+	*httptest.Server
+	preGets, postGets int
+	posted            bool
+	postBody          []byte
+}
+
+func newBatchMoveStub(t *testing.T, preBody, movedBody string, failID int) *batchMoveStub {
+	t.Helper()
+	st := &batchMoveStub{}
+	st.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move":
+			st.posted = true
+			st.postBody, _ = io.ReadAll(r.Body)
+			w.Write([]byte(`{"success":true}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/posts/") && strings.HasSuffix(r.URL.Path, "/edit"):
+			id, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/posts/"), "/edit"))
+			if !st.posted {
+				st.preGets++
+				w.Write([]byte(editBodyForID(preBody, id)))
+				return
+			}
+			st.postGets++
+			if id == failID {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"unavailable"}`))
+				return
+			}
+			w.Write([]byte(editBodyForID(movedBody, id)))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	return st
 }
 
 // TestMovePost_IssuesBatchMoveAndNoPUT is THE architectural guard: MovePost
@@ -589,34 +638,21 @@ func TestMovePost_PhotosAndVideo_SendsNoAttachmentBearingBody(t *testing.T) {
 // posts_ids-is-a-string assertion fails (the body carries an array), and
 // the production server returns 500.
 func TestBatchMovePosts_PostsIDsIsCommaJoinedString(t *testing.T) {
-	var postBody []byte
-	var postCalled bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move" {
-			postCalled = true
-			postBody, _ = io.ReadAll(r.Body)
-			w.Write([]byte(`{"success":true}`))
-			return
-		}
-		if r.Method == http.MethodGet {
-			w.Write([]byte(movedEditBody))
-			return
-		}
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
+	st := newBatchMoveStub(t, scheduleDrivenEditBody, movedEditBody, 0)
+	defer st.Close()
+	postBody, postCalled := &st.postBody, &st.posted
+	c := newTestClient(t, st.Server)
 
 	if _, err := c.BatchMovePosts(context.Background(), []int{1, 2, 3}, 55576); err != nil {
 		t.Fatalf("BatchMovePosts: %v", err)
 	}
-	if !postCalled {
+	if !*postCalled {
 		t.Fatal("POST /posts/batch/move was never issued")
 	}
 
 	var body map[string]interface{}
-	if err := json.Unmarshal(postBody, &body); err != nil {
-		t.Fatalf("unmarshal POST body: %v (body=%s)", err, postBody)
+	if err := json.Unmarshal(*postBody, &body); err != nil {
+		t.Fatalf("unmarshal POST body: %v (body=%s)", err, *postBody)
 	}
 	got, ok := body["posts_ids"]
 	if !ok {
@@ -640,23 +676,9 @@ func TestBatchMovePosts_PostsIDsIsCommaJoinedString(t *testing.T) {
 // with no per-post dates, so each post's new publication_date MUST be
 // recovered from a post-move GET /posts/{id}/edit (one read per id).
 func TestBatchMovePosts_ReportsPerPostPublicationDate(t *testing.T) {
-	var postCalled bool
-	var getCalls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move" {
-			postCalled = true
-			w.Write([]byte(`{"success":true}`))
-			return
-		}
-		if r.Method == http.MethodGet {
-			getCalls++
-			w.Write([]byte(movedEditBody))
-			return
-		}
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
+	st := newBatchMoveStub(t, scheduleDrivenEditBody, movedEditBody, 0)
+	defer st.Close()
+	c := newTestClient(t, st.Server)
 
 	res, err := c.BatchMovePosts(context.Background(), []int{10, 20, 30}, 55576)
 	if err != nil {
@@ -665,7 +687,7 @@ func TestBatchMovePosts_ReportsPerPostPublicationDate(t *testing.T) {
 	if !res.Success {
 		t.Fatal("Success = false, want true")
 	}
-	if !postCalled {
+	if !st.posted {
 		t.Fatal("POST /posts/batch/move was never issued")
 	}
 	if len(res.Moved) != 3 {
@@ -683,8 +705,8 @@ func TestBatchMovePosts_ReportsPerPostPublicationDate(t *testing.T) {
 			t.Errorf("Moved[%d].PublicationDate.Date = %q, want \"15.01.2027\"", m.ID, m.PublicationDate.Date)
 		}
 	}
-	if getCalls != 3 {
-		t.Errorf("post-move GET /posts/{id}/edit issued %d times, want 3 (one per id, no paged walk)", getCalls)
+	if st.preGets != 3 || st.postGets != 3 {
+		t.Errorf("GET /posts/{id}/edit issued %d times before and %d after the move, want 3 and 3 (one when_type-guard read and one date read per id, no paged walk)", st.preGets, st.postGets)
 	}
 }
 
@@ -692,26 +714,9 @@ func TestBatchMovePosts_ReportsPerPostPublicationDate(t *testing.T) {
 // verifies the non-fatal per-post date-recovery contract: a read failure
 // for one post MUST NOT abort the remaining reads.
 func TestBatchMovePosts_PostMoveReadFailure_ContinuesAndRecordsError(t *testing.T) {
-	var getCalls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/posts/batch/move" {
-			w.Write([]byte(`{"success":true}`))
-			return
-		}
-		if r.Method == http.MethodGet {
-			getCalls++
-			if getCalls == 2 {
-				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(`{"error":"unavailable"}`))
-				return
-			}
-			w.Write([]byte(movedEditBody))
-			return
-		}
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}))
-	defer srv.Close()
-	c := newTestClient(t, srv)
+	st := newBatchMoveStub(t, scheduleDrivenEditBody, movedEditBody, 20)
+	defer st.Close()
+	c := newTestClient(t, st.Server)
 
 	res, err := c.BatchMovePosts(context.Background(), []int{10, 20, 30}, 55576)
 	if err != nil {

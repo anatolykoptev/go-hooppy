@@ -361,7 +361,7 @@ func visitOps(fd *ast.FuncDecl, clientMethods map[string]bool, opsFuncs map[stri
 }
 
 // regEntry is one ops.Registry row read from the AST.
-type regEntry struct{ cliPath, mcpTool string }
+type regEntry struct{ cliPath, mcpTool, mcpSingle string }
 
 func registryEntries(pkg map[string]*ast.File) map[string]regEntry {
 	out := map[string]regEntry{}
@@ -382,7 +382,7 @@ func registryEntries(pkg map[string]*ast.File) map[string]regEntry {
 				}
 			}
 			if kv["Name"] != "" && kv["CLIPath"] != "" && kv["MCPTool"] != "" {
-				out[kv["Name"]] = regEntry{cliPath: kv["CLIPath"], mcpTool: kv["MCPTool"]}
+				out[kv["Name"]] = regEntry{cliPath: kv["CLIPath"], mcpTool: kv["MCPTool"], mcpSingle: kv["MCPSingle"]}
 			}
 			return true
 		})
@@ -413,7 +413,8 @@ func entryVarNames(body *ast.BlockStmt) map[string]string {
 }
 
 // toolName reads Name from an &mcp.Tool{...} literal: a string literal, or
-// <entryVar>.MCPTool resolved through the ops registry.
+// <entryVar>.MCPTool (or .MCPSingle, the single-id tool) resolved through the
+// ops registry.
 func toolName(arg ast.Expr, entryVars map[string]string, entries map[string]regEntry) string {
 	u, ok := arg.(*ast.UnaryExpr)
 	if !ok {
@@ -436,8 +437,13 @@ func toolName(arg ast.Expr, entryVars map[string]string, entries map[string]regE
 			s, _ := strconv.Unquote(v.Value)
 			return s
 		case *ast.SelectorExpr:
-			if id, ok := v.X.(*ast.Ident); ok && v.Sel.Name == "MCPTool" {
-				return entries[entryVars[id.Name]].mcpTool
+			if id, ok := v.X.(*ast.Ident); ok {
+				switch v.Sel.Name {
+				case "MCPTool":
+					return entries[entryVars[id.Name]].mcpTool
+				case "MCPSingle":
+					return entries[entryVars[id.Name]].mcpSingle
+				}
 			}
 		}
 	}

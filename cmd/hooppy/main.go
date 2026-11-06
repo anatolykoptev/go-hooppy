@@ -251,19 +251,24 @@ func registerPosts(root *cobra.Command) {
 		printJSON(resp)
 	}
 
-	// posts delete
+	// posts delete — one post (positional <post-id>) or many (--ids). Command
+	// name, flag set and input type come from the ops.Registry entry.
+	deleteEntry := ops.MustEntry("DeletePosts")
 	deleteCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
-		Name:  "delete",
-		Short: "Delete a post by ID",
+		Name:  deleteEntry.CLILeaf() + " [post-id]",
+		Short: "Delete a post by ID, or several with --ids",
 	})
-	deleteCmd.Args = cobra.ExactArgs(1)
+	deleteCmd.Args = cobra.MaximumNArgs(1)
+	if err := RegisterOpFlags(deleteCmd, deleteEntry.Input); err != nil {
+		panic(err)
+	}
 	deleteCmd.Run = func(_ *cobra.Command, args []string) {
-		id, err := strconv.Atoi(args[0])
-		die(err)
-		c := mustClient()
-		resp, err := c.DeletePost(context.Background(), id)
-		die(err)
-		printJSON(resp)
+		in, err := deleteInputFromCmd(deleteCmd, args)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(runDeletePosts(context.Background(), mustClient(), os.Stdout, os.Stderr, in))
 	}
 
 	// posts where — per page, where a post is published and its public URL.
@@ -286,46 +291,44 @@ func registerPosts(root *cobra.Command) {
 		os.Exit(runPostsWhere(context.Background(), mustClient(), os.Stdout, os.Stderr, id, in))
 	}
 
-	// posts move — move a post (or batch) to another schedule.
-	// A move re-slots the post to the TAIL of the target queue; the server
-	// assigns the new publication_date, which is reported per post (moving
-	// into a booked schedule is a silent months-long delay otherwise).
+	// posts move — move a post (positional <post-id>) or a batch (--ids) to
+	// another schedule. A move re-slots the post to the TAIL of the target
+	// queue; the server assigns the new publication_date, which is reported
+	// per post (moving into a booked schedule is a silent months-long delay
+	// otherwise).
+	moveEntry := ops.MustEntry("MovePosts")
 	moveCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
-		Name:  "move [post-id]",
+		Name:  moveEntry.CLILeaf() + " [post-id]",
 		Short: "Move a post (or batch) to another schedule",
 	})
 	moveCmd.Args = cobra.MaximumNArgs(1)
-	var moveIDs string
-	var moveToSchedule int
-	moveCmd.Flags().StringVar(&moveIDs, "ids", "", "comma-separated post IDs (batch move; mutually exclusive with the positional post-id arg)")
-	moveCmd.Flags().IntVar(&moveToSchedule, "to-schedule", 0, "target schedule ID (required)")
+	if err := RegisterOpFlags(moveCmd, moveEntry.Input); err != nil {
+		panic(err)
+	}
 	_ = moveCmd.MarkFlagRequired("to-schedule")
 	moveCmd.Run = func(_ *cobra.Command, args []string) {
-		target, err := resolveMoveTarget(args, moveIDs)
+		in, positional, err := moveInputFromCmd(moveCmd, args)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		c := mustClient()
-		if target.batch {
-			os.Exit(runBatchMove(context.Background(), c, os.Stdout, os.Stderr, target.ids, moveToSchedule))
-		}
-		os.Exit(runMovePost(context.Background(), c, os.Stdout, os.Stderr, target.singleID, moveToSchedule))
+		os.Exit(runMovePosts(context.Background(), mustClient(), os.Stdout, os.Stderr, in, positional))
 	}
 
 	// posts edit — view a post's full editable state
+	editEntry := ops.MustEntry("GetPostEdit")
 	editPostCmd := cli.RegisterSubcommand(postsCmd, cli.SubcommandConfig{
-		Name:  "edit",
+		Name:  editEntry.CLILeaf() + " <post-id>",
 		Short: "View a post's full editable state (texts, attachments, schedule)",
 	})
 	editPostCmd.Args = cobra.ExactArgs(1)
+	if err := RegisterOpFlags(editPostCmd, editEntry.Input); err != nil {
+		panic(err)
+	}
 	editPostCmd.Run = func(_ *cobra.Command, args []string) {
 		id, err := strconv.Atoi(args[0])
 		die(err)
-		c := mustClient()
-		edit, err := c.GetPostEdit(context.Background(), id)
-		die(err)
-		printJSON(edit)
+		os.Exit(runGetPostEdit(context.Background(), mustClient(), os.Stdout, os.Stderr, id))
 	}
 
 	// posts update — two modes: text-only (preserve schedule+attachments) or full

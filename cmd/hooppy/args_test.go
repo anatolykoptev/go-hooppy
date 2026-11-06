@@ -223,13 +223,13 @@ func TestArgs_PositionalRightCountRuns(t *testing.T) {
 }
 
 // TestCommandWiring_MoveAndQueueSubcommands is the cobra wiring guard
-// (item O): resolveMoveTarget is well covered but could be correct and
+// (item O): the move runner is well covered but could be correct and
 // unwired. This test builds the root command and asserts the `move` and
 // `queue` subcommands exist, their Use strings name the positionals,
 // --to-schedule is marked required on `move`, --page is wired on `queue`,
 // and the Run closures are non-nil (the actual execution path — Run calls
-// resolveMoveTarget → runMovePost/runBatchMove — is covered by the direct
-// tests of those functions; the move Run calls os.Exit so it cannot be
+// moveInputFromCmd → runMovePosts — is covered by the direct tests of those
+// functions; the move Run calls os.Exit so it cannot be
 // driven via Execute in-process).
 //
 // RED-on-revert: remove the moveCmd registration, drop MarkFlagRequired, or
@@ -298,10 +298,10 @@ func TestCommandWiring_MoveAndQueueSubcommands(t *testing.T) {
 
 	// Run closures MUST be non-nil — a command with a nil Run is a group,
 	// not a leaf, and would silently do nothing when invoked. The move Run
-	// calls resolveMoveTarget → runMovePost/runBatchMove (both directly
-	// tested); the queue Run calls runScheduleQueue (directly tested).
+	// calls moveInputFromCmd → runMovePosts (both directly tested); the
+	// queue Run calls runScheduleQueue (directly tested).
 	if moveCmd.Run == nil {
-		t.Error("move command has a nil Run — it would do nothing when invoked; Run must call resolveMoveTarget and the move path")
+		t.Error("move command has a nil Run — it would do nothing when invoked; Run must call moveInputFromCmd and runMovePosts")
 	}
 	if queueCmd.Run == nil {
 		t.Error("queue command has a nil Run — it would do nothing when invoked; Run must call runScheduleQueue")

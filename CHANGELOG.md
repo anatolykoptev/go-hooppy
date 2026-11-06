@@ -9,6 +9,23 @@
 
 ### Changed
 
+* **`posts delete` / `posts move` / `posts edit` and their MCP tools now run on the shared `ops` layer (#164, #165, #167, #172).**
+  * One op each (`ops.DeletePosts`, `ops.MovePosts`, `ops.GetPostEdit`) serves the single and the batch form on both surfaces; `hooppy_delete_post` and `hooppy_move_post` stay as single-id adapters of the same ops.
+  * `posts delete` accepts `--ids 1,2,3` as well as the positional id (#164). The two are mutually exclusive.
+  * New MCP tool `hooppy_get_post_edit` returns the same JSON as `posts edit` (#167).
+* **BEHAVIOUR CHANGE — delete refuses bad id lists before any request (#165).**
+  * An empty list, an id <= 0 or a repeated id is refused: exit 1 on the CLI, a tool error on MCP, zero HTTP requests. On main an id 0 reached the server, which can fabricate a success entry for it or fail the whole call.
+  * `hooppy_batch_delete_posts` `ids` now also accepts a comma string (`"5,6"`), like the other id lists.
+* **BEHAVIOUR CHANGE — delete reports every id and has a partial exit code.**
+  * The result is `{success, deleted:[…], failed:[{id,error}], note}`; `success` is kept, so `{"success": true}` readers still work.
+  * When the server refuses the whole batch request (an HTTP error other than 401/403/429, or `success:false`), the ids are now deleted one by one so the result says which ones went. The batch endpoint itself carries no per-id answer. The batch endpoint itself carries no per-id answer. An id that a half-applied batch had already removed then shows up as `failed` (the server answers not found); a 401, 403 or 429 stops the per-id run and marks the rest `not attempted`.
+  * Exit codes: 0 every id deleted, 1 error or nothing deleted, 2 partial (the full record is on stdout). On MCP a partial outcome is `{status:"partial", result, partial_error}`, not a tool error.
+* **BEHAVIOUR CHANGE — batch move is guarded like the single move (#172).**
+  * `posts move --ids …` with more than one id and `hooppy_batch_move_posts` used to move non-schedule posts without a check. The server's move turns any post into a schedule-driven one, so a publish-now post would be published again and a fixed-date post would lose its own pages and date.
+  * Every id is now read first (`GET /posts/{id}/edit`, one extra read per id). If any post is not `publication_when_type=3`, carries another id, or cannot be read, the WHOLE batch is refused before the move and the error names each such post.
+  * The guard lives in `BatchMovePosts`, so library callers get it too; `MovePost` is now a batch of one. The guard checks when_type only: a `when_type=3` post that already published is still re-armed by the move.
+* **`posts move` output and arguments.** The positional form keeps the flat `{success, schedule_id, publication_date}`; `--ids` keeps `{success, moved:[…]}`, now for one id as well (as before). Warnings on stderr use the batch wording for both. `--ids` is now an integer-list flag: `--ids ""`, a non-integer and a space after a comma (`1, 2`) are flag errors (the old parser trimmed spaces). The target schedule must be positive.
+* **Library: `DeletePost` and `BatchDeletePosts` refuse an id <= 0 before any request, and `BatchMovePosts` runs the when_type guard (one extra read per id; see above).** `MovePost` is `BatchMovePosts` with one id.
 * **One shared builder for `search copy` / `search rewrite` / `search import` (#139, #140, #141, audit F-7).**
   * Three `ops` functions now own validation and request building for both the CLI and the MCP tools, replacing six hand-kept builders.
   * Contradictory combinations are refused before any request, with exit 1 on the CLI and a tool error on MCP:

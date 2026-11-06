@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/anatolykoptev/go-hooppy/ops"
@@ -56,6 +57,28 @@ func TestOpsRegistry_MCPEntriesResolve(t *testing.T) {
 		schemas[tool.Name] = tool.InputSchema
 	}
 	for _, e := range ops.Registry {
+		if e.MCPSingle != "" {
+			if !toolsByName[e.MCPSingle] {
+				t.Errorf("registry entry %q: single-id MCP tool %q is not registered on the server", e.Name, e.MCPSingle)
+			} else {
+				// The single-id tool hand-declares its input struct, so a field
+				// added to the op's Input must reach it too. Id lists are the
+				// one difference by design ({id} instead of {ids}).
+				singleProps := schemaPropertyNames(t, schemas[e.MCPSingle])
+				for _, f := range ops.InputFields(e.Input) {
+					ft := f.Type
+					if ft.Kind() == reflect.Pointer {
+						ft = ft.Elem()
+					}
+					if ft == idListType || f.FlagName == "-" || f.JSONName == "" {
+						continue
+					}
+					if !singleProps[f.JSONName] {
+						t.Errorf("%s (%s): the single-id tool's input schema is missing property %q (field %s) — add it to the hand-kept input struct", e.MCPSingle, e.Name, f.JSONName, f.GoName)
+					}
+				}
+			}
+		}
 		if !toolsByName[e.MCPTool] {
 			t.Errorf("registry entry %q: MCP tool %q is not registered on the server", e.Name, e.MCPTool)
 			continue
@@ -95,6 +118,9 @@ func TestOpsRegistry_MCPBacklogReport(t *testing.T) {
 	migrated := map[string]bool{}
 	for _, e := range ops.Registry {
 		migrated[e.MCPTool] = true
+		if e.MCPSingle != "" {
+			migrated[e.MCPSingle] = true
+		}
 	}
 	var backlog []string
 	for _, tool := range res.Tools {
