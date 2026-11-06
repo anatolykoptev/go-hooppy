@@ -105,6 +105,13 @@
 * **`parseMetricFloat`/`parseMetricInt` silent 1000×-wrong value on a decimal comma** (#65): the accessors stripped commas before `ParseFloat`/`Atoi`, so a decimal-comma string from the vendor's Russian locale (`"0,520"` = the ratio 0.520) silently became `520.0` with `err==nil`, and `"1,2,3"` became `123` on the int path — the exact silent-wrongness class these accessors exist to prevent. The shape is now validated BEFORE stripping: only a plain decimal or a comma-thousands-grouped number is accepted; a leading-zero head followed by a comma (`"0,520"`), non-thousands-grouped commas (`"1,2,3"`, `"3,14"`), and other-locale separators (`"1 234"`, `"1.234,56"`) return an error.
 * **Negative metric thresholds fell through the refusal guard** (#65): the guard used `> 0`, so a caller passing `-1` (directly, or from a computed threshold like `avg-stddev` going negative) took neither branch — no error, no parameter, an unfiltered result while the help stated the flag errors. The guard now fires on `!= 0` for the four ints and the float.
 * **BEHAVIOUR CHANGE — negative page/ID filters now error across all list endpoints** (#65): every list endpoint that took a page or ID filter gated on `> 0` had the same silent-negative hole — a negative took neither branch (no error, no parameter), so the server returned an unfiltered or first-page result that looked filtered. `ListAccounts`, `ListPages`, `ListPosts`, `ListSearchPosts`, `ListProjects`, `ListSchedules`, `ListWatermarks`, and `ListNotifications` now reject negative page/ID values with an error before any request is issued; zero stays the unset sentinel. This is BEHAVIOUR-CHANGING for consumers that previously passed a negative (e.g. `--page -1` via the CLI's signed `IntVar`, or a computed `page-1` that underflowed): they got a result set and now get an error. Under `release-please` this ships as a `fix:` patch bump; callers must pass 0 (or omit) to leave a filter unset.
+## [1.4.0](https://github.com/anatolykoptev/go-hooppy/compare/v1.3.0...v1.4.0) (2026-11-06)
+
+
+### Added
+
+* **ops:** posts delete/move/get-edit on the shared op layer ([#164](https://github.com/anatolykoptev/go-hooppy/issues/164), [#165](https://github.com/anatolykoptev/go-hooppy/issues/165), [#167](https://github.com/anatolykoptev/go-hooppy/issues/167), [#172](https://github.com/anatolykoptev/go-hooppy/issues/172)) ([#180](https://github.com/anatolykoptev/go-hooppy/issues/180)) ([3a18468](https://github.com/anatolykoptev/go-hooppy/commit/3a1846891f8bc2a7b16aeeabce0edab8892a1456))
+
 ## [1.3.0](https://github.com/anatolykoptev/go-hooppy/compare/v1.2.2...v1.3.0) (2026-11-04)
 
 
