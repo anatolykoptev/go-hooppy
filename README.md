@@ -534,3 +534,5 @@ resp, err := client.SearchPosts(context.Background(), postPayload)
 ## License
 
 Apache 2.0 — same as the Hooppy OpenAPI specification.
+
+<!-- throwaway docs-only proof -->
