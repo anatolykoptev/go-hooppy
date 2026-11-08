@@ -39,6 +39,9 @@ echo -n "eyJ0eXAiOiJKV1Qi..." > ~/.config/hooppy/token
 chmod 600 ~/.config/hooppy/token
 ```
 
+Other variables: `HOOPPY_BASE_URL` overrides the API base URL (default in `endpoints.go`), and
+`hooppy-mcp` in HTTP mode listens on `MCP_PORT` (default `8080`); pass `--stdio` for stdio.
+
 ## Client library usage
 
 ```go
@@ -530,6 +533,16 @@ postPayload := hooppy.PostPublishNowPayload{
 }
 resp, err := client.SearchPosts(context.Background(), postPayload)
 ```
+
+## Status
+
+Released as semver tags with release-please (see [CHANGELOG.md](CHANGELOG.md)). The client covers
+a subset of the documented operations; the coverage table above is generated and shows which.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md); coding agents start at [CLAUDE.md](CLAUDE.md). Every
+document is listed in [docs/INDEX.md](docs/INDEX.md).
 
 ## License
 
