@@ -38,7 +38,7 @@ const (
 	pathPostUpdate     = "/posts/%d"
 	pathPostsSearch    = "/posts/search"
 	pathPostsSources   = "/posts/sources"
-	// Posts search (scraping external pages) — UNDOCUMENTED.
+	// Posts search (collecting from external pages) — UNDOCUMENTED.
 	pathPostsSearchIndex      = "/posts-search"
 	pathPostsSearchSources    = "/posts-search/source-resources"
 	pathPostsSearchParseForm  = "/posts-search/parsing/form"

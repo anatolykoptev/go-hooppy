@@ -442,7 +442,7 @@ func (c *Client) GetParsingForm(ctx context.Context) (*ParsingFormResponse, erro
 	return &resp, nil
 }
 
-// StartParsing launches a scraping job that pulls posts from the external
+// StartParsing launches a collection job that pulls posts from the external
 // social media pages configured in the given source resource. The job runs
 // asynchronously on the server; poll GetParsingForm to check completion.
 //
@@ -461,7 +461,7 @@ func (c *Client) StartParsing(ctx context.Context, payload ParsingStartPayload) 
 	return &resp, nil
 }
 
-// StopParsing cancels any in-progress scraping job.
+// StopParsing cancels any in-progress collection job.
 //
 // The path is /posts-search/parsing/stop, not /posts-search/parsing. Both
 // exist and both answer {"success":true}; only the /stop suffix cancels
