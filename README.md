@@ -39,6 +39,9 @@ echo -n "eyJ0eXAiOiJKV1Qi..." > ~/.config/hooppy/token
 chmod 600 ~/.config/hooppy/token
 ```
 
+Other variables: `HOOPPY_BASE_URL` overrides the API base URL (default in `endpoints.go`), and
+`hooppy-mcp` in HTTP mode listens on `MCP_PORT` (default `8080`); pass `--stdio` for stdio.
+
 ## Client library usage
 
 ```go
@@ -201,8 +204,8 @@ hooppy search sources                          # list configured source resource
 hooppy search posts --source-type 1  # list scraped posts (1=social, 2=RSS)
 hooppy search posts --source-type 1 --text "search query" --date-from 01.01.2026
 hooppy search status                           # check if parsing is in progress
-hooppy search parse --source-resource-id <id> --account-id <id>  # start scraping
-hooppy search stop                             # stop in-progress scraping
+hooppy search parse --source-resource-id <id> --account-id <id>  # start collecting
+hooppy search stop                             # stop in-progress collection
 hooppy search copy --post-id <id> --to <page-id>  # DEPRECATED: alias for 'search import' (resolve+publish); use 'search import' instead
 hooppy search rewrite --post-id <id> --text "..." --to <page-id>  # rewrite with custom text (attachments preserved)
 hooppy search rewrite --post-id <id> --text "..." --to <page-id> --no-attachments  # rewrite, strip attachments
@@ -305,9 +308,9 @@ hooppy-mcp   # starts on :8080 with /mcp endpoint
 | `hooppy_disconnect_page` | Disconnect a social media page |
 | `hooppy_list_search_posts` | List posts scraped from external pages (UNDOCUMENTED) |
 | `hooppy_list_source_resources` | List configured source resources to scrape from (UNDOCUMENTED) |
-| `hooppy_parsing_status` | Check scraping status + available parsers (UNDOCUMENTED) |
-| `hooppy_start_parsing` | Start scraping posts from an external source (UNDOCUMENTED) |
-| `hooppy_stop_parsing` | Stop in-progress scraping job (UNDOCUMENTED) |
+| `hooppy_parsing_status` | Check collection status + available parsers (UNDOCUMENTED) |
+| `hooppy_start_parsing` | Start collecting posts from an external source (UNDOCUMENTED) |
+| `hooppy_stop_parsing` | Stop in-progress collection job (UNDOCUMENTED) |
 | `hooppy_copy_search_post` | Deprecated: copy a scraped post to your pages (now delegates to resolve+publish; use `hooppy_import_search_post` instead) (UNDOCUMENTED) |
 | `hooppy_rewrite_search_post` | Rewrite one or more scraped posts with custom text (single) or batch keeping original text (UNDOCUMENTED) |
 | `hooppy_import_search_post` | Import one or more scraped posts (single or batch; keeps original text + attachments) (UNDOCUMENTED) |
@@ -530,6 +533,16 @@ postPayload := hooppy.PostPublishNowPayload{
 }
 resp, err := client.SearchPosts(context.Background(), postPayload)
 ```
+
+## Status
+
+Released as semver tags with release-please (see [CHANGELOG.md](CHANGELOG.md)). The client covers
+a subset of the documented operations; the coverage table above is generated and shows which.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md); coding agents start at [CLAUDE.md](CLAUDE.md). Every
+document is listed in [docs/INDEX.md](docs/INDEX.md).
 
 ## License
 
