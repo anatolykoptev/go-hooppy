@@ -1048,7 +1048,7 @@ func registerSearch(root *cobra.Command) {
 	// search parse
 	parseCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
 		Name:  "parse",
-		Short: "Start scraping posts from an external source resource",
+		Short: "Start collecting posts from an external source resource",
 	})
 	parseCmd.Args = cobra.NoArgs
 	var pSourceType, pSearchType, pSourceID, pSourceResourceID, pAccountID int
@@ -1088,7 +1088,7 @@ func registerSearch(root *cobra.Command) {
 	// search stop
 	stopCmd := cli.RegisterSubcommand(searchCmd, cli.SubcommandConfig{
 		Name:  "stop",
-		Short: "Stop any in-progress scraping job",
+		Short: "Stop any in-progress collection job",
 	})
 	stopCmd.Args = cobra.NoArgs
 	stopCmd.Run = func(_ *cobra.Command, _ []string) {

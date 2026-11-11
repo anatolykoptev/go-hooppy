@@ -783,7 +783,7 @@ func TestStopParsing(t *testing.T) {
 // _Retried/_NotRetried pairs in retry_policy_test.go cover PUT only.
 //
 // Two things must hold. A transient 500 has to be retried, because a cancel
-// that silently gives up leaves a scraping job running for its full duration
+// that silently gives up leaves a collection job running for its full duration
 // (measured at 256.9s). And every attempt has to land on the SAME path — a
 // retry that fell through to the suffix-less sibling would answer success
 // while cancelling nothing, which is the exact regression this file's sibling

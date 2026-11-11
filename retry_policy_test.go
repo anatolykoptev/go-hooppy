@@ -119,7 +119,7 @@ var retryPolicies = map[string]struct {
 	"ListAllCrossPostingsWithTotal": {retryComposite, false},
 	"GetCrossPostingEdit":           {retryAllowed, false},
 	"GetCrossPostingStatistics":     {retryAllowed, false},
-	// --- posts search (scraping) ---
+	// --- posts search (collection) ---
 	"ListSearchPosts":                         {retryAllowed, false},
 	"ListAllSearchPosts":                      {retryComposite, false},
 	"ListAllSearchPostsWithTotal":             {retryComposite, false},

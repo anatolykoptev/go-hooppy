@@ -80,7 +80,7 @@ func registerTools(server *mcp.Server) {
 	registerBatchMovePosts(server)
 	registerPostWhere(server)
 	registerGetPostEdit(server)
-	// Posts search (scraping external pages) — UNDOCUMENTED
+	// Posts search (collecting from external pages) — UNDOCUMENTED
 	registerListSearchPosts(server)
 	registerListSourceResources(server)
 	registerGetParsingForm(server)
@@ -1385,7 +1385,7 @@ func registerDeleteProxy(server *mcp.Server) {
 	)
 }
 
-// --- posts search (scraping external pages) — UNDOCUMENTED ---
+// --- posts search (collecting from external pages) — UNDOCUMENTED ---
 
 // --- list_search_posts ---
 
@@ -1573,7 +1573,7 @@ func registerStartParsing(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_start_parsing",
-			Description: "Start scraping posts from an external source resource (a group of social media pages). Runs asynchronously — poll parsing_status to check completion, then list_search_posts to get results. UNDOCUMENTED endpoint.",
+			Description: "Start collecting posts from an external source resource (a group of social media pages). Runs asynchronously — poll parsing_status to check completion, then list_search_posts to get results. UNDOCUMENTED endpoint.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in startParsingInput) (*mcp.CallToolResult, error) {
 			c, err := client()
@@ -1603,7 +1603,7 @@ func registerStopParsing(server *mcp.Server) {
 	mcpserver.AddTool(server,
 		&mcp.Tool{
 			Name:        "hooppy_stop_parsing",
-			Description: "Stop any in-progress scraping job. Reports the OBSERVED parsing state (is_parsing_in_progress) re-read from parsing_status after the cancel — NOT the DELETE's own success body, which the server answers {\"success\":true} for even when nothing was cancelled (issue #114). A stop is asynchronous server-side, so an immediate re-read may still show in_progress for a stop that will succeed; re-run parsing_status to confirm the transition. UNDOCUMENTED endpoint.",
+			Description: "Stop any in-progress collection job. Reports the OBSERVED parsing state (is_parsing_in_progress) re-read from parsing_status after the cancel — NOT the DELETE's own success body, which the server answers {\"success\":true} for even when nothing was cancelled (issue #114). A stop is asynchronous server-side, so an immediate re-read may still show in_progress for a stop that will succeed; re-run parsing_status to confirm the transition. UNDOCUMENTED endpoint.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, error) {
 			c, err := client()

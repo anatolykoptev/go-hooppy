@@ -1562,7 +1562,7 @@ type PostsResponse struct {
 	RowsLimit int    `json:"rows_limit"`
 }
 
-// --- Posts search (scraping external pages) — UNDOCUMENTED ---
+// --- Posts search (collecting from external pages) — UNDOCUMENTED ---
 
 // SearchPostPhoto is a photo attachment in a scraped post.
 type SearchPostPhoto struct {
